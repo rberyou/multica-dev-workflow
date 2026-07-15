@@ -4,7 +4,7 @@
   "workflow": {
     "id": "development-delivery",
     "name": "开发交付小队",
-    "version": "1.0.0-rc.2",
+    "version": "1.0.0",
     "protocol_revision": "v2",
     "approver_role": "人工审批人"
   },

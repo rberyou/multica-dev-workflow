@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.0
+
+- Promote the workflow after adopting the existing squad and verifying zero drift.
+
 ## 1.0.0-rc.2
 
 - Add Windows directory-junction fallback for live Git-linked Skill installs.
