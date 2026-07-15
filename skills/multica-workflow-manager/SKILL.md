@@ -4,7 +4,7 @@ description: Plan, rebuild, update, verify, and audit a Git-managed Multica squa
 metadata:
   managed_by: multica-dev-workflow
   workflow_id: development-delivery
-  version: 1.0.0-rc.1
+  version: 1.0.0-rc.2
 ---
 
 # Multica Workflow Manager

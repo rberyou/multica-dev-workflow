@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.0-rc.2
+
+- Add Windows directory-junction fallback for live Git-linked Skill installs.
+
 ## 1.0.0-rc.1
 
 - Add declarative development squad and seven agent roles.

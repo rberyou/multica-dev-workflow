@@ -1278,7 +1278,21 @@ def install_skills(root: Path, target: Path, copy_mode: bool, replace_existing: 
             try:
                 os.symlink(source, destination, target_is_directory=True)
             except OSError:
-                shutil.copytree(source, destination)
-                mode = "copy-fallback"
+                if os.name == "nt":
+                    junction = subprocess.run(
+                        ["cmd.exe", "/d", "/c", "mklink", "/J", str(destination), str(source)],
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                    )
+                    if junction.returncode == 0:
+                        mode = "junction"
+                    else:
+                        shutil.copytree(source, destination)
+                        mode = "copy-fallback"
+                else:
+                    shutil.copytree(source, destination)
+                    mode = "copy-fallback"
         results.append({"skill": skill["name"], "mode": mode, "path": str(destination)})
     return results
