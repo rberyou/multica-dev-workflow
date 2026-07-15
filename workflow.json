@@ -1,0 +1,111 @@
+{
+  "$schema": "./workflow.schema.json",
+  "schema_version": 1,
+  "workflow": {
+    "id": "development-delivery",
+    "name": "开发交付小队",
+    "version": "1.0.0-rc.1",
+    "protocol_revision": "v2",
+    "approver_role": "人工审批人"
+  },
+  "skills": [
+    {
+      "key": "requirement-intake",
+      "name": "multica-requirement-intake",
+      "path": "skills/multica-requirement-intake",
+      "targets": ["local", "workspace"],
+      "attach_to": []
+    },
+    {
+      "key": "workflow-manager",
+      "name": "multica-workflow-manager",
+      "path": "skills/multica-workflow-manager",
+      "targets": ["local"],
+      "attach_to": []
+    }
+  ],
+  "agents": [
+    {
+      "key": "leader",
+      "name": "开发队长",
+      "description": "控制需求阶段、审批门禁和最终交付",
+      "runtime_binding": "codex-orchestrator",
+      "instruction_files": ["instructions/common.md", "instructions/roles/leader.md"],
+      "max_concurrent_tasks": 1,
+      "permission_mode": "public_to_workspace"
+    },
+    {
+      "key": "planner",
+      "name": "方案负责人",
+      "description": "设计实现方案、影响范围、Plan 版本和任务依赖图",
+      "runtime_binding": "codex-orchestrator",
+      "instruction_files": ["instructions/common.md", "instructions/roles/planner.md"],
+      "max_concurrent_tasks": 1,
+      "permission_mode": "public_to_workspace"
+    },
+    {
+      "key": "plan-reviewer",
+      "name": "方案审查员",
+      "description": "独立审查需求设计、影响范围和任务拆分",
+      "runtime_binding": "opencode-review",
+      "instruction_files": ["instructions/common.md", "instructions/roles/plan-reviewer.md"],
+      "max_concurrent_tasks": 1,
+      "permission_mode": "public_to_workspace"
+    },
+    {
+      "key": "integrator",
+      "name": "集成负责人",
+      "description": "管理需求分支、任务依赖、Review 交接、合并和 Plan 变更",
+      "runtime_binding": "codex-orchestrator",
+      "instruction_files": ["instructions/common.md", "instructions/roles/integrator.md"],
+      "max_concurrent_tasks": 1,
+      "permission_mode": "public_to_workspace"
+    },
+    {
+      "key": "developer-a",
+      "name": "开发工程师 A",
+      "description": "在独立任务 worktree 中实现、测试并提交 Task PR",
+      "runtime_binding": "codex-worker",
+      "instruction_files": ["instructions/common.md", "instructions/roles/developer.md"],
+      "max_concurrent_tasks": 1,
+      "permission_mode": "public_to_workspace"
+    },
+    {
+      "key": "developer-b",
+      "name": "开发工程师 B",
+      "description": "在独立任务 worktree 中实现、测试并提交 Task PR",
+      "runtime_binding": "codex-worker",
+      "instruction_files": ["instructions/common.md", "instructions/roles/developer.md"],
+      "max_concurrent_tasks": 1,
+      "permission_mode": "public_to_workspace"
+    },
+    {
+      "key": "code-reviewer",
+      "name": "代码审查员",
+      "description": "独立代码审查、测试验证和需求分支集成验收",
+      "runtime_binding": "opencode-review",
+      "instruction_files": ["instructions/common.md", "instructions/roles/code-reviewer.md"],
+      "max_concurrent_tasks": 1,
+      "permission_mode": "public_to_workspace"
+    }
+  ],
+  "squad": {
+    "key": "development-delivery",
+    "name": "开发交付小队",
+    "description": "跨项目复用的阶段门禁开发小队，由 Git 管理工作流与指令",
+    "leader": "leader",
+    "instruction_files": ["instructions/squad.md"],
+    "agent_members": [
+      {"agent": "leader", "role": "leader"},
+      {"agent": "planner", "role": "方案负责人"},
+      {"agent": "plan-reviewer", "role": "方案审查员"},
+      {"agent": "integrator", "role": "集成负责人"},
+      {"agent": "developer-a", "role": "开发工程师 A"},
+      {"agent": "developer-b", "role": "开发工程师 B"},
+      {"agent": "code-reviewer", "role": "代码审查员"}
+    ],
+    "human_members": [
+      {"selector": "current_user", "role": "人工审批人"}
+    ]
+  }
+}

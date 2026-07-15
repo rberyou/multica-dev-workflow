@@ -1,0 +1,4 @@
+interface:
+  display_name: "Multica 工作流管理"
+  short_description: "规划、同步、重建并审计 Git 管理的 Multica 小队工作流"
+  default_prompt: "Use $multica-workflow-manager to plan and reconcile the Git-managed Multica development workflow."

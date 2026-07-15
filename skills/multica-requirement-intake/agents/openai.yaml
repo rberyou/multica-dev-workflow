@@ -1,0 +1,4 @@
+interface:
+  display_name: "Multica 需求接入"
+  short_description: "帮助 Codex 与 OpenCode 创建并跟进 Multica 开发需求"
+  default_prompt: "Use $multica-requirement-intake to create and follow a top-level Multica requirement for the development squad."

@@ -1,0 +1,23 @@
+{
+  "name": "opencode-only",
+  "bindings": {
+    "codex-orchestrator": {
+      "provider": "opencode",
+      "model": "team-litellm/gpt-5.5",
+      "thinking_level": "",
+      "required_status": "online"
+    },
+    "codex-worker": {
+      "provider": "opencode",
+      "model": "team-litellm/gpt-5.5",
+      "thinking_level": "",
+      "required_status": "online"
+    },
+    "opencode-review": {
+      "provider": "opencode",
+      "model": "team-litellm/gpt-5.5",
+      "thinking_level": "",
+      "required_status": "online"
+    }
+  }
+}
