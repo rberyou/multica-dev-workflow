@@ -35,3 +35,5 @@ python scripts/workflow.py verify
 ```
 
 See `skills/multica-workflow-manager/SKILL.md` for the external Agent workflow.
+
+Tagged releases publish the requirement-intake Skill, workflow-manager Skill, complete repository bundle and SHA256 checksums.
