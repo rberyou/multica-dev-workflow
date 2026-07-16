@@ -402,6 +402,22 @@ def expected_assets_from_annotation(annotation: str) -> list[str]:
     return assets
 
 
+def annotated_tag_contents(root: Path, tag: str) -> str:
+    if not tag.startswith("v"):
+        raise ReleaseError("release tag must start with v")
+    object_type = run(
+        ["git", "cat-file", "-t", f"refs/tags/{tag}"], root, check=False
+    )
+    if object_type.returncode != 0 or object_type.stdout.strip() != "tag":
+        raise ReleaseError("release tag must be an annotated tag")
+    annotation = run(
+        ["git", "tag", "-l", tag, "--format=%(contents)"], root
+    ).stdout
+    if not annotation.strip():
+        raise ReleaseError("annotated release tag has no contents")
+    return annotation
+
+
 def verify_asset_directory(annotation: str, directory: Path) -> list[str]:
     expected = expected_assets_from_annotation(annotation)
     if not directory.is_dir():
@@ -887,7 +903,7 @@ def command_verify_tag(args: argparse.Namespace, root: Path) -> int:
     commit = run(["git", "rev-list", "-n", "1", tag], root).stdout.strip()
     if not commit:
         raise ReleaseError(f"tag not found: {tag}")
-    annotation = run(["git", "tag", "-l", tag, "--format=%(contents)"], root).stdout
+    annotation = annotated_tag_contents(root, tag)
     expected_assets = expected_assets_from_annotation(annotation)
     match = re.search(r"(?m)^release_plan_digest=([a-f0-9]{64})$", annotation)
     if not match:
@@ -983,11 +999,7 @@ def command_verify_tag(args: argparse.Namespace, root: Path) -> int:
 
 
 def command_verify_assets(args: argparse.Namespace, root: Path) -> int:
-    annotation = run(
-        ["git", "tag", "-l", args.tag, "--format=%(contents)"], root
-    ).stdout
-    if not annotation.strip():
-        raise ReleaseError(f"tag not found or has no annotation: {args.tag}")
+    annotation = annotated_tag_contents(root, args.tag)
     assets = verify_asset_directory(annotation, Path(args.directory).resolve())
     print(json.dumps({"tag": args.tag, "assets": assets}, indent=2))
     return 0

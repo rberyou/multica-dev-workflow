@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing approved release tag to recover
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -13,10 +19,33 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v5
         with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
           fetch-depth: 0
+      - name: Resolve approved release tag
+        shell: bash
+        run: |
+          [[ "${RELEASE_TAG}" == v* ]]
+          remote_tag_ref="refs/tags/${RELEASE_TAG}"
+          temporary_ref="refs/release-fetch/${GITHUB_RUN_ID}"
+          git fetch --no-tags origin "${remote_tag_ref}:${temporary_ref}"
+          remote_tag_object=$(git rev-parse "${temporary_ref}")
+          test "$(git cat-file -t "${remote_tag_object}")" = "tag"
+          if git show-ref --verify --quiet "${remote_tag_ref}"; then
+            test "$(git rev-parse "${remote_tag_ref}")" = "${remote_tag_object}"
+          else
+            git update-ref "${remote_tag_ref}" "${remote_tag_object}" ""
+          fi
+          git update-ref -d "${temporary_ref}"
+          release_sha=$(git rev-list -n 1 "${RELEASE_TAG}")
+          test -n "${release_sha}"
+          test "${release_sha}" = "$(git rev-parse HEAD)"
+          echo "RELEASE_SHA=${release_sha}" >> "${GITHUB_ENV}"
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
@@ -34,38 +63,38 @@ jobs:
         shell: bash
         run: |
           git fetch --no-tags origin main
-          git merge-base --is-ancestor "${GITHUB_SHA}" origin/main
-          python scripts/release.py verify-tag --tag "${GITHUB_REF_NAME}"
-          pr_count=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" \
-            --jq '[.[] | select(.merged_at != null and .base.ref == "main" and .merge_commit_sha == "'"${GITHUB_SHA}"'")] | length')
+          git merge-base --is-ancestor "${RELEASE_SHA}" origin/main
+          python scripts/release.py verify-tag --tag "${RELEASE_TAG}"
+          pr_count=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${RELEASE_SHA}/pulls" \
+            --jq '[.[] | select(.merged_at != null and .base.ref == "main" and .merge_commit_sha == "'"${RELEASE_SHA}"'")] | length')
           test "${pr_count}" -eq 1
-          green_count=$(gh run list --commit "${GITHUB_SHA}" --workflow validate --limit 20 \
+          green_count=$(gh run list --commit "${RELEASE_SHA}" --workflow validate --limit 20 \
             --json status,conclusion,headSha \
-            --jq '[.[] | select(.status == "completed" and .conclusion == "success" and .headSha == "'"${GITHUB_SHA}"'")] | length')
+            --jq '[.[] | select(.status == "completed" and .conclusion == "success" and .headSha == "'"${RELEASE_SHA}"'")] | length')
           test "${green_count}" -ge 1
       - name: Build release assets
         run: |
           mkdir -p build/release
-          python scripts/package_skills.py skills/multica-requirement-intake build/release/multica-requirement-intake-${GITHUB_REF_NAME}.zip
-          python scripts/package_skills.py skills/multica-workflow-manager build/release/multica-workflow-manager-${GITHUB_REF_NAME}.zip
-          python scripts/package_skills.py skills/multica-workflow-observer build/release/multica-workflow-observer-${GITHUB_REF_NAME}.zip
-          python scripts/package_skills.py skills/multica-workflow-maintainer build/release/multica-workflow-maintainer-${GITHUB_REF_NAME}.zip
-          git archive --format=zip --output=build/release/multica-dev-workflow-${GITHUB_REF_NAME}.zip HEAD
+          python scripts/package_skills.py skills/multica-requirement-intake build/release/multica-requirement-intake-${RELEASE_TAG}.zip
+          python scripts/package_skills.py skills/multica-workflow-manager build/release/multica-workflow-manager-${RELEASE_TAG}.zip
+          python scripts/package_skills.py skills/multica-workflow-observer build/release/multica-workflow-observer-${RELEASE_TAG}.zip
+          python scripts/package_skills.py skills/multica-workflow-maintainer build/release/multica-workflow-maintainer-${RELEASE_TAG}.zip
+          git archive --format=zip --output=build/release/multica-dev-workflow-${RELEASE_TAG}.zip "${RELEASE_TAG}"
           cd build/release
           sha256sum *.zip > checksums.txt
       - name: Verify approved release asset set
-        run: python scripts/release.py verify-assets --tag "${GITHUB_REF_NAME}" --directory build/release
+        run: python scripts/release.py verify-assets --tag "${RELEASE_TAG}" --directory build/release
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           prerelease=""
-          if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
+          if [[ "${RELEASE_TAG}" == *-* ]]; then
             prerelease="--prerelease"
           fi
-          gh release create "${GITHUB_REF_NAME}" build/release/* \
+          gh release create "${RELEASE_TAG}" build/release/* \
             --verify-tag \
-            --title "Multica Workflow ${GITHUB_REF_NAME}" \
+            --title "Multica Workflow ${RELEASE_TAG}" \
             --generate-notes \
             ${prerelease}
