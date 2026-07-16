@@ -14,6 +14,24 @@ from workflow_lib import WorkflowError, validate_repository  # noqa: E402
 
 
 class ManifestTests(unittest.TestCase):
+    def test_manager_flow_requires_explicit_verify_after_apply(self):
+        content = (ROOT / "skills/multica-workflow-manager/SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        apply_step = content.index("5. Run `apply`")
+        verify_step = content.index("6. Run `verify`")
+        self.assertLess(apply_step, verify_step)
+
+    def test_generated_autopilot_contract_has_no_priority(self):
+        contract = json.loads(
+            (
+                ROOT
+                / "skills/multica-workflow-observer/references/control-plane-contract.json"
+            ).read_text(encoding="utf-8")
+        )
+        for desired in contract["autopilots"].values():
+            self.assertNotIn("priority", desired)
+
     def test_all_deployment_profiles_validate(self):
         for profile in ["quality", "codex-only", "opencode-only"]:
             manifest, deployment = validate_repository(ROOT, profile)

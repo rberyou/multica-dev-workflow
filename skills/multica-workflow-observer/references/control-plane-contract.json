@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "workflow_version": "1.1.0-rc.1",
+  "workflow_version": "1.1.0-rc.2",
   "protocol_revision": "v3",
-  "observer_source_hash": "d5243fa108ab3b17aba152113d1910adaca2765fcdd7f99871d62111b4d64d52",
+  "observer_source_hash": "c4562a61fef3090a1dee80289e4af223fddade40008581e816cc0437fe7db05a",
   "agents": {
     "leader": {
       "name": "开发队长",
@@ -10,11 +10,11 @@
       "runtime_binding": "codex-orchestrator",
       "max_concurrent_tasks": 1,
       "permission_mode": "public_to_workspace",
-      "instructions_sha256": "c82750790632f1f319b6cae45f2deb66e5c68177f04d7326f345c08f93188845",
+      "instructions_sha256": "deb2f59055943e2391549760284eeef6431e224c48f013dafc94315186e7ae06",
       "spec_hashes": {
-        "codex-only": "a2a45edbf26455b072179f796163ef1a23c71ae5227d1030a37c359f427a0bf9",
-        "opencode-only": "d58a44e801e0a74e3521fba9739ea83b50b11098be6e12a05114354ffe043786",
-        "quality": "a2a45edbf26455b072179f796163ef1a23c71ae5227d1030a37c359f427a0bf9"
+        "codex-only": "fbb0dd627110a386beee2837b7ecdaf71237035c036d3072ccc5d19b8222762a",
+        "opencode-only": "9750bcb3d246bb7cfd887a919538b5ccc2d038d08d6e32b54b1c00e26526d0a6",
+        "quality": "fbb0dd627110a386beee2837b7ecdaf71237035c036d3072ccc5d19b8222762a"
       }
     },
     "planner": {
@@ -201,7 +201,7 @@
     "multica-requirement-intake": {
       "key": "requirement-intake",
       "attach_to": [],
-      "package_hash": "b7dc88d97e8e74e2f71cad685141d758c66a7966cc76841223d2565b733688ad"
+      "package_hash": "8754c0d7fecd5a983ee0ba72becb932e180070ffd5882343502b6a7fce6589f0"
     },
     "multica-workflow-observer": {
       "key": "workflow-observer",
@@ -223,7 +223,7 @@
         "workflow-maintainer",
         "workflow-maintenance-reviewer"
       ],
-      "package_hash": "34f4d908ec90fe44f8588ba779e94bebc9ba385d4fa0ff91369b676ae4c2bbc9"
+      "package_hash": "7de593d2d377c9721654c31a770ad4b90a8ff98d22a833fe0ed784a2d5fc42a9"
     }
   },
   "squad": {
@@ -287,7 +287,6 @@
       "agent": "workflow-observer",
       "mode": "run_only",
       "project": "workflow-operations",
-      "priority": "medium",
       "status": "active",
       "issue_title_template": "",
       "subscribers": [

@@ -38,6 +38,8 @@ python scripts/workflow.py apply --plan .multica/plans/<plan>.json --approve <sh
 
 Apply must fail when Git HEAD, manifest hash, Runtime map or observed Multica preconditions changed after planning.
 
+`apply` performs an immediate post-mutation reconciliation check. Before advancing to a release, deployment or Canary gate, run a separate explicit `verify` as a fresh read and retain its operator result.
+
 ## Verify and Drift
 
 ```text

@@ -9,6 +9,8 @@ Release planning binds:
 - expected release assets;
 - verified Maintenance Issue review evidence, or the one-time approved v6 bootstrap Plan for `v1.1.0-rc.1` only.
 
+The one-time `v1.1.0-rc.2` partial-deployment recovery still uses normal Maintenance release mode, never bootstrap mode. Its evidence additionally binds the durable pending Incident source, exact human recovery decision, affected/target release and control identities through bounded IDs and SHA256 commitments. It is rejected after the pending source is linked, when the decision changes, or for any later version.
+
 Required command sequence:
 
 ```text

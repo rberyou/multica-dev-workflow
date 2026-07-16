@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.0-rc.2
+
+- Remove the deleted Multica v0.4.2 Autopilot priority field from desired state, CLI mutations, schema, audit contracts and verification.
+- Normalize real Autopilot response aliases and typed member subscribers, and use mutually exclusive subscriber replacement commands.
+- Recover safely from the partially applied rc.1 Canary state with idempotent real-response regression coverage.
+- Add one-time, hash-bound pending-Incident release evidence for the reviewed rc.2 recovery path.
+- Validate runtime instruction `workflow_version` literals against the release version.
+
 ## 1.1.0-rc.1
 
 - Add workflow incident reporting, scheduled observation and a dedicated maintenance control plane.

@@ -96,7 +96,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["key", "title", "description", "agent", "mode", "project", "priority", "status", "subscribers", "triggers"],
+        "required": ["key", "title", "description", "agent", "mode", "project", "status", "subscribers", "triggers"],
         "properties": {
           "key": {"$ref": "#/$defs/key"},
           "title": {"type": "string", "minLength": 1},
@@ -104,7 +104,6 @@
           "agent": {"$ref": "#/$defs/key"},
           "mode": {"enum": ["create_issue", "run_only"]},
           "project": {"$ref": "#/$defs/key"},
-          "priority": {"enum": ["none", "low", "medium", "high", "urgent"]},
           "status": {"enum": ["active", "paused"]},
           "issue_title_template": {"type": "string"},
           "subscribers": {

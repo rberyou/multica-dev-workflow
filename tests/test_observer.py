@@ -274,7 +274,6 @@ class ControlPlaneCLI:
                 "agent": autopilot_spec["agent"],
                 "mode": autopilot_spec["mode"],
                 "project": autopilot_spec["project"],
-                "priority": autopilot_spec["priority"],
                 "status": autopilot_spec["status"],
                 "issue_title_template": autopilot_spec.get("issue_title_template", ""),
                 "subscriber_ids": ["human-1"],
@@ -292,10 +291,9 @@ class ControlPlaneCLI:
                 "agent_id": self.agent_by_key[autopilot_spec["agent"]]["id"],
                 "mode": autopilot_spec["mode"],
                 "project_id": "project-1",
-                "priority": autopilot_spec["priority"],
                 "status": autopilot_spec["status"],
                 "issue_title_template": autopilot_spec.get("issue_title_template", ""),
-                "subscribers": [{"id": "human-1"}],
+                "subscribers": [{"user_id": "human-1", "user_type": "member"}],
                 "triggers": [
                     {
                         "id": "trigger-1",
@@ -324,7 +322,19 @@ class ControlPlaneCLI:
         if args[:2] == ["autopilot", "list"]:
             return self.autopilots
         if args[:2] == ["autopilot", "get"]:
-            return next(item for item in self.autopilots if item["id"] == args[2])
+            item = next(item for item in self.autopilots if item["id"] == args[2])
+            return {
+                "autopilot": {
+                    **{
+                        key: value
+                        for key, value in item.items()
+                        if key not in {"agent_id", "mode", "triggers"}
+                    },
+                    "assignee_id": item["agent_id"],
+                    "execution_mode": item["mode"],
+                },
+                "triggers": item["triggers"],
+            }
         if args[:2] == ["skill", "list"]:
             return self.skills
         if args[:2] == ["skill", "get"]:
@@ -852,7 +862,6 @@ class ObserverTests(unittest.TestCase):
                 "agent": autopilot_spec["agent"],
                 "mode": autopilot_spec["mode"],
                 "project": autopilot_spec["project"],
-                "priority": autopilot_spec["priority"],
                 "status": "paused",
                 "issue_title_template": autopilot_spec.get(
                     "issue_title_template", ""
@@ -891,6 +900,18 @@ class ObserverTests(unittest.TestCase):
         with patch.object(observer, "portable_source_hash", return_value="tampered"):
             source_findings = observer.audit_control_plane(ControlPlaneCLI(), "T-audit")
         self.assertIn("observer_source_hash", source_findings[0]["actual"])
+
+    def test_control_plane_audit_rejects_non_member_subscriber_shapes(self):
+        for subscriber in [
+            {"user_id": "human-1", "user_type": "agent"},
+            {"user_id": "human-1", "user_type": "unknown"},
+        ]:
+            with self.subTest(subscriber=subscriber):
+                cli = ControlPlaneCLI()
+                cli.autopilots[0]["subscribers"] = [subscriber]
+                findings = observer.audit_control_plane(cli, "T-audit")
+                self.assertEqual(findings[0]["rule_id"], "WF-DRIFT-001")
+                self.assertIn("autopilot_specs", findings[0]["actual"])
 
     def test_control_plane_audit_detects_unmarked_managed_name_collision(self):
         cli = ControlPlaneCLI()

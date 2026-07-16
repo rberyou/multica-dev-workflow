@@ -151,7 +151,6 @@ def build_contract(root: Path) -> dict:
                 "agent",
                 "mode",
                 "project",
-                "priority",
                 "status",
                 "issue_title_template",
             ]
