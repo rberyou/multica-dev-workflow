@@ -69,11 +69,32 @@ class ManifestTests(unittest.TestCase):
         )
         self.assertIn("workflow_dispatch:", workflow)
         self.assertIn(
-            'refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}', workflow
+            "if: github.event_name == 'push' || github.ref == 'refs/heads/main'",
+            workflow,
+        )
+        self.assertIn(
+            'temporary_ref="refs/release-fetch/${GITHUB_RUN_ID}"', workflow
+        )
+        self.assertNotIn("git fetch --force", workflow)
+        self.assertIn(
+            'test "$(git rev-parse "${remote_tag_ref}")" = "${remote_tag_object}"',
+            workflow,
+        )
+        self.assertIn(
+            'test "${release_sha}" = "$(git rev-parse HEAD)"', workflow
         )
         self.assertIn('RELEASE_SHA=${release_sha}', workflow)
         self.assertIn('merge-base --is-ancestor "${RELEASE_SHA}"', workflow)
         self.assertIn('gh run list --commit "${RELEASE_SHA}"', workflow)
+        self.assertIn(
+            'python scripts/release.py verify-tag --tag "${RELEASE_TAG}"',
+            workflow,
+        )
+        self.assertIn(
+            'python scripts/release.py verify-assets --tag "${RELEASE_TAG}"',
+            workflow,
+        )
+        self.assertIn('gh release create "${RELEASE_TAG}"', workflow)
         self.assertNotIn(
             'python scripts/release.py verify-tag --tag "${GITHUB_REF_NAME}"',
             workflow,

@@ -19,6 +19,7 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
     steps:
@@ -30,7 +31,17 @@ jobs:
         shell: bash
         run: |
           [[ "${RELEASE_TAG}" == v* ]]
-          git fetch --force origin "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+          remote_tag_ref="refs/tags/${RELEASE_TAG}"
+          temporary_ref="refs/release-fetch/${GITHUB_RUN_ID}"
+          git fetch --no-tags origin "${remote_tag_ref}:${temporary_ref}"
+          remote_tag_object=$(git rev-parse "${temporary_ref}")
+          test "$(git cat-file -t "${remote_tag_object}")" = "tag"
+          if git show-ref --verify --quiet "${remote_tag_ref}"; then
+            test "$(git rev-parse "${remote_tag_ref}")" = "${remote_tag_object}"
+          else
+            git update-ref "${remote_tag_ref}" "${remote_tag_object}" ""
+          fi
+          git update-ref -d "${temporary_ref}"
           release_sha=$(git rev-list -n 1 "${RELEASE_TAG}")
           test -n "${release_sha}"
           test "${release_sha}" = "$(git rev-parse HEAD)"

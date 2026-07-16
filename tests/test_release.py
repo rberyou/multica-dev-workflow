@@ -1,6 +1,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -512,6 +513,48 @@ class ReleaseTests(unittest.TestCase):
             with self.assertRaisesRegex(release.ReleaseError, "extra=.*unexpected.txt"):
                 release.verify_asset_directory(annotation, directory)
 
+    def test_release_verification_rejects_lightweight_tags(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True)
+            subprocess.run(
+                ["git", "config", "user.email", "test@example.com"],
+                cwd=root,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "Test"], cwd=root, check=True
+            )
+            (root / "payload.txt").write_text("payload\n", encoding="utf-8")
+            subprocess.run(["git", "add", "payload.txt"], cwd=root, check=True)
+            fake_message = (
+                "fake release metadata\n\n"
+                "release_plan_digest=" + "f" * 64 + "\n"
+                "expected_assets_sha256=" + "1" * 64 + "\n"
+                "expected_asset=checksums.txt\n"
+            )
+            subprocess.run(
+                ["git", "commit", "-m", fake_message],
+                cwd=root,
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "tag", "v1.1.0-rc.1"], cwd=root, check=True
+            )
+            with (
+                patch.object(release, "verify_versions", return_value=[]),
+                self.assertRaisesRegex(release.ReleaseError, "annotated tag"),
+            ):
+                release.command_verify_tag(
+                    SimpleNamespace(tag="v1.1.0-rc.1"), root
+                )
+            with self.assertRaisesRegex(release.ReleaseError, "annotated tag"):
+                release.command_verify_assets(
+                    SimpleNamespace(tag="v1.1.0-rc.1", directory=str(root)),
+                    root,
+                )
+
     def test_verify_tag_rejects_annotated_pr_that_is_not_the_tag_commit_pr(self):
         commit = "a" * 40
         annotation = (
@@ -532,6 +575,8 @@ class ReleaseTests(unittest.TestCase):
         def fake_run(args, root, check=True):
             if args[:3] == ["git", "rev-list", "-n"]:
                 return SimpleNamespace(stdout=commit + "\n", stderr="", returncode=0)
+            if args[:3] == ["git", "cat-file", "-t"]:
+                return SimpleNamespace(stdout="tag\n", stderr="", returncode=0)
             if args[:3] == ["git", "tag", "-l"]:
                 return SimpleNamespace(stdout=annotation, stderr="", returncode=0)
             raise AssertionError(args)
@@ -578,6 +623,8 @@ class ReleaseTests(unittest.TestCase):
         def fake_run(args, root, check=True):
             if args[:3] == ["git", "rev-list", "-n"]:
                 return SimpleNamespace(stdout=commit + "\n", stderr="", returncode=0)
+            if args[:3] == ["git", "cat-file", "-t"]:
+                return SimpleNamespace(stdout="tag\n", stderr="", returncode=0)
             if args[:3] == ["git", "tag", "-l"]:
                 return SimpleNamespace(stdout=annotation, stderr="", returncode=0)
             raise AssertionError(args)
