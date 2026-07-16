@@ -1,4 +1,5 @@
 import importlib.util
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -8,6 +9,9 @@ from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
+BOOTSTRAP_RECORD = json.loads(
+    (ROOT / "docs/bootstrap-v6.json").read_text(encoding="utf-8")
+)
 MODULE_PATH = ROOT / "scripts/release.py"
 SPEC = importlib.util.spec_from_file_location("workflow_release", MODULE_PATH)
 release = importlib.util.module_from_spec(SPEC)
@@ -130,12 +134,12 @@ class ReleaseTests(unittest.TestCase):
                 release,
                 "gh_json",
                 return_value={
-                    "mergeCommit": {"oid": "7e288e3f238daac5ddc71884c5d2b5b36353d74d"},
+                    "mergeCommit": {"oid": BOOTSTRAP_RECORD["plan_pr_merge_commit"]},
                     "comments": [
                         {
-                            "id": "IC_kwDOTY4IZs8AAAABKL59XA",
-                            "author": {"login": "rberyou"},
-                            "body": "APPROVE WORKFLOW PLAN v6",
+                            "id": BOOTSTRAP_RECORD["approval_comment_id"],
+                            "author": {"login": BOOTSTRAP_RECORD["approver_github_login"]},
+                            "body": BOOTSTRAP_RECORD["approval_text"],
                         }
                     ],
                 },
@@ -152,7 +156,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(plan["release_authorization"]["approver_login"], "rberyou")
         self.assertEqual(
             plan["release_authorization"]["plan_approval_comment_id"],
-            "IC_kwDOTY4IZs8AAAABKL59XA",
+            BOOTSTRAP_RECORD["approval_comment_id"],
         )
 
     def test_bootstrap_exception_is_limited_to_first_rc(self):
@@ -161,12 +165,12 @@ class ReleaseTests(unittest.TestCase):
 
     def test_bootstrap_plan_rejects_approval_text_as_substring(self):
         value = {
-            "mergeCommit": {"oid": "7e288e3f238daac5ddc71884c5d2b5b36353d74d"},
+            "mergeCommit": {"oid": BOOTSTRAP_RECORD["plan_pr_merge_commit"]},
             "comments": [
                 {
-                    "id": "IC_kwDOTY4IZs8AAAABKL59XA",
-                    "author": {"login": "rberyou"},
-                    "body": "NOT APPROVE WORKFLOW PLAN v6",
+                    "id": BOOTSTRAP_RECORD["approval_comment_id"],
+                    "author": {"login": BOOTSTRAP_RECORD["approver_github_login"]},
+                    "body": f"NOT {BOOTSTRAP_RECORD['approval_text']}",
                 }
             ],
         }
