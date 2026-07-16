@@ -1,11 +1,11 @@
 {
   "$schema": "./workflow.schema.json",
-  "schema_version": 1,
+  "schema_version": 2,
   "workflow": {
     "id": "development-delivery",
     "name": "开发交付小队",
-    "version": "1.0.0",
-    "protocol_revision": "v2",
+    "version": "1.1.0-rc.1",
+    "protocol_revision": "v3",
     "approver_role": "人工审批人"
   },
   "skills": [
@@ -22,6 +22,29 @@
       "path": "skills/multica-workflow-manager",
       "targets": ["local"],
       "attach_to": []
+    },
+    {
+      "key": "workflow-observer",
+      "name": "multica-workflow-observer",
+      "path": "skills/multica-workflow-observer",
+      "targets": ["local", "workspace"],
+      "attach_to": [
+        "leader",
+        "planner",
+        "plan-reviewer",
+        "integrator",
+        "developer-a",
+        "developer-b",
+        "code-reviewer",
+        "workflow-observer"
+      ]
+    },
+    {
+      "key": "workflow-maintainer",
+      "name": "multica-workflow-maintainer",
+      "path": "skills/multica-workflow-maintainer",
+      "targets": ["local", "workspace"],
+      "attach_to": ["workflow-maintainer", "workflow-maintenance-reviewer"]
     }
   ],
   "agents": [
@@ -87,8 +110,82 @@
       "instruction_files": ["instructions/common.md", "instructions/roles/code-reviewer.md"],
       "max_concurrent_tasks": 1,
       "permission_mode": "public_to_workspace"
+    },
+    {
+      "key": "workflow-observer",
+      "name": "工作流观察员",
+      "description": "接收工作流异常上报、运行确定性巡检、去重分诊并验证修复结果",
+      "runtime_binding": "opencode-review",
+      "instruction_files": ["instructions/roles/workflow-observer.md"],
+      "max_concurrent_tasks": 1,
+      "permission_mode": "public_to_workspace"
+    },
+    {
+      "key": "workflow-maintainer",
+      "name": "工作流维护员",
+      "description": "根据已确认 Incident 维护工作流源码、测试、RC、发布和回滚",
+      "runtime_binding": "codex-orchestrator",
+      "instruction_files": ["instructions/roles/workflow-maintainer.md"],
+      "max_concurrent_tasks": 1,
+      "permission_mode": "public_to_workspace"
+    },
+    {
+      "key": "workflow-maintenance-reviewer",
+      "name": "工作流维护审查员",
+      "description": "独立审查工作流变更 Plan、代码、发布和回滚，不修改被审查内容",
+      "runtime_binding": "opencode-review",
+      "instruction_files": ["instructions/roles/workflow-maintenance-reviewer.md"],
+      "max_concurrent_tasks": 1,
+      "permission_mode": "public_to_workspace"
     }
   ],
+  "projects": [
+    {
+      "key": "workflow-operations",
+      "title": "工作流运维",
+      "description": "集中记录工作流 Incident、维护变更、Canary 验证、发布与回滚证据。",
+      "lead": "workflow-observer",
+      "status": "in_progress"
+    }
+  ],
+  "autopilots": [
+    {
+      "key": "workflow-health-audit",
+      "title": "工作流健康巡检",
+      "description": "使用 multica-workflow-observer 的 Observer Mode。定位已安装 Skill，以当前巡检任务作为 coverage_issue，运行其 scripts/observer.py audit --scope issues --report；不要在 Autopilot 内自检调度新鲜度，外部操作员或调度器必须单独运行 scripts/workflow.py health；没有 finding 时不创建 Incident，无法完整扫描或持久化 finding 时必须失败并说明原因。",
+      "agent": "workflow-observer",
+      "mode": "run_only",
+      "project": "workflow-operations",
+      "priority": "medium",
+      "status": "active",
+      "subscribers": ["human_approver"],
+      "triggers": [
+        {
+          "key": "hourly",
+          "kind": "schedule",
+          "label": "multica-workflow:workflow-health-hourly",
+          "enabled": true,
+          "cron": "0 * * * *",
+          "timezone": "Asia/Shanghai"
+        }
+      ]
+    }
+  ],
+  "operations": {
+    "project": "workflow-operations",
+    "observer_agent": "workflow-observer",
+    "observer_skill": "workflow-observer",
+    "reporter_agents": [
+      "leader",
+      "planner",
+      "plan-reviewer",
+      "integrator",
+      "developer-a",
+      "developer-b",
+      "code-reviewer"
+    ],
+    "autopilot": "workflow-health-audit"
+  },
   "squad": {
     "key": "development-delivery",
     "name": "开发交付小队",

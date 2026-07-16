@@ -190,6 +190,15 @@ Agent 应读取：
 
 需要判断“这次为什么没有继续”时，优先查看当前 issue 的状态、负责人、最新评论、`waiting_on` 和 `blocked_reason`。
 
+## 工作流异常
+
+当 Agent 发现审批、Review、依赖、状态、角色、Runtime、Skill 或平台能力与工作流合同不一致时，会通过 `multica-workflow-observer` 创建独立 Incident，并在来源 issue 写入 `workflow_incident_id`。Incident 位于“工作流运维”项目，不是业务需求子 issue。
+
+- urgent/high Incident 可能使来源 issue blocked，`waiting_on=workflow_fix`。
+- medium/low Incident 在不影响正确性时可以继续执行。
+- 工作流观察员只分诊和验证；工作流维护员负责 Git 修复，维护审查员保持独立。
+- Incident 只有在修复版本部署到受影响 workspace 并完成 Observer 验证后才关闭。
+
 ## 10. 在不同电脑上使用
 
 Skill 本身不保存用户名、安装目录、profile、workspace ID、小队 UUID、项目 ID、Token 或人工审批人 UUID。
