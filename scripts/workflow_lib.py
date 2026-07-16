@@ -1465,6 +1465,18 @@ def build_plan(
             }
             current_trigger = {key: existing_trigger.get(key) for key in desired_trigger}
             if current_trigger != desired_trigger:
+                if not existing_trigger.get("id"):
+                    actions.append(
+                        {
+                            "type": "BLOCKED",
+                            "key": f"{autopilot['key']}.{trigger['key']}",
+                            "reason": (
+                                "managed Autopilot trigger differs from desired state but "
+                                "the CLI omitted its trigger ID"
+                            ),
+                        }
+                    )
+                    continue
                 actions.append(
                     {
                         "type": "UPDATE_AUTOPILOT_TRIGGER",

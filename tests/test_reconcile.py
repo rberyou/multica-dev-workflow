@@ -798,6 +798,46 @@ class ReconcileTests(unittest.TestCase):
             )
             self.assertEqual(update["desired"]["status"], "paused")
 
+    def test_changed_autopilot_trigger_without_id_blocks_planning(self):
+        with committed_temp_repo() as temp_root:
+            cli = MutatingCLI()
+            workspace = {"id": cli.workspace_id, "name": "Test", "slug": "test"}
+            runtime_map = temp_root / ".multica/runtime-map.local.json"
+            initial = build_plan(
+                temp_root, cli, workspace, "quality", runtime_map, False, False
+            )
+            initial_path = temp_root / ".multica/plans/initial.json"
+            write_json(initial_path, initial)
+            apply_plan(temp_root, cli, initial_path, initial["plan_digest"][:12])
+
+            trigger = cli.autopilots[0]["triggers"][0]
+            trigger.pop("id")
+            trigger["cron"] = "30 * * * *"
+            plan = build_plan(
+                temp_root,
+                cli,
+                workspace,
+                "quality",
+                runtime_map,
+                False,
+                False,
+                write_archives=False,
+            )
+            blocked = [
+                item
+                for item in plan["actions"]
+                if item["type"] == "BLOCKED"
+                and item["key"] == "workflow-health-audit.hourly"
+            ]
+            self.assertEqual(len(blocked), 1)
+            self.assertIn("omitted its trigger ID", blocked[0]["reason"])
+            self.assertFalse(
+                any(
+                    item["type"] == "UPDATE_AUTOPILOT_TRIGGER"
+                    for item in plan["actions"]
+                )
+            )
+
     def test_new_agent_inherits_unique_managed_binding_runtime(self):
         with committed_temp_repo() as temp_root:
             cli = MutatingCLI()
