@@ -63,6 +63,22 @@ class ManifestTests(unittest.TestCase):
         self.assertIn("audit --scope issues --report", autopilot["description"])
         self.assertIn("workflow.py health", autopilot["description"])
 
+    def test_release_workflow_resolves_explicit_tag_commit(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("workflow_dispatch:", workflow)
+        self.assertIn(
+            'refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}', workflow
+        )
+        self.assertIn('RELEASE_SHA=${release_sha}', workflow)
+        self.assertIn('merge-base --is-ancestor "${RELEASE_SHA}"', workflow)
+        self.assertIn('gh run list --commit "${RELEASE_SHA}"', workflow)
+        self.assertNotIn(
+            'python scripts/release.py verify-tag --tag "${GITHUB_REF_NAME}"',
+            workflow,
+        )
+
     def test_operations_contract_is_required_for_v2(self):
         with tempfile.TemporaryDirectory() as temp:
             temp_root = Path(temp) / "repo"
