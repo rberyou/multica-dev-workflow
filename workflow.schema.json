@@ -4,10 +4,10 @@
   "title": "Multica Development Workflow",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "workflow", "skills", "agents", "squad"],
+  "required": ["schema_version", "workflow", "skills", "agents", "projects", "autopilots", "operations", "squad"],
   "properties": {
     "$schema": {"type": "string"},
-    "schema_version": {"const": 1},
+    "schema_version": {"const": 2},
     "workflow": {
       "type": "object",
       "additionalProperties": false,
@@ -68,6 +68,95 @@
             "items": {"type": "string", "minLength": 1}
           }
         }
+      }
+    },
+    "projects": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["key", "title", "description", "lead", "status"],
+        "properties": {
+          "key": {"$ref": "#/$defs/key"},
+          "title": {"type": "string", "minLength": 1},
+          "description": {"type": "string"},
+          "lead": {"$ref": "#/$defs/key"},
+          "status": {"type": "string", "minLength": 1},
+          "icon": {"type": "string"},
+          "previous_titles": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {"type": "string", "minLength": 1}
+          }
+        }
+      }
+    },
+    "autopilots": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["key", "title", "description", "agent", "mode", "project", "priority", "status", "subscribers", "triggers"],
+        "properties": {
+          "key": {"$ref": "#/$defs/key"},
+          "title": {"type": "string", "minLength": 1},
+          "description": {"type": "string"},
+          "agent": {"$ref": "#/$defs/key"},
+          "mode": {"enum": ["create_issue", "run_only"]},
+          "project": {"$ref": "#/$defs/key"},
+          "priority": {"enum": ["none", "low", "medium", "high", "urgent"]},
+          "status": {"enum": ["active", "paused"]},
+          "issue_title_template": {"type": "string"},
+          "subscribers": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {"enum": ["current_user", "human_approver"]}
+          },
+          "triggers": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["key", "kind", "label", "enabled"],
+              "properties": {
+                "key": {"$ref": "#/$defs/key"},
+                "kind": {"enum": ["schedule", "webhook"]},
+                "label": {"type": "string", "minLength": 1},
+                "enabled": {"type": "boolean"},
+                "cron": {"type": "string", "minLength": 1},
+                "timezone": {"type": "string", "minLength": 1}
+              },
+              "allOf": [
+                {
+                  "if": {"properties": {"kind": {"const": "schedule"}}},
+                  "then": {"required": ["cron", "timezone"]}
+                }
+              ]
+            }
+          },
+          "previous_titles": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {"type": "string", "minLength": 1}
+          }
+        }
+      }
+    },
+    "operations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project", "observer_agent", "observer_skill", "reporter_agents", "autopilot"],
+      "properties": {
+        "project": {"$ref": "#/$defs/key"},
+        "observer_agent": {"$ref": "#/$defs/key"},
+        "observer_skill": {"$ref": "#/$defs/key"},
+        "reporter_agents": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/key"}
+        },
+        "autopilot": {"$ref": "#/$defs/key"}
       }
     },
     "squad": {

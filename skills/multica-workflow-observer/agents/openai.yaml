@@ -1,0 +1,4 @@
+interface:
+  display_name: "Multica 工作流观察"
+  short_description: "上报、巡检、去重和分诊 Multica 工作流 Incident"
+  default_prompt: "Use $multica-workflow-observer to report or audit a workflow incident without modifying workflow source or deployment state."

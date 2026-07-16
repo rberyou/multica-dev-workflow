@@ -1,10 +1,10 @@
 ---
 name: multica-workflow-manager
-description: Plan, rebuild, update, verify, and audit a Git-managed Multica squad workflow. Use when the user asks Codex or OpenCode to “重建小队”, “同步小队配置”, “更新工作流”, “从 Git 获取最新 Skill”, inspect drift, migrate runtimes, or apply a reviewed Multica workflow plan.
+description: Plan, rebuild, update, verify, audit, disable, and release a Git-managed Multica workflow control plane. Use when the user asks Codex or OpenCode to “重建小队”, “同步小队配置”, “更新工作流”, “从 Git 获取最新 Skill”, inspect drift or Observer health, prepare rollback, migrate runtimes, or apply a reviewed Multica workflow plan.
 metadata:
   managed_by: multica-dev-workflow
   workflow_id: development-delivery
-  version: 1.0.0
+  version: 1.1.0-rc.1
 ---
 
 # Multica Workflow Manager
@@ -34,6 +34,8 @@ Never apply a different checkout without generating a new plan.
 5. Run `apply` using the exact plan file and digest.
 6. Run `verify` and report the deployment record and residual warnings.
 
+Use `audit` and `health` for workflow Issue and Observer diagnostics. Before rollback, generate and approve `plan --disable-operations` while still on the newer release. Active v3 top-level requirements block that Plan unless they are frozen or the reviewed Plan explicitly uses `--allow-active-v3-degraded`.
+
 The repository-level design approval such as `APPROVE WORKFLOW PLAN v5` authorizes implementation of this system. It does not authorize a later workspace mutation plan with a different digest.
 
 ## Safety Rules
@@ -43,7 +45,7 @@ The repository-level design approval such as `APPROVE WORKFLOW PLAN v5` authoriz
 - Never commit Runtime, Workspace, Agent, Squad or Member UUIDs into portable files.
 - Never commit tokens, cookies, MCP secrets or custom environment values.
 - Preserve unrelated Agent Skill assignments and non-conflicting extra roster members.
-- Do not run destructive pruning or archiving; v1 does not implement it.
+- Do not run destructive pruning or archiving; v1.1 does not implement it.
 - Runtime rebinding requires `--rebind-runtimes` and explicit review of every old/new binding.
 - Existing unmarked objects require `--adopt`; same-name objects are not overwritten implicitly.
 

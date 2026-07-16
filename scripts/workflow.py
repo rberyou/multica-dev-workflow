@@ -23,6 +23,7 @@ from workflow_lib import (
     plan_has_blockers,
     redact,
     repo_root,
+    run_process,
     resolve_profile,
     resolve_workspace,
     save_plan,
@@ -64,6 +65,12 @@ def action_label(action: dict) -> str:
     return f"{kind:14} {key}{suffix}"
 
 
+def write_console_safe(value: str, stream) -> None:
+    encoding = getattr(stream, "encoding", None) or "utf-8"
+    rendered = value.encode(encoding, errors="backslashreplace").decode(encoding)
+    stream.write(rendered)
+
+
 def print_plan(plan: dict, path: Path | None = None) -> None:
     print(json.dumps(summarize_actions(plan.get("actions", [])), ensure_ascii=False, indent=2))
     for action in plan.get("actions", []):
@@ -89,6 +96,12 @@ def command_doctor(args: argparse.Namespace, root: Path) -> int:
         ["squad", "update", "--help"],
         ["squad", "member", "--help"],
         ["skill", "import", "--help"],
+        ["project", "create", "--help"],
+        ["project", "update", "--help"],
+        ["autopilot", "create", "--help"],
+        ["autopilot", "update", "--help"],
+        ["autopilot", "trigger-add", "--help"],
+        ["autopilot", "trigger-update", "--help"],
         ["runtime", "list", "--help"],
         ["user", "profile", "get", "--help"],
     ]
@@ -155,6 +168,8 @@ def build_from_args(args: argparse.Namespace, root: Path, write_archives: bool =
         runtime_map_path=runtime_map_path(args, root),
         adopt=bool(getattr(args, "adopt", False)),
         rebind_runtimes=bool(getattr(args, "rebind_runtimes", False)),
+        disable_operations=bool(getattr(args, "disable_operations", False)),
+        allow_active_v3_degraded=bool(getattr(args, "allow_active_v3_degraded", False)),
         write_archives=write_archives,
     )
     return plan, cli, workspace
@@ -211,6 +226,8 @@ def command_apply(args: argparse.Namespace, root: Path) -> int:
         runtime_map=plan_doc["runtime_map_path"],
         adopt=False,
         rebind_runtimes=False,
+        disable_operations=bool(plan_doc.get("disable_operations", False)),
+        allow_active_v3_degraded=bool(plan_doc.get("allow_active_v3_degraded", False)),
     )
     verify_plan, _, _ = build_from_args(verify_args, root, write_archives=False)
     if plan_has_blockers(verify_plan) or mutation_actions(verify_plan):
@@ -225,6 +242,48 @@ def command_install_skills(args: argparse.Namespace, root: Path) -> int:
     results = install_skills(root, target, args.copy, args.replace_existing)
     print(json.dumps(results, ensure_ascii=False, indent=2))
     return 0
+
+
+def command_observer(args: argparse.Namespace, root: Path) -> int:
+    cli, workspace = context(args, root)
+    script = root / "skills/multica-workflow-observer/scripts/observer.py"
+    command = [
+        sys.executable,
+        str(script),
+        "--multica-bin",
+        cli.binary,
+        "--workspace",
+        str(workspace["id"]),
+    ]
+    if cli.profile:
+        command.extend(["--profile", cli.profile])
+    command.append(args.command)
+    if args.command == "audit":
+        command.extend(
+            [
+                "--scope",
+                args.scope,
+                "--max-issues",
+                str(args.max_issues),
+                "--backlog-hours",
+                str(args.backlog_hours),
+                "--health-max-age-minutes",
+                str(args.health_max_age_minutes),
+            ]
+        )
+        if args.report:
+            command.append("--report")
+        if args.coverage_issue:
+            command.extend(["--coverage-issue", args.coverage_issue])
+    else:
+        command.extend(["--max-age-minutes", str(args.max_age_minutes)])
+    command.extend(["--output", args.output])
+    result = run_process(command, cwd=root, check=False)
+    if result.stdout:
+        write_console_safe(result.stdout, sys.stdout)
+    if result.stderr:
+        write_console_safe(result.stderr, sys.stderr)
+    return result.returncode
 
 
 def parser() -> argparse.ArgumentParser:
@@ -243,6 +302,8 @@ def parser() -> argparse.ArgumentParser:
     add_context_args(plan)
     plan.add_argument("--adopt", action="store_true")
     plan.add_argument("--rebind-runtimes", action="store_true")
+    plan.add_argument("--disable-operations", action="store_true")
+    plan.add_argument("--allow-active-v3-degraded", action="store_true")
     plan.add_argument("--allow-dirty", action="store_true")
     plan.set_defaults(func=command_plan)
 
@@ -250,12 +311,16 @@ def parser() -> argparse.ArgumentParser:
     add_context_args(drift)
     drift.add_argument("--adopt", action="store_true")
     drift.add_argument("--rebind-runtimes", action="store_true")
+    drift.add_argument("--disable-operations", action="store_true")
+    drift.add_argument("--allow-active-v3-degraded", action="store_true")
     drift.set_defaults(func=command_drift)
 
     verify = subparsers.add_parser("verify")
     add_context_args(verify)
     verify.add_argument("--adopt", action="store_true")
     verify.add_argument("--rebind-runtimes", action="store_true")
+    verify.add_argument("--disable-operations", action="store_true")
+    verify.add_argument("--allow-active-v3-degraded", action="store_true")
     verify.set_defaults(func=command_verify)
 
     apply = subparsers.add_parser("apply")
@@ -271,6 +336,23 @@ def parser() -> argparse.ArgumentParser:
     install.add_argument("--copy", action="store_true")
     install.add_argument("--replace-existing", action="store_true")
     install.set_defaults(func=command_install_skills)
+
+    audit = subparsers.add_parser("audit")
+    add_context_args(audit)
+    audit.add_argument("--scope", choices=["issues", "health", "all"], default="all")
+    audit.add_argument("--report", action="store_true")
+    audit.add_argument("--max-issues", type=int, default=5000)
+    audit.add_argument("--backlog-hours", type=int, default=24)
+    audit.add_argument("--health-max-age-minutes", type=int, default=135)
+    audit.add_argument("--coverage-issue")
+    audit.add_argument("--output", choices=["json"], default="json")
+    audit.set_defaults(func=command_observer)
+
+    health = subparsers.add_parser("health")
+    add_context_args(health)
+    health.add_argument("--max-age-minutes", type=int, default=135)
+    health.add_argument("--output", choices=["json"], default="json")
+    health.set_defaults(func=command_observer)
     return root_parser
 
 

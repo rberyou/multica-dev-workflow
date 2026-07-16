@@ -14,6 +14,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
@@ -22,7 +24,9 @@ jobs:
       - name: Validate workflow schema
         run: check-jsonschema --schemafile workflow.schema.json workflow.json
       - name: Compile reconciler
-        run: python -m py_compile scripts/workflow.py scripts/workflow_lib.py scripts/package_skills.py
+        run: python -m py_compile scripts/workflow.py scripts/workflow_lib.py scripts/package_skills.py scripts/generate_audit_contract.py scripts/release.py skills/multica-workflow-observer/scripts/observer.py
+      - name: Verify Observer audit contract
+        run: python scripts/generate_audit_contract.py --check
       - name: Run tests
         run: python -m unittest discover -s tests -v
       - name: Package skills
@@ -31,6 +35,8 @@ jobs:
           mkdir -p build/skills
           python scripts/package_skills.py skills/multica-requirement-intake build/skills/multica-requirement-intake.zip
           python scripts/package_skills.py skills/multica-workflow-manager build/skills/multica-workflow-manager.zip
+          python scripts/package_skills.py skills/multica-workflow-observer build/skills/multica-workflow-observer.zip
+          python scripts/package_skills.py skills/multica-workflow-maintainer build/skills/multica-workflow-maintainer.zip
           python - <<'PY'
           from hashlib import sha256
           from pathlib import Path

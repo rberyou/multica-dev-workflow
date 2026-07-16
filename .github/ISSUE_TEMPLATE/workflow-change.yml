@@ -1,0 +1,23 @@
+name: Workflow change
+description: Propose an intentional workflow capability or protocol change.
+title: "[Workflow Change] "
+labels: ["workflow-change"]
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal and non-goals
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Roles, Skills, schema, reconciler and compatibility impact
+    validations:
+      required: true
+  - type: textarea
+    id: tests
+    attributes:
+      label: Test, canary, rollout and rollback expectations
+    validations:
+      required: true

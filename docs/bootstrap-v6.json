@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "plan": "docs/design-plan-v6.md",
+  "plan_version": "v6",
+  "plan_sha256": "2d74cbd3fba5b91ff01b33945f03e08866b58595b80115feee4596ae0c02b1f7",
+  "repository": "rberyou/multica-dev-workflow",
+  "plan_pr_number": 2,
+  "plan_pr_merge_commit": "7e288e3f238daac5ddc71884c5d2b5b36353d74d",
+  "approval_comment_id": "IC_kwDOTY4IZs8AAAABKL59XA",
+  "approval_comment_url": "https://github.com/rberyou/multica-dev-workflow/pull/2#issuecomment-4978539868",
+  "approver_github_login": "rberyou",
+  "approval_text": "APPROVE WORKFLOW PLAN v6"
+}

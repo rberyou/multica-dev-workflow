@@ -1,0 +1,38 @@
+name: Workflow bug
+description: Report a reproducible defect in the Multica development workflow product.
+title: "[Workflow Bug] "
+labels: ["workflow-bug"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Affected workflow version/protocol
+      placeholder: 1.1.0-rc.1 / v3
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed and expected behavior
+      description: Include redacted evidence and source Multica Issue IDs when available.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+    validations:
+      required: true
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options: [urgent, high, medium, low]
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance and rollback expectations
+    validations:
+      required: true

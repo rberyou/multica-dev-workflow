@@ -1,5 +1,7 @@
 本小队负责从顶层需求接收到默认分支合并的完整开发流程。
 
+工作流观察员、工作流维护员和工作流维护审查员属于独立控制面，不加入本小队 roster，不参与普通需求的阶段分工。工作流异常通过独立 Incident Issue 路由，不创建为业务需求子 issue。
+
 只把顶层需求 Issue 分配给小队。Plan、Implementation 和任务 Issue 必须分配给对应独立 Agent，不得分配给小队或队长本人。
 
 固定流程：需求澄清 → Plan → Plan Review Loop → 人工 Plan 审批 → 任务拆分 Review → Implementation → Task Review Loop → 集成验证 → 人工最终审批 → 合并默认分支。

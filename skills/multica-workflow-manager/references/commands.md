@@ -39,6 +39,30 @@ python scripts/workflow.py verify --workspace <id-or-slug>
 python scripts/workflow.py drift --workspace <id-or-slug>
 ```
 
+## Audit and Observer Health
+
+```text
+python scripts/workflow.py audit --workspace <id-or-slug> --output json
+python scripts/workflow.py health --workspace <id-or-slug> --output json
+```
+
+`audit` is read-only unless `--report` is explicitly supplied. `health` must fail clearly when the managed Autopilot or readable run history is unavailable.
+
+The portable Observer validates the generated full desired-state contract. Workflow source changes must run:
+
+```text
+python scripts/generate_audit_contract.py
+python scripts/generate_audit_contract.py --check
+```
+
+## Disable Operations Before Rollback
+
+```text
+python scripts/workflow.py plan --workspace <id-or-slug> --disable-operations
+```
+
+Review and approve this Plan before checking out an older release. It pauses the managed Observer Autopilot and detaches Reporter capability from development Agents without deleting Incident history.
+
 ## Runtime Migration
 
 ```text
@@ -46,6 +70,16 @@ python scripts/workflow.py plan --workspace <id-or-slug> --deployment-profile co
 ```
 
 Never migrate Runtimes as an incidental effect of updating instructions.
+
+## Release Plan
+
+```text
+python scripts/release.py plan --version <version> --maintenance-issue <T-ID>
+python scripts/release.py approval-block --plan <release-plan>
+python scripts/release.py apply --plan <release-plan> --approve <short-digest>
+```
+
+After Plan generation, the durable human approver must comment `APPROVE WORKFLOW RELEASE <short-digest>` on the Maintenance Issue. Run the read-only `approval-block` command after that comment exists, then have the immutable GitHub approver in `docs/bootstrap-v6.json` post its complete output on the selected merged PR. Apply verifies both comments and the independent Review record; `verify-tag` rechecks the complete GitHub provenance block, tag commit, exact merged PR and CI run before publication. The one-time `v1.1.0-rc.1` bootstrap may use `--bootstrap-plan v6`. No later release may use bootstrap mode.
 
 ## Install Local Skills
 
