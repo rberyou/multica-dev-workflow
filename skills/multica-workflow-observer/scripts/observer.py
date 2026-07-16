@@ -133,6 +133,15 @@ def normalized_ids(value: Any) -> list[str]:
         if isinstance(item, str):
             result.append(item)
         elif isinstance(item, dict):
+            subscriber_type = str(
+                item.get("user_type")
+                or item.get("member_type")
+                or item.get("subscriber_type")
+                or item.get("type")
+                or ""
+            ).lower()
+            if subscriber_type and subscriber_type not in {"member", "user"}:
+                continue
             identifier = item.get("id") or item.get("user_id") or item.get("member_id")
             if identifier:
                 result.append(str(identifier))
@@ -1199,6 +1208,15 @@ def detailed_items(
             for field in ["triggers", "subscribers"]:
                 if field in raw:
                     detail[field] = raw[field]
+        if resource == "autopilot":
+            if isinstance(payload, dict) and payload.get("assignee_id"):
+                detail["agent_id"] = payload["assignee_id"]
+            elif not detail.get("agent_id") and detail.get("assignee_id"):
+                detail["agent_id"] = detail["assignee_id"]
+            if isinstance(payload, dict) and payload.get("execution_mode"):
+                detail["mode"] = payload["execution_mode"]
+            elif not detail.get("mode") and detail.get("execution_mode"):
+                detail["mode"] = detail["execution_mode"]
         result.append(detail)
     return result
 
@@ -1621,7 +1639,6 @@ def audit_control_plane(cli: CLI, coverage_issue: str | None) -> list[dict[str, 
             "agent_id": str(detail.get("agent_id") or ""),
             "mode": str(detail.get("mode") or ""),
             "project_id": str(detail.get("project_id") or ""),
-            "priority": str(detail.get("priority") or "none"),
             "status": str(detail.get("status") or ""),
             "issue_title_template": str(detail.get("issue_title_template") or ""),
             "subscriber_ids": normalized_ids(detail.get("subscribers") or detail.get("subscriber_ids")),
@@ -1632,7 +1649,6 @@ def audit_control_plane(cli: CLI, coverage_issue: str | None) -> list[dict[str, 
             "agent_id": str((agent_by_key.get(desired["agent"]) or {}).get("id") or ""),
             "mode": desired["mode"],
             "project_id": str((project_by_key.get(desired["project"]) or {}).get("id") or ""),
-            "priority": desired["priority"],
             "status": desired["status"],
             "issue_title_template": str(desired.get("issue_title_template") or ""),
             "subscriber_ids": [human_approver_id] if desired.get("subscribers") else [],
@@ -1648,7 +1664,6 @@ def audit_control_plane(cli: CLI, coverage_issue: str | None) -> list[dict[str, 
                 "agent": desired["agent"],
                 "mode": desired["mode"],
                 "project": desired["project"],
-                "priority": desired["priority"],
                 "status": desired["status"],
                 "issue_title_template": str(desired.get("issue_title_template") or ""),
                 "subscriber_ids": [human_approver_id] if desired.get("subscribers") else [],

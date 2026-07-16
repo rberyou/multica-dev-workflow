@@ -25,11 +25,23 @@ from workflow_lib import (  # noqa: E402
     parse_marker,
     resolve_profile,
     resolve_workspace,
+    runtime_instruction_versions,
 )
 
 
 class ReleaseError(RuntimeError):
     pass
+
+
+RC2_RECOVERY_MODE = "external_pending_incident_exception"
+RC2_RECOVERY_VERSION = "1.1.0-rc.2"
+RC2_AFFECTED_VERSION = "v1.1.0-rc.1"
+RC2_RECOVERY_DECISION = (
+    "DECISION: 允许将 WOR-1 中的 durable pending Incident 作为本次部分部署恢复的临时 Intake；"
+    "允许外部恢复 Agent 在 WOR-1 下创建并推进 Maintenance Change 和 v1.1.0-rc.2。"
+    "rc.2 部署补全 squad 后，必须由 Observer 自动恢复并链接正式 Incident；"
+    "在此之前不得关闭维护树、完成 Canary 验收或发布稳定版本。"
+)
 
 
 def as_list(value: Any, key: str) -> list[dict[str, Any]]:
@@ -80,11 +92,24 @@ def release_cli(
     return cli, resolved_workspace
 
 
-def control_identities(root: Path, cli: MulticaCLI) -> dict[str, str]:
+def control_agent_identities(cli: MulticaCLI) -> dict[str, str]:
     agents = as_list(cli.json(["agent", "list", "--output", "json"]), "agents")
-    squads = as_list(cli.json(["squad", "list", "--output", "json"]), "squads")
     maintainer = managed_match(agents, "agent.workflow-maintainer", "instructions")
     reviewer = managed_match(agents, "agent.workflow-maintenance-reviewer", "instructions")
+    identities = {
+        "maintainer_id": str(maintainer.get("id") or ""),
+        "maintenance_reviewer_id": str(reviewer.get("id") or ""),
+    }
+    if not all(identities.values()):
+        raise ReleaseError("managed maintenance Agent identities are incomplete")
+    if identities["maintainer_id"] == identities["maintenance_reviewer_id"]:
+        raise ReleaseError("Maintenance Reviewer must differ from Maintainer")
+    return identities
+
+
+def control_identities(root: Path, cli: MulticaCLI) -> dict[str, str]:
+    identities = control_agent_identities(cli)
+    squads = as_list(cli.json(["squad", "list", "--output", "json"]), "squads")
     squad = managed_match(squads, "squad.development-delivery", "instructions")
     manifest = json.loads((root / "workflow.json").read_text(encoding="utf-8"))
     approver_role = str(manifest["workflow"]["approver_role"])
@@ -99,11 +124,7 @@ def control_identities(root: Path, cli: MulticaCLI) -> dict[str, str]:
     ]
     if len(approvers) != 1:
         raise ReleaseError(f"expected one human approver with role {approver_role}, found {len(approvers)}")
-    identities = {
-        "maintainer_id": str(maintainer.get("id") or ""),
-        "maintenance_reviewer_id": str(reviewer.get("id") or ""),
-        "human_approver_id": str(approvers[0].get("member_id") or ""),
-    }
+    identities["human_approver_id"] = str(approvers[0].get("member_id") or "")
     if not all(identities.values()):
         raise ReleaseError("managed maintenance identities are incomplete")
     if identities["maintainer_id"] == identities["maintenance_reviewer_id"]:
@@ -111,8 +132,127 @@ def control_identities(root: Path, cli: MulticaCLI) -> dict[str, str]:
     return identities
 
 
+def truthy(value: Any) -> bool:
+    return value is True or str(value).lower() == "true"
+
+
+def recovery_exception_evidence(
+    cli: MulticaCLI,
+    issue_id: str,
+    issue: dict[str, Any],
+    metadata: dict[str, Any],
+    version: str | None,
+) -> tuple[dict[str, str], dict[str, str]]:
+    if version != RC2_RECOVERY_VERSION:
+        raise ReleaseError(
+            f"{RC2_RECOVERY_MODE} is limited to {RC2_RECOVERY_VERSION}"
+        )
+    if str(metadata.get("target_release") or "") != f"v{RC2_RECOVERY_VERSION}":
+        raise ReleaseError("recovery Maintenance target_release is not v1.1.0-rc.2")
+    if str(metadata.get("affected_release") or "") != RC2_AFFECTED_VERSION:
+        raise ReleaseError("recovery Maintenance affected_release is not v1.1.0-rc.1")
+
+    identities = control_agent_identities(cli)
+    human_approver_id = str(metadata.get("human_approver_id") or "")
+    identities["human_approver_id"] = human_approver_id
+    if not human_approver_id:
+        raise ReleaseError("recovery Maintenance human_approver_id is missing")
+    for key, expected in identities.items():
+        if str(metadata.get(key) or "") != expected:
+            raise ReleaseError(
+                f"recovery Maintenance {key} does not match its durable identity"
+            )
+
+    source_id = str(
+        metadata.get("pending_incident_source") or metadata.get("source_issue") or ""
+    )
+    if not source_id:
+        raise ReleaseError("recovery Maintenance pending Incident source is missing")
+    source_issue = cli.json(["issue", "get", source_id, "--output", "json"])
+    if not isinstance(source_issue, dict):
+        raise ReleaseError(f"pending Incident source is unreadable: {source_id}")
+    if str(issue.get("parent_issue_id") or "") != str(source_issue.get("id") or ""):
+        raise ReleaseError("recovery Maintenance Issue is not a child of its pending source")
+    source_metadata = metadata_map(
+        cli.json(["issue", "metadata", "list", source_id, "--output", "json"])
+    )
+    if not truthy(source_metadata.get("workflow_incident_pending")):
+        raise ReleaseError("pending Incident source is no longer marked pending")
+    if source_metadata.get("workflow_incident_id"):
+        raise ReleaseError("pending Incident source is already linked to a standard Incident")
+    if str(source_metadata.get("maintenance_change_id") or "") != issue_id:
+        raise ReleaseError("pending Incident source does not link this Maintenance Change")
+
+    raw_payload = source_metadata.get("workflow_incident_pending_payload")
+    if isinstance(raw_payload, str):
+        try:
+            payload = json.loads(raw_payload)
+        except json.JSONDecodeError as exc:
+            raise ReleaseError("pending Incident payload is invalid JSON") from exc
+    else:
+        payload = raw_payload
+    if not isinstance(payload, dict):
+        raise ReleaseError("pending Incident payload is missing")
+    dedupe_key = str(payload.get("dedupe_key") or "")
+    rule_id = str(payload.get("rule_id") or "")
+    pending_index = str(source_metadata.get("workflow_incident_pending_index") or "")
+    if not dedupe_key or not rule_id or not pending_index:
+        raise ReleaseError("pending Incident evidence is missing its stable index/dedupe/rule")
+
+    decision_comment_id = str(metadata.get("recovery_decision_comment_id") or "")
+    source_comments = as_list(
+        cli.json(["issue", "comment", "list", source_id, "--full", "--output", "json"]),
+        "comments",
+    )
+    decision_matches = [
+        item
+        for item in source_comments
+        if str(item.get("id") or "") == decision_comment_id
+    ]
+    if len(decision_matches) != 1:
+        raise ReleaseError("recovery decision comment is missing or ambiguous")
+    decision = decision_matches[0]
+    if (
+        decision.get("author_type") != "member"
+        or str(decision.get("author_id") or "") != human_approver_id
+        or str(decision.get("content") or "").strip() != RC2_RECOVERY_DECISION
+    ):
+        raise ReleaseError("recovery decision has the wrong author or exact content")
+
+    bounded = {
+        "recovery_mode": RC2_RECOVERY_MODE,
+        "pending_incident_source": str(source_issue.get("identifier") or source_id),
+        "recovery_decision_comment_id": decision_comment_id,
+        "affected_release": RC2_AFFECTED_VERSION,
+        "target_release": f"v{RC2_RECOVERY_VERSION}",
+        "control_identity_sha256": digest(identities),
+        "pending_incident_evidence_sha256": digest(
+            {
+                "source_issue": str(source_issue.get("identifier") or source_id),
+                "maintenance_issue": issue_id,
+                "pending_index": pending_index,
+                "dedupe_key": dedupe_key,
+                "rule_id": rule_id,
+            }
+        ),
+        "recovery_decision_sha256": digest(
+            {
+                "comment_id": decision_comment_id,
+                "author_type": decision.get("author_type"),
+                "author_id": decision.get("author_id"),
+                "content": str(decision.get("content") or "").strip(),
+            }
+        ),
+    }
+    return identities, bounded
+
+
 def maintenance_evidence(
-    root: Path, cli: MulticaCLI, issue_id: str, pr: dict[str, Any]
+    root: Path,
+    cli: MulticaCLI,
+    issue_id: str,
+    pr: dict[str, Any],
+    version: str | None = None,
 ) -> dict[str, Any]:
     issue = cli.json(["issue", "get", issue_id, "--output", "json"])
     if not isinstance(issue, dict):
@@ -120,12 +260,21 @@ def maintenance_evidence(
     metadata = metadata_map(
         cli.json(["issue", "metadata", "list", issue_id, "--output", "json"])
     )
-    identities = control_identities(root, cli)
-    for key, expected in identities.items():
-        if str(metadata.get(key) or "") != expected:
-            raise ReleaseError(f"Maintenance Issue {key} does not match the managed control-plane identity")
     if str(metadata.get("workflow_object_type") or "") != "maintenance_change":
         raise ReleaseError("release requires a workflow_object_type=maintenance_change Issue")
+    recovery_mode = str(metadata.get("recovery_mode") or "")
+    recovery_evidence: dict[str, str] = {}
+    if recovery_mode:
+        if recovery_mode != RC2_RECOVERY_MODE:
+            raise ReleaseError(f"unsupported Maintenance recovery_mode: {recovery_mode}")
+        identities, recovery_evidence = recovery_exception_evidence(
+            cli, issue_id, issue, metadata, version
+        )
+    else:
+        identities = control_identities(root, cli)
+        for key, expected in identities.items():
+            if str(metadata.get(key) or "") != expected:
+                raise ReleaseError(f"Maintenance Issue {key} does not match the managed control-plane identity")
     plan_revision = str(metadata.get("plan_revision") or "")
     reviewed_sha = str(metadata.get("reviewed_commit_sha") or "")
     review_comment_id = str(metadata.get("review_comment_id") or "")
@@ -179,7 +328,8 @@ def maintenance_evidence(
         "issue_id": issue_id,
         "workspace_id": cli.workspace_id,
         "profile": cli.profile,
-        **identities,
+        **({} if recovery_evidence else identities),
+        **recovery_evidence,
         "plan_revision": plan_revision,
         "reviewed_commit_sha": reviewed_sha,
         "review_comment_id": review_comment_id,
@@ -276,7 +426,7 @@ def maintenance_github_provenance(
     approval_author_id = str(release_approval.get("author_id") or "")
     if not all([issue_id, review_comment_id, approval_comment_id, approval_author_id]):
         raise ReleaseError("maintenance release provenance is incomplete")
-    return {
+    provenance = {
         "maintenance_issue": issue_id,
         "review_comment_id": review_comment_id,
         "multica_approval_comment_id": approval_comment_id,
@@ -285,6 +435,20 @@ def maintenance_github_provenance(
             approval_author_id.encode("utf-8")
         ).hexdigest(),
     }
+    if authorization.get("recovery_mode") == RC2_RECOVERY_MODE:
+        for key in [
+            "recovery_mode",
+            "pending_incident_source",
+            "recovery_decision_comment_id",
+            "control_identity_sha256",
+            "pending_incident_evidence_sha256",
+            "recovery_decision_sha256",
+        ]:
+            value = str(authorization.get(key) or "")
+            if not value:
+                raise ReleaseError(f"recovery release provenance is missing {key}")
+            provenance[key] = value
+    return provenance
 
 
 def github_release_approval_block(
@@ -365,9 +529,19 @@ def verify_versions(root: Path, version: str) -> list[str]:
     for path in sorted((root / "skills").glob("*/SKILL.md")):
         values[path.relative_to(root).as_posix()] = frontmatter_version(path)
     mismatches = [f"{name}={value}" for name, value in values.items() if value != version]
+    instruction_files = []
+    for relative, versions in runtime_instruction_versions(root, workflow).items():
+        if not versions:
+            continue
+        instruction_files.append(relative)
+        mismatches.extend(
+            f"{relative}:workflow_version={value}"
+            for value in versions
+            if value != version
+        )
     if mismatches:
         raise ReleaseError(f"release version mismatch for {version}: {mismatches}")
-    return sorted(values)
+    return sorted([*values, *instruction_files])
 
 
 def normalized_expected_assets(value: Any) -> list[str]:
@@ -546,7 +720,9 @@ def build_plan(
     else:
         if multica is None:
             raise ReleaseError("Maintenance release planning requires a resolved Multica context")
-        authorization = maintenance_evidence(root, multica, str(maintenance_issue), pr)
+        authorization = maintenance_evidence(
+            root, multica, str(maintenance_issue), pr, version
+        )
     plan = {
         "schema_version": 1,
         "created_at": utc_now(),
@@ -662,6 +838,7 @@ def verify_release_approval(
             "mergeCommit": {"oid": plan["merged_pr"]["merge_commit_sha"]},
             "mergedAt": plan["merged_pr"].get("merged_at"),
         },
+        str(plan.get("version") or ""),
     )
     if current != authorization:
         raise ReleaseError("Maintenance Review evidence changed after release planning")
@@ -675,11 +852,28 @@ def verify_release_approval(
         f"APPROVE WORKFLOW RELEASE {plan['release_plan_digest']}",
         f"APPROVE WORKFLOW RELEASE {plan['release_plan_digest'][:12]}",
     }
+    current_metadata = metadata_map(
+        cli.json(
+            [
+                "issue",
+                "metadata",
+                "list",
+                str(authorization["issue_id"]),
+                "--output",
+                "json",
+            ]
+        )
+    )
+    human_approver_id = str(
+        current_metadata.get("human_approver_id")
+        or authorization.get("human_approver_id")
+        or ""
+    )
     matches = [
         item
         for item in comments
         if item.get("author_type") == "member"
-        and str(item.get("author_id") or "") == authorization["human_approver_id"]
+        and str(item.get("author_id") or "") == human_approver_id
         and any(
             line.strip() in expected_lines
             for line in str(item.get("content") or "").splitlines()
@@ -932,6 +1126,17 @@ def command_verify_tag(args: argparse.Namespace, root: Path) -> int:
             "maintenance_evidence_sha256",
             "multica_approval_author_sha256",
         ]
+        if version == RC2_RECOVERY_VERSION:
+            required.extend(
+                [
+                    "recovery_mode",
+                    "pending_incident_source",
+                    "recovery_decision_comment_id",
+                    "control_identity_sha256",
+                    "pending_incident_evidence_sha256",
+                    "recovery_decision_sha256",
+                ]
+            )
         values = {}
         for key in required:
             pattern = rf"(?m)^{key}=([a-f0-9]{{64}})$" if key.endswith("sha256") else rf"(?m)^{key}=(\S+)$"

@@ -8,7 +8,7 @@ python -m pip install -r requirements.txt
 
 Git-managed desired state for the Multica `开发交付小队`, its workflow operations control plane, runtime policies and reusable skills.
 
-The base architecture is recorded in [docs/design-plan-v5.md](docs/design-plan-v5.md). Observer and Maintainer control-plane design is recorded in [docs/design-plan-v6.md](docs/design-plan-v6.md).
+The base architecture is recorded in [docs/design-plan-v5.md](docs/design-plan-v5.md). Observer and Maintainer control-plane design is recorded in [docs/design-plan-v6.md](docs/design-plan-v6.md). Multica v0.4.2 Autopilot corrections are recorded separately in [docs/rc2-compatibility-amendment.md](docs/rc2-compatibility-amendment.md) so the immutable RC1 design evidence remains unchanged.
 
 ## Safety Model
 

@@ -23,6 +23,9 @@ from package_skills import build_archive, package_hash
 MANAGED_BY = "multica-dev-workflow"
 MARKER_RE = re.compile(r"\A<!-- multica-workflow\r?\n(?P<body>.*?)\r?\n-->\r?\n?", re.DOTALL)
 UUID_RE = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
+WORKFLOW_VERSION_LITERAL_RE = re.compile(
+    r"\bworkflow_version=([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?)\b"
+)
 
 
 class WorkflowError(RuntimeError):
@@ -244,6 +247,28 @@ def git_dirty(root: Path) -> bool:
     return bool(result.stdout.strip())
 
 
+def runtime_instruction_versions(
+    root: Path, manifest: dict[str, Any]
+) -> dict[str, list[str]]:
+    relative_paths = {
+        str(relative)
+        for agent in manifest.get("agents", [])
+        for relative in agent.get("instruction_files", [])
+    }
+    relative_paths.update(
+        str(relative)
+        for relative in (manifest.get("squad") or {}).get("instruction_files", [])
+    )
+    result: dict[str, list[str]] = {}
+    for relative in sorted(relative_paths):
+        path = root / relative
+        if path.is_file():
+            result[relative] = WORKFLOW_VERSION_LITERAL_RE.findall(
+                path.read_text(encoding="utf-8")
+            )
+    return result
+
+
 def validate_repository(root: Path, deployment_profile: str) -> tuple[dict[str, Any], dict[str, Any]]:
     manifest = read_json(root / "workflow.json")
     schema = read_json(root / "workflow.schema.json")
@@ -269,6 +294,12 @@ def validate_repository(root: Path, deployment_profile: str) -> tuple[dict[str, 
     version_file = (root / "VERSION").read_text(encoding="utf-8").strip() if (root / "VERSION").is_file() else ""
     if version_file != workflow.get("version"):
         errors.append("VERSION must match workflow.version")
+    for relative, versions in runtime_instruction_versions(root, manifest).items():
+        stale = sorted({value for value in versions if value != workflow.get("version")})
+        if stale:
+            errors.append(
+                f"runtime instruction {relative} has stale workflow_version literals: {stale}"
+            )
     agents = manifest.get("agents") or []
     agent_keys = [agent.get("key") for agent in agents]
     agent_names = [agent.get("name") for agent in agents]
@@ -530,7 +561,6 @@ def autopilot_spec(
     agent: str,
     mode: str,
     project: str,
-    priority: str,
     status: str,
     issue_title_template: str,
     subscriber_ids: list[str],
@@ -542,7 +572,6 @@ def autopilot_spec(
         "agent": agent,
         "mode": mode,
         "project": project,
-        "priority": priority,
         "status": status,
         "issue_title_template": issue_title_template,
         "subscriber_ids": sorted(subscriber_ids),
@@ -557,6 +586,15 @@ def normalized_subscriber_ids(value: Any) -> list[str]:
         if isinstance(item, str):
             result.append(item)
         elif isinstance(item, dict):
+            subscriber_type = str(
+                item.get("user_type")
+                or item.get("member_type")
+                or item.get("subscriber_type")
+                or item.get("type")
+                or ""
+            ).lower()
+            if subscriber_type and subscriber_type not in {"member", "user"}:
+                continue
             identifier = item.get("id") or item.get("user_id") or item.get("member_id") or item.get("subscriber_id")
             if identifier:
                 result.append(str(identifier))
@@ -584,10 +622,21 @@ def normalized_autopilot_detail(value: Any, fallback: dict[str, Any]) -> dict[st
     nested = value.get("autopilot")
     if isinstance(nested, dict):
         detail = {**fallback, **nested}
-        if "triggers" in value:
-            detail["triggers"] = value["triggers"]
-        return detail
-    return {**fallback, **value}
+        for field in ["triggers", "subscribers"]:
+            if field in value:
+                detail[field] = value[field]
+    else:
+        detail = {**fallback, **value}
+    payload = nested if isinstance(nested, dict) else value
+    if isinstance(payload, dict) and payload.get("assignee_id"):
+        detail["agent_id"] = payload["assignee_id"]
+    elif not detail.get("agent_id") and detail.get("assignee_id"):
+        detail["agent_id"] = detail["assignee_id"]
+    if isinstance(payload, dict) and payload.get("execution_mode"):
+        detail["mode"] = payload["execution_mode"]
+    elif not detail.get("mode") and detail.get("execution_mode"):
+        detail["mode"] = detail["execution_mode"]
+    return detail
 
 
 def autopilot_state_items(state: dict[str, Any]) -> list[dict[str, Any]]:
@@ -812,6 +861,7 @@ def observed_hash(state: dict[str, Any]) -> str:
     autopilots = []
     for autopilot in state.get("autopilots", []):
         detail = state.get("autopilot_details", {}).get(str(autopilot.get("id")), autopilot)
+        detail = normalized_autopilot_detail(detail, autopilot)
         autopilots.append(
             {
                 **{
@@ -823,7 +873,6 @@ def observed_hash(state: dict[str, Any]) -> str:
                         "agent_id",
                         "mode",
                         "project_id",
-                        "priority",
                         "status",
                         "issue_title_template",
                     ]
@@ -1358,7 +1407,6 @@ def build_plan(
             autopilot["agent"],
             autopilot["mode"],
             autopilot["project"],
-            autopilot["priority"],
             effective_status,
             str(autopilot.get("issue_title_template") or ""),
             subscriber_ids,
@@ -1375,7 +1423,8 @@ def build_plan(
             actions.append({"type": "CREATE_AUTOPILOT", "key": autopilot["key"], "desired": desired})
         else:
             detail = state.get("autopilot_details", {}).get(str(current.get("id")), current)
-            required_fields = ["title", "description", "agent_id", "mode", "project_id", "priority", "status", "triggers"]
+            detail = normalized_autopilot_detail(detail, current)
+            required_fields = ["title", "description", "agent_id", "mode", "project_id", "status", "triggers"]
             missing_fields = [field for field in required_fields if field not in detail]
             if "subscribers" not in detail and "subscriber_ids" not in detail:
                 missing_fields.append("subscribers")
@@ -1401,13 +1450,17 @@ def build_plan(
                 autopilot["project"]
                 if project_current and str(detail.get("project_id")) == str(project_current.get("id"))
                 else str(detail.get("project_id") or ""),
-                str(detail.get("priority") or "none"),
                 str(detail.get("status") or ""),
                 str(detail.get("issue_title_template") or ""),
                 normalized_subscriber_ids(detail.get("subscribers") or detail.get("subscriber_ids")),
             )
             current_hash = sha256_value(current_spec)
-            if current_hash == spec_hash and marked:
+            current_marker = parse_marker(str(detail.get("description") or "")) or {}
+            if (
+                current_hash == spec_hash
+                and marked
+                and current_marker.get("spec_hash") == spec_hash
+            ):
                 actions.append({"type": "NO_CHANGE", "key": object_key})
             else:
                 actions.append(
@@ -1777,8 +1830,6 @@ def _autopilot_create_args(
         desired["mode"],
         "--title",
         desired["title"],
-        "--priority",
-        desired.get("priority", "none"),
         "--project",
         project_id,
         "--output",
@@ -1806,21 +1857,34 @@ def _autopilot_update_args(
         desired["mode"],
         "--title",
         desired["title"],
-        "--priority",
-        desired.get("priority", "none"),
         "--project",
         project_id,
         "--status",
         desired.get("status", "active"),
-        "--clear-subscribers",
         "--output",
         "json",
     ]
     if desired.get("issue_title_template"):
         args.extend(["--issue-title-template", desired["issue_title_template"]])
-    for subscriber_id in desired.get("subscriber_ids") or []:
-        args.extend(["--subscriber", subscriber_id])
+    subscriber_ids = desired.get("subscriber_ids") or []
+    if subscriber_ids:
+        for subscriber_id in subscriber_ids:
+            args.extend(["--subscriber", subscriber_id])
+    else:
+        args.append("--clear-subscribers")
     return args
+
+
+def _autopilot_status_update_args(autopilot_id: str, status: str) -> list[str]:
+    return [
+        "autopilot",
+        "update",
+        autopilot_id,
+        "--status",
+        status,
+        "--output",
+        "json",
+    ]
 
 
 def _trigger_add_args(autopilot_id: str, desired: dict[str, Any]) -> list[str]:
@@ -2071,11 +2135,20 @@ def apply_plan(root: Path, cli: MulticaCLI, plan_path: Path, approval: str) -> d
         agent_id = agent_ids[desired["agent"]]
         project_id = project_ids[desired["project"]]
         if action["type"] == "CREATE_AUTOPILOT":
-            current = cli.json(_autopilot_create_args(desired, agent_id, project_id))
+            raw_current = cli.json(_autopilot_create_args(desired, agent_id, project_id))
+            current = normalized_autopilot_detail(raw_current, {})
             autopilot_id = str(current.get("id") or "")
+            if not autopilot_id:
+                raise WorkflowError(f"Autopilot create did not return an ID for {desired['key']}")
+            if desired.get("status", "active") != "active":
+                cli.json(
+                    _autopilot_status_update_args(
+                        autopilot_id, desired.get("status", "active")
+                    )
+                )
         else:
             autopilot_id = str(action["current_id"])
-        cli.json(_autopilot_update_args(autopilot_id, desired, agent_id, project_id))
+            cli.json(_autopilot_update_args(autopilot_id, desired, agent_id, project_id))
         journal["completed"].append({"type": action["type"], "key": action.get("key"), "at": utc_now()})
         write_json(journal_path, journal)
 

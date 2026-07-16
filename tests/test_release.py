@@ -1,6 +1,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -99,11 +100,85 @@ class FakeMultica:
         raise AssertionError(args)
 
 
+class RecoveryMultica(FakeMultica):
+    def __init__(self):
+        super().__init__()
+        self.metadata.update(
+            {
+                "affected_release": "v1.1.0-rc.1",
+                "target_release": "v1.1.0-rc.2",
+                "recovery_mode": release.RC2_RECOVERY_MODE,
+                "pending_incident_source": "WOR-1",
+                "source_issue": "WOR-1",
+                "recovery_decision_comment_id": "decision-1",
+            }
+        )
+        self.source_metadata = {
+            "workflow_incident_pending": True,
+            "workflow_incident_pending_index": "development-delivery",
+            "workflow_incident_pending_payload": json.dumps(
+                {
+                    "dedupe_key": "development-delivery:v3:WF-AUTOPILOT-CONTRACT-001:autopilot.workflow-health-audit",
+                    "rule_id": "WF-AUTOPILOT-CONTRACT-001",
+                }
+            ),
+            "maintenance_change_id": "T-200",
+        }
+        self.source_comments = [
+            {
+                "id": "decision-1",
+                "author_type": "member",
+                "author_id": "human-1",
+                "content": release.RC2_RECOVERY_DECISION,
+            }
+        ]
+
+    def json(self, args):
+        args = list(args)
+        if args[:2] == ["issue", "get"]:
+            if args[2] == "T-200":
+                return {
+                    "id": "maintenance-internal",
+                    "identifier": "T-200",
+                    "parent_issue_id": "source-internal",
+                    "status": "in_review",
+                }
+            if args[2] == "WOR-1":
+                return {
+                    "id": "source-internal",
+                    "identifier": "WOR-1",
+                    "status": "blocked",
+                }
+        if args[:3] == ["issue", "metadata", "list"]:
+            return self.source_metadata if args[3] == "WOR-1" else self.metadata
+        if args[:3] == ["issue", "comment", "list"]:
+            return self.source_comments if args[3] == "WOR-1" else self.comments
+        if args[:2] == ["squad", "list"]:
+            return []
+        return super().json(args)
+
+
 class ReleaseTests(unittest.TestCase):
     def test_all_version_files_match_rc(self):
-        checked = release.verify_versions(ROOT, "1.1.0-rc.1")
+        checked = release.verify_versions(ROOT, "1.1.0-rc.2")
         self.assertIn("VERSION", checked)
         self.assertIn("skills/multica-workflow-observer/SKILL.md", checked)
+        self.assertIn("instructions/roles/leader.md", checked)
+
+    def test_stale_runtime_instruction_version_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp_root = Path(temp) / "repo"
+            shutil.copytree(ROOT, temp_root, ignore=shutil.ignore_patterns(".git", "build", "__pycache__"))
+            leader = temp_root / "instructions/roles/leader.md"
+            leader.write_text(
+                leader.read_text(encoding="utf-8").replace(
+                    "workflow_version=1.1.0-rc.2",
+                    "workflow_version=1.1.0-rc.1",
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(release.ReleaseError, "workflow_version"):
+                release.verify_versions(temp_root, "1.1.0-rc.2")
 
     def test_release_plan_binds_exact_merge_pr_and_validation(self):
         pr = {
@@ -131,6 +206,7 @@ class ReleaseTests(unittest.TestCase):
             patch.object(release, "merged_pr_for_commit", return_value=pr),
             patch.object(release, "successful_validation", return_value=validation),
             patch.object(release, "tracked_source_hash", return_value="source-hash"),
+            patch.object(release, "verify_versions", return_value=[]),
             patch.object(
                 release,
                 "gh_json",
@@ -163,6 +239,10 @@ class ReleaseTests(unittest.TestCase):
     def test_bootstrap_exception_is_limited_to_first_rc(self):
         with self.assertRaisesRegex(release.ReleaseError, "limited to v1.1.0-rc.1"):
             release.bootstrap_evidence(ROOT, "1.1.0", "v6", {"number": 3})
+
+    def test_bootstrap_cannot_authorize_rc2(self):
+        with self.assertRaisesRegex(release.ReleaseError, "limited to v1.1.0-rc.1"):
+            release.bootstrap_evidence(ROOT, "1.1.0-rc.2", "v6", {"number": 3})
 
     def test_bootstrap_plan_rejects_approval_text_as_substring(self):
         value = {
@@ -291,6 +371,69 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(evidence["reviewed_commit_sha"], "head-sha")
         self.assertEqual(evidence["review_comment_id"], "review-1")
         self.assertEqual(evidence["github_merged_at"], pr["mergedAt"])
+
+    def test_rc2_pending_incident_exception_is_bounded_and_hash_only(self):
+        cli = RecoveryMultica()
+        evidence = release.maintenance_evidence(
+            ROOT, cli, "T-200", maintenance_pr(), "1.1.0-rc.2"
+        )
+        self.assertEqual(evidence["recovery_mode"], release.RC2_RECOVERY_MODE)
+        self.assertEqual(evidence["pending_incident_source"], "WOR-1")
+        encoded = json.dumps(evidence, ensure_ascii=False)
+        self.assertNotIn("agent-maintainer", encoded)
+        self.assertNotIn("agent-reviewer", encoded)
+        self.assertNotIn("human-1", encoded)
+        self.assertNotIn("dedupe_key", encoded)
+
+        provenance = release.maintenance_github_provenance(
+            evidence, {"comment_id": "approval-1", "author_id": "human-1"}
+        )
+        self.assertEqual(provenance["recovery_mode"], release.RC2_RECOVERY_MODE)
+        self.assertIn("pending_incident_evidence_sha256", provenance)
+        self.assertNotIn("human-1", json.dumps(provenance))
+
+    def test_rc2_pending_incident_exception_rejects_stale_or_reused_evidence(self):
+        cases = {
+            "not pending": lambda cli: cli.source_metadata.update(
+                {"workflow_incident_pending": False}
+            ),
+            "already linked": lambda cli: cli.source_metadata.update(
+                {"workflow_incident_id": "WOR-9"}
+            ),
+            "missing dedupe": lambda cli: cli.source_metadata.update(
+                {
+                    "workflow_incident_pending_payload": json.dumps(
+                        {"rule_id": "WF-AUTOPILOT-CONTRACT-001"}
+                    )
+                }
+            ),
+            "wrong decision author": lambda cli: cli.source_comments[0].update(
+                {"author_id": "human-2"}
+            ),
+            "altered decision": lambda cli: cli.source_comments[0].update(
+                {"content": release.RC2_RECOVERY_DECISION + " changed"}
+            ),
+            "wrong target release": lambda cli: cli.metadata.update(
+                {"target_release": "v1.1.0-rc.3"}
+            ),
+        }
+        for label, mutate in cases.items():
+            with self.subTest(case=label):
+                cli = RecoveryMultica()
+                mutate(cli)
+                with self.assertRaises(release.ReleaseError):
+                    release.maintenance_evidence(
+                        ROOT, cli, "T-200", maintenance_pr(), "1.1.0-rc.2"
+                    )
+
+        with self.assertRaisesRegex(release.ReleaseError, "limited to 1.1.0-rc.2"):
+            release.maintenance_evidence(
+                ROOT,
+                RecoveryMultica(),
+                "T-200",
+                maintenance_pr(),
+                "1.1.0-rc.3",
+            )
 
     def test_maintenance_review_must_predate_merge(self):
         cli = FakeMultica()
