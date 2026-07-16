@@ -1,5 +1,11 @@
 # Multica Development Workflow
 
+Install the reconciler runtime dependency before using repository commands:
+
+```text
+python -m pip install -r requirements.txt
+```
+
 Git-managed desired state for the Multica `开发交付小队`, its workflow operations control plane, runtime policies and reusable skills.
 
 The base architecture is recorded in [docs/design-plan-v5.md](docs/design-plan-v5.md). Observer and Maintainer control-plane design is recorded in [docs/design-plan-v6.md](docs/design-plan-v6.md).

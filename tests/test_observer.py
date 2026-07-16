@@ -29,6 +29,30 @@ class AuditCLI:
         raise AssertionError(args)
 
 
+class MaintenanceAuditCLI(AuditCLI):
+    def __init__(self, metadata, comments=None):
+        super().__init__(metadata, comments)
+        self.agents = [
+            {
+                "id": "agent-maintainer",
+                "instructions": observer_marker("agent.workflow-maintainer"),
+            },
+            {
+                "id": "agent-reviewer",
+                "instructions": observer_marker(
+                    "agent.workflow-maintenance-reviewer"
+                ),
+            },
+        ]
+
+    def json(self, args, input_text=None):
+        if args[:2] == ["agent", "list"]:
+            return self.agents
+        if args[:2] == ["agent", "get"]:
+            return next(item for item in self.agents if item["id"] == args[2])
+        return super().json(args, input_text)
+
+
 class IncidentCLI:
     def __init__(self):
         self.metadata = {"T-100": {"protocol_revision": "v3"}}
@@ -38,6 +62,8 @@ class IncidentCLI:
         self.fail_incident_metadata_once = False
         self.fail_metadata_keys = set()
         self.issue_details = {}
+        self.updates = []
+        self.subscribers = []
 
     def json(self, args, input_text=None):
         if args[:2] == ["project", "list"]:
@@ -126,9 +152,16 @@ class IncidentCLI:
         if args[:3] == ["issue", "comment", "list"]:
             return []
         if args[:3] == ["issue", "subscriber", "add"]:
+            self.subscribers.append(args)
             return {"ok": True}
         if args[:2] == ["issue", "update"]:
-            return {"id": args[2], "status": args[args.index("--status") + 1]}
+            self.updates.append(args)
+            result = {"id": args[2]}
+            if "--status" in args:
+                result["status"] = args[args.index("--status") + 1]
+            if "--priority" in args:
+                result["priority"] = args[args.index("--priority") + 1]
+            return result
         raise AssertionError(args)
 
 
@@ -521,6 +554,80 @@ class ObserverTests(unittest.TestCase):
         findings = observer.audit_issue(cli, {"identifier": "T-stale", "status": "in_review"}, 24)
         self.assertIn("WF-APPROVAL-001", {item["rule_id"] for item in findings})
 
+    def test_recorded_approval_requires_durable_author_metadata_and_current_revision(self):
+        base = {
+            "human_approver_id": "human-1",
+            "plan_approved": True,
+            "plan_revision": "v3",
+            "approved_plan_revision": "v3",
+            "approval_author_type": "member",
+            "approval_author_id": "human-1",
+            "approval_comment_id": "comment-v3",
+        }
+        comment = {
+            "id": "comment-v3",
+            "author_type": "member",
+            "author_id": "human-1",
+            "content": "APPROVE PLAN v3",
+        }
+        cases = [
+            ({**base, "approval_author_id": ""}, "approval_author_id"),
+            ({**base, "approval_author_type": "agent"}, "approval_author_type"),
+            ({**base, "approved_plan_revision": "v2"}, "approved_plan_revision"),
+        ]
+        for metadata, label in cases:
+            with self.subTest(case=label):
+                findings = observer.audit_issue(
+                    AuditCLI(metadata, [comment]),
+                    {"identifier": "T-approval", "status": "in_review"},
+                    24,
+                )
+                self.assertIn(
+                    "WF-APPROVAL-001", {item["rule_id"] for item in findings}
+                )
+
+    def test_maintenance_review_audit_binds_managed_identity_comment_and_sha(self):
+        metadata = {
+            "workflow_object_type": "maintenance_change",
+            "maintainer_id": "agent-maintainer",
+            "maintenance_reviewer_id": "agent-reviewer",
+            "review_comment_id": "review-1",
+            "plan_revision": "v6",
+            "reviewed_commit_sha": "a" * 40,
+            "pr_head_sha": "a" * 40,
+        }
+        comment = {
+            "id": "review-1",
+            "author_type": "agent",
+            "author_id": "agent-reviewer",
+            "content": f"APPROVED\nplan_revision=v6\nreviewed_commit_sha={'a' * 40}",
+        }
+        valid = observer.audit_issue(
+            MaintenanceAuditCLI(metadata, [comment]),
+            {"identifier": "T-maint", "status": "in_review"},
+            24,
+        )
+        self.assertNotIn(
+            "WF-MAINT-REVIEW-001", {item["rule_id"] for item in valid}
+        )
+        cases = [
+            ({**metadata, "maintenance_reviewer_id": "agent-maintainer"}, comment),
+            ({**metadata, "maintenance_reviewer_id": "agent-unknown"}, {**comment, "author_id": "agent-unknown"}),
+            ({**metadata, "pr_head_sha": "b" * 40}, comment),
+            ({key: value for key, value in metadata.items() if key != "review_comment_id"}, comment),
+        ]
+        for case_metadata, case_comment in cases:
+            with self.subTest(metadata=case_metadata):
+                findings = observer.audit_issue(
+                    MaintenanceAuditCLI(case_metadata, [case_comment]),
+                    {"identifier": "T-maint", "status": "in_review"},
+                    24,
+                )
+                self.assertIn(
+                    "WF-MAINT-REVIEW-001",
+                    {item["rule_id"] for item in findings},
+                )
+
     def test_missing_v3_gate_metadata_is_reported(self):
         findings = observer.audit_issue(
             AuditCLI(
@@ -729,6 +836,45 @@ class ObserverTests(unittest.TestCase):
 
     def test_control_plane_audit_verifies_full_desired_state(self):
         cli = ControlPlaneCLI()
+        self.assertEqual(observer.audit_control_plane(cli, "T-audit"), [])
+
+    def test_control_plane_audit_accepts_reviewed_disabled_operations_mode(self):
+        cli = ControlPlaneCLI()
+        manifest = json.loads((ROOT / "workflow.json").read_text(encoding="utf-8"))
+        operations = observer.control_contract()["operations"]
+        autopilot_spec = manifest["autopilots"][0]
+        cli.autopilots[0]["status"] = "paused"
+        disabled_hash = observer.sha256_value(
+            {
+                "key": autopilot_spec["key"],
+                "title": autopilot_spec["title"],
+                "description": autopilot_spec["description"].strip() + "\n",
+                "agent": autopilot_spec["agent"],
+                "mode": autopilot_spec["mode"],
+                "project": autopilot_spec["project"],
+                "priority": autopilot_spec["priority"],
+                "status": "paused",
+                "issue_title_template": autopilot_spec.get(
+                    "issue_title_template", ""
+                ),
+                "subscriber_ids": ["human-1"],
+            }
+        )
+        cli.autopilots[0]["description"] = observer_marker(
+            "autopilot.workflow-health-audit",
+            autopilot_spec["description"].strip() + "\n",
+            disabled_hash,
+        )
+        observer_skill = operations["observer_skill_name"]
+        observer_agent = operations["observer_agent"]
+        for key, agent in cli.agent_by_key.items():
+            if key == observer_agent:
+                continue
+            cli.agent_skills[agent["id"]] = [
+                skill
+                for skill in cli.agent_skills[agent["id"]]
+                if skill.get("name") != observer_skill
+            ]
         self.assertEqual(observer.audit_control_plane(cli, "T-audit"), [])
         cli.agents[0]["description"] = "drifted instructions contract"
         cli.autopilots[0]["triggers"][0]["timezone"] = "UTC"
@@ -1026,6 +1172,52 @@ class ObserverTests(unittest.TestCase):
         args.source_issue = "T-200"
         expanded = observer.report_incident(cli, args)
         self.assertTrue(expanded["notified"])
+
+    def test_duplicate_incident_preserves_maximum_severity_and_updates_priority(self):
+        cli = IncidentCLI()
+        dedupe = "development-delivery:v3:WF-REVIEW-001:T-100"
+        cli.incidents = [
+            {"id": "active", "identifier": "T-801", "status": "in_progress"}
+        ]
+        cli.metadata["T-801"] = {
+            "workflow_object_type": "incident",
+            "incident_dedupe_key": dedupe,
+            "incident_status": "confirmed",
+            "incident_severity": "high",
+            "incident_source_requirements": '["T-100"]',
+            "incident_last_notified_at": observer.utc_now(),
+        }
+        args = Namespace(
+            source_issue="T-100",
+            source_requirement="T-100",
+            rule_id="WF-REVIEW-001",
+            severity="medium",
+            summary="duplicate",
+            expected="review matches",
+            actual="still stale",
+            evidence="same",
+            entity=None,
+            dedupe_key=dedupe,
+            protocol_revision="v3",
+            reporter_agent_id="agent-reviewer",
+            reporter_role="reviewer",
+            block_source=False,
+        )
+        observer.report_incident(cli, args)
+        self.assertEqual(cli.metadata["T-801"]["incident_severity"], "high")
+        self.assertFalse(any("--priority" in update for update in cli.updates))
+
+        args.severity = "urgent"
+        observer.report_incident(cli, args)
+        self.assertEqual(cli.metadata["T-801"]["incident_severity"], "urgent")
+        self.assertTrue(
+            any(
+                "--priority" in update
+                and update[update.index("--priority") + 1] == "urgent"
+                for update in cli.updates
+            )
+        )
+        self.assertTrue(cli.subscribers)
 
     def test_incident_lookup_paginates_before_deduplication(self):
         cli = IncidentCLI()

@@ -15,6 +15,8 @@ import shutil
 import subprocess
 from typing import Any, Iterable
 
+from jsonschema import Draft202012Validator
+
 from package_skills import build_archive, package_hash
 
 
@@ -244,7 +246,19 @@ def git_dirty(root: Path) -> bool:
 
 def validate_repository(root: Path, deployment_profile: str) -> tuple[dict[str, Any], dict[str, Any]]:
     manifest = read_json(root / "workflow.json")
+    schema = read_json(root / "workflow.schema.json")
     profile = read_json(root / f"deployment-profiles/{deployment_profile}.json")
+    Draft202012Validator.check_schema(schema)
+    schema_errors = sorted(
+        Draft202012Validator(schema).iter_errors(manifest),
+        key=lambda item: tuple(str(part) for part in item.absolute_path),
+    )
+    if schema_errors:
+        rendered = []
+        for item in schema_errors:
+            location = ".".join(str(part) for part in item.absolute_path) or "<root>"
+            rendered.append(f"workflow.json schema {location}: {item.message}")
+        raise WorkflowError("repository validation failed:\n- " + "\n- ".join(rendered))
     errors: list[str] = []
     if manifest.get("schema_version") != 2:
         errors.append("schema_version must be 2")
@@ -1850,9 +1864,27 @@ def _refresh_maps(cli: MulticaCLI, manifest: dict[str, Any]) -> tuple[dict[str, 
             agent_ids[agent["key"]] = str(current["id"])
     skill_ids: dict[str, str] = {}
     for skill in manifest["skills"]:
-        current = next((item for item in state["skills"] if item.get("name") == skill["name"]), None)
-        if current and current.get("id"):
-            skill_ids[skill["key"]] = str(current["id"])
+        if "workspace" not in skill.get("targets", []):
+            continue
+        matches = [
+            item for item in state["skills"] if item.get("name") == skill["name"]
+        ]
+        if len(matches) != 1:
+            raise WorkflowError(
+                f"expected one workspace Skill named {skill['name']} after apply; found {len(matches)}"
+            )
+        current = matches[0]
+        detail = state.get("skill_details", {}).get(str(current.get("id") or ""), current)
+        if (
+            deep_find(detail, "managed_by") != MANAGED_BY
+            or deep_find(detail, "workflow_id") != workflow_id
+        ):
+            raise WorkflowError(
+                f"workspace Skill {skill['name']} is not managed after apply"
+            )
+        if not current.get("id"):
+            raise WorkflowError(f"workspace Skill {skill['name']} has no ID after apply")
+        skill_ids[skill["key"]] = str(current["id"])
     return agent_ids, skill_ids, state
 
 

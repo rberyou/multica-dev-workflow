@@ -1,5 +1,11 @@
 # Workflow Manager Commands
 
+Install the repository runtime dependency once per Python environment:
+
+```text
+python -m pip install -r requirements.txt
+```
+
 ## First Check
 
 ```text

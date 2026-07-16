@@ -2,7 +2,7 @@
   "schema_version": 1,
   "workflow_version": "1.1.0-rc.1",
   "protocol_revision": "v3",
-  "observer_source_hash": "733113d832501d0f1d3081580f87508e2b81a992d61a85e96edd3022d9d33229",
+  "observer_source_hash": "d5243fa108ab3b17aba152113d1910adaca2765fcdd7f99871d62111b4d64d52",
   "agents": {
     "leader": {
       "name": "开发队长",
@@ -223,7 +223,7 @@
         "workflow-maintainer",
         "workflow-maintenance-reviewer"
       ],
-      "package_hash": "00596ef210d649a3c0d1d82b9173577ea512d3d70b329e5210e59a5c07880953"
+      "package_hash": "34f4d908ec90fe44f8588ba779e94bebc9ba385d4fa0ff91369b676ae4c2bbc9"
     }
   },
   "squad": {
@@ -303,6 +303,43 @@
           "timezone": "Asia/Shanghai"
         }
       ]
+    }
+  },
+  "operations": {
+    "project": "workflow-operations",
+    "observer_agent": "workflow-observer",
+    "observer_skill": "workflow-observer",
+    "reporter_agents": [
+      "leader",
+      "planner",
+      "plan-reviewer",
+      "integrator",
+      "developer-a",
+      "developer-b",
+      "code-reviewer"
+    ],
+    "autopilot": "workflow-health-audit",
+    "observer_skill_name": "multica-workflow-observer",
+    "modes": {
+      "enabled": {
+        "autopilot_status": "active",
+        "observer_skill_attach_to": [
+          "leader",
+          "planner",
+          "plan-reviewer",
+          "integrator",
+          "developer-a",
+          "developer-b",
+          "code-reviewer",
+          "workflow-observer"
+        ]
+      },
+      "disabled": {
+        "autopilot_status": "paused",
+        "observer_skill_attach_to": [
+          "workflow-observer"
+        ]
+      }
     }
   }
 }

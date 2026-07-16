@@ -2,7 +2,7 @@
 
 The release Plan binds version, selected merged PR, reviewed PR head SHA, exact PR merge commit SHA, green validation run, changelog, expected assets and the Multica Maintenance Review record.
 
-Before planning, the Maintenance Issue metadata must contain the managed Maintainer, Maintenance Reviewer and human approver IDs, `plan_revision`, `reviewed_commit_sha`, `review_comment_id`, `github_pr_number` and `github_merge_commit_sha`. The Review comment must be authored by the managed Reviewer; its first non-empty line must be exactly `APPROVED`, followed by exactly one `plan_revision=<current>` line and exactly one `reviewed_commit_sha=<full-PR-head-SHA>` line.
+Before merge, the Maintenance Issue metadata must contain the managed Maintainer and Maintenance Reviewer IDs, `plan_revision`, matching `pr_head_sha` and `reviewed_commit_sha`, and `review_comment_id`. The Review comment must be authored by the managed Reviewer before the PR merge timestamp; its first non-empty line must be exactly `APPROVED`, followed by exactly one `plan_revision=<current>` line and exactly one `reviewed_commit_sha=<full-PR-head-SHA>` line. After merge, record the human approver ID, `github_pr_number` and `github_merge_commit_sha` before release planning.
 
 Required approval:
 

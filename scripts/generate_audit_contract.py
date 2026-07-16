@@ -61,6 +61,7 @@ def build_contract(root: Path) -> dict:
         "squad": {},
         "projects": {},
         "autopilots": {},
+        "operations": {},
     }
     for agent in manifest["agents"]:
         body = instruction_body(root, agent["instruction_files"])
@@ -158,6 +159,27 @@ def build_contract(root: Path) -> dict:
         desired["subscribers"] = autopilot.get("subscribers", [])
         desired["triggers"] = autopilot.get("triggers", [])
         contract["autopilots"][autopilot["key"]] = desired
+    operations = manifest["operations"]
+    observer_skill = next(
+        item for item in manifest["skills"] if item["key"] == operations["observer_skill"]
+    )
+    managed_autopilot = next(
+        item for item in manifest["autopilots"] if item["key"] == operations["autopilot"]
+    )
+    contract["operations"] = {
+        **operations,
+        "observer_skill_name": observer_skill["name"],
+        "modes": {
+            "enabled": {
+                "autopilot_status": managed_autopilot["status"],
+                "observer_skill_attach_to": observer_skill.get("attach_to", []),
+            },
+            "disabled": {
+                "autopilot_status": "paused",
+                "observer_skill_attach_to": [operations["observer_agent"]],
+            },
+        },
+    }
     return contract
 
 

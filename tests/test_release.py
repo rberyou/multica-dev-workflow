@@ -1,6 +1,7 @@
 import importlib.util
 from pathlib import Path
 import sys
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -25,6 +26,23 @@ def marker(object_key):
     )
 
 
+def maintenance_pr():
+    return {
+        "number": 3,
+        "headRefOid": "head-sha",
+        "mergeCommit": {"oid": "merge-sha"},
+        "mergedAt": "2026-07-15T12:00:00Z",
+    }
+
+
+def asset_annotation(assets):
+    normalized = sorted(assets)
+    return (
+        f"expected_assets_sha256={release.expected_assets_sha256(normalized)}\n"
+        + "".join(f"expected_asset={name}\n" for name in normalized)
+    )
+
+
 class FakeMultica:
     def __init__(self):
         self.profile = "test-profile"
@@ -45,6 +63,7 @@ class FakeMultica:
                 "id": "review-1",
                 "author_type": "agent",
                 "author_id": "agent-reviewer",
+                "created_at": "2026-07-15T11:00:00Z",
                 "content": "APPROVED\nplan_revision=v3\nreviewed_commit_sha=head-sha",
             }
         ]
@@ -89,6 +108,7 @@ class ReleaseTests(unittest.TestCase):
             "headRefOid": "head-sha",
             "baseRefName": "main",
             "mergeCommit": {"oid": "merge-sha"},
+            "mergedAt": "2026-07-15T12:00:00Z",
         }
         validation = {
             "databaseId": 10,
@@ -124,6 +144,7 @@ class ReleaseTests(unittest.TestCase):
             plan = release.build_plan(ROOT, "1.1.0-rc.1", "v6", None)
         self.assertEqual(plan["merged_pr"]["head_sha"], "head-sha")
         self.assertEqual(plan["merged_pr"]["merge_commit_sha"], "merge-sha")
+        self.assertEqual(plan["merged_pr"]["merged_at"], "2026-07-15T12:00:00Z")
         self.assertEqual(plan["origin_main_sha"], "main-sha")
         self.assertEqual(len(plan["release_plan_digest"]), 64)
         self.assertIn("multica-workflow-observer-v1.1.0-rc.1.zip", plan["expected_assets"])
@@ -175,7 +196,10 @@ class ReleaseTests(unittest.TestCase):
                 }
             ]
         }
-        with patch.object(release, "gh_json", return_value=comments):
+        with (
+            patch.object(release, "verify_bootstrap_authorization", return_value=plan["release_authorization"]),
+            patch.object(release, "gh_json", return_value=comments),
+        ):
             approval = release.verify_bootstrap_release_approval(ROOT, plan)
         self.assertEqual(approval["comment_id"], "comment-1")
 
@@ -199,6 +223,7 @@ class ReleaseTests(unittest.TestCase):
             ]
         }
         with (
+            patch.object(release, "verify_bootstrap_authorization", return_value=plan["release_authorization"]),
             patch.object(release, "gh_json", return_value=comments),
             self.assertRaisesRegex(release.ReleaseError, "found 0"),
         ):
@@ -255,16 +280,29 @@ class ReleaseTests(unittest.TestCase):
 
     def test_maintenance_evidence_binds_managed_reviewer_and_pr_head(self):
         cli = FakeMultica()
-        pr = {"number": 3, "headRefOid": "head-sha", "mergeCommit": {"oid": "merge-sha"}}
+        pr = maintenance_pr()
         evidence = release.maintenance_evidence(ROOT, cli, "T-200", pr)
         self.assertEqual(evidence["maintenance_reviewer_id"], "agent-reviewer")
         self.assertEqual(evidence["reviewed_commit_sha"], "head-sha")
         self.assertEqual(evidence["review_comment_id"], "review-1")
+        self.assertEqual(evidence["github_merged_at"], pr["mergedAt"])
+
+    def test_maintenance_review_must_predate_merge(self):
+        cli = FakeMultica()
+        cli.comments[0]["created_at"] = "2026-07-15T12:00:01Z"
+        with self.assertRaisesRegex(release.ReleaseError, "before the PR is merged"):
+            release.maintenance_evidence(ROOT, cli, "T-200", maintenance_pr())
+
+    def test_maintenance_review_requires_timestamps(self):
+        cli = FakeMultica()
+        cli.comments[0].pop("created_at")
+        with self.assertRaisesRegex(release.ReleaseError, "timestamp is missing"):
+            release.maintenance_evidence(ROOT, cli, "T-200", maintenance_pr())
 
     def test_maintenance_review_by_maintainer_is_rejected(self):
         cli = FakeMultica()
         cli.comments[0]["author_id"] = "agent-maintainer"
-        pr = {"number": 3, "headRefOid": "head-sha", "mergeCommit": {"oid": "merge-sha"}}
+        pr = maintenance_pr()
         with self.assertRaisesRegex(release.ReleaseError, "not authored by the managed Maintenance Reviewer"):
             release.maintenance_evidence(ROOT, cli, "T-200", pr)
 
@@ -277,7 +315,7 @@ class ReleaseTests(unittest.TestCase):
             "plan_revision=v3\n"
             "reviewed_commit_sha=head-sha"
         )
-        pr = {"number": 3, "headRefOid": "head-sha", "mergeCommit": {"oid": "merge-sha"}}
+        pr = maintenance_pr()
         with self.assertRaisesRegex(release.ReleaseError, "first non-empty line"):
             release.maintenance_evidence(ROOT, cli, "T-200", pr)
 
@@ -287,7 +325,7 @@ class ReleaseTests(unittest.TestCase):
             "APPROVED\n"
             "This review discusses plan_revision v3 and reviewed_commit_sha head-sha."
         )
-        pr = {"number": 3, "headRefOid": "head-sha", "mergeCommit": {"oid": "merge-sha"}}
+        pr = maintenance_pr()
         with self.assertRaisesRegex(release.ReleaseError, "exact plan_revision"):
             release.maintenance_evidence(ROOT, cli, "T-200", pr)
 
@@ -303,7 +341,7 @@ class ReleaseTests(unittest.TestCase):
     def test_stale_maintenance_review_is_rejected(self):
         cli = FakeMultica()
         cli.metadata["reviewed_commit_sha"] = "old-head"
-        pr = {"number": 3, "headRefOid": "head-sha", "mergeCommit": {"oid": "merge-sha"}}
+        pr = maintenance_pr()
         with self.assertRaisesRegex(release.ReleaseError, "stale"):
             release.maintenance_evidence(ROOT, cli, "T-200", pr)
 
@@ -313,7 +351,7 @@ class ReleaseTests(unittest.TestCase):
             ROOT,
             cli,
             "T-200",
-            {"number": 3, "headRefOid": "head-sha", "mergeCommit": {"oid": "merge-sha"}},
+            maintenance_pr(),
         )
         plan = {
             "release_plan_digest": "a" * 64,
@@ -321,6 +359,7 @@ class ReleaseTests(unittest.TestCase):
                 "number": 3,
                 "head_sha": "head-sha",
                 "merge_commit_sha": "merge-sha",
+                "merged_at": maintenance_pr()["mergedAt"],
             },
             "release_authorization": authorization,
         }
@@ -341,7 +380,7 @@ class ReleaseTests(unittest.TestCase):
             ROOT,
             cli,
             "T-200",
-            {"number": 3, "headRefOid": "head-sha", "mergeCommit": {"oid": "merge-sha"}},
+            maintenance_pr(),
         )
         plan = {
             "release_plan_digest": "b" * 64,
@@ -349,6 +388,7 @@ class ReleaseTests(unittest.TestCase):
                 "number": 3,
                 "head_sha": "head-sha",
                 "merge_commit_sha": "merge-sha",
+                "merged_at": maintenance_pr()["mergedAt"],
             },
             "release_authorization": authorization,
         }
@@ -417,6 +457,57 @@ class ReleaseTests(unittest.TestCase):
         ):
             release.verify_origin_main_reachability(ROOT, "a" * 40)
 
+    def test_bootstrap_authorization_is_recomputed_exactly(self):
+        authorization = {
+            "mode": "bootstrap",
+            "plan": "docs/design-plan-v6.md",
+            "plan_sha256": "1" * 64,
+            "approval_record_sha256": "2" * 64,
+            "plan_approval_comment_id": "plan-comment",
+            "approver_login": "rberyou",
+            "repository": "rberyou/multica-dev-workflow",
+            "pr_number": 3,
+        }
+        plan = {
+            "version": "1.1.0-rc.1",
+            "bootstrap_plan": "v6",
+            "merged_pr": {"number": 3},
+            "release_authorization": authorization,
+        }
+        with patch.object(release, "bootstrap_evidence", return_value=authorization):
+            self.assertEqual(release.verify_bootstrap_authorization(ROOT, plan), authorization)
+        for field in [
+            "plan_sha256",
+            "approval_record_sha256",
+            "plan_approval_comment_id",
+        ]:
+            with self.subTest(field=field):
+                stale = {**authorization}
+                stale.pop(field)
+                plan["release_authorization"] = stale
+                with (
+                    patch.object(release, "bootstrap_evidence", return_value=authorization),
+                    self.assertRaisesRegex(release.ReleaseError, "evidence changed"),
+                ):
+                    release.verify_bootstrap_authorization(ROOT, plan)
+        plan["release_authorization"] = authorization
+
+    def test_release_asset_directory_rejects_missing_and_extra_files(self):
+        annotation = asset_annotation(["checksums.txt", "workflow.zip"])
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            (directory / "checksums.txt").write_text("hash\n", encoding="utf-8")
+            with self.assertRaisesRegex(release.ReleaseError, "missing=.*workflow.zip"):
+                release.verify_asset_directory(annotation, directory)
+            (directory / "workflow.zip").write_bytes(b"zip")
+            self.assertEqual(
+                release.verify_asset_directory(annotation, directory),
+                ["checksums.txt", "workflow.zip"],
+            )
+            (directory / "unexpected.txt").write_text("extra", encoding="utf-8")
+            with self.assertRaisesRegex(release.ReleaseError, "extra=.*unexpected.txt"):
+                release.verify_asset_directory(annotation, directory)
+
     def test_verify_tag_rejects_annotated_pr_that_is_not_the_tag_commit_pr(self):
         commit = "a" * 40
         annotation = (
@@ -431,6 +522,7 @@ class ReleaseTests(unittest.TestCase):
             "multica_approval_comment_id=approval-1\n"
             "maintenance_evidence_sha256=" + "1" * 64 + "\n"
             "multica_approval_author_sha256=" + "2" * 64 + "\n"
+            + asset_annotation(["checksums.txt", "workflow.zip"])
         )
 
         def fake_run(args, root, check=True):
@@ -468,6 +560,7 @@ class ReleaseTests(unittest.TestCase):
                 "authorization_mode=maintenance",
                 "github_approval_comment_id=github-approval-1",
                 *(f"{key}={value}" for key, value in provenance.items()),
+                asset_annotation(["checksums.txt", "workflow.zip"]).strip(),
                 "",
             ]
         )

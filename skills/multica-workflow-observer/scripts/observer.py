@@ -22,6 +22,8 @@ MANAGED_BY = "multica-dev-workflow"
 WORKFLOW_ID = "development-delivery"
 OPERATIONS_PROJECT_KEY = "project.workflow-operations"
 OBSERVER_AGENT_KEY = "agent.workflow-observer"
+MAINTAINER_AGENT_KEY = "agent.workflow-maintainer"
+MAINTENANCE_REVIEWER_AGENT_KEY = "agent.workflow-maintenance-reviewer"
 SQUAD_KEY = "squad.development-delivery"
 APPROVER_ROLE = "人工审批人"
 ACTIVE_STATUSES = {"backlog", "todo", "in_progress", "in_review", "blocked"}
@@ -692,6 +694,12 @@ def report_incident(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
         metadata_string_list(current_incident_meta.get("incident_source_requirements"))
     )
     previous_severity = str(current_incident_meta.get("incident_severity") or "low")
+    severity_increased = SEVERITY_RANK.get(args.severity, 0) > SEVERITY_RANK.get(
+        previous_severity, 0
+    )
+    effective_severity = args.severity if severity_increased else previous_severity
+    if effective_severity not in SEVERITY_RANK:
+        effective_severity = args.severity
     previous_notified = parse_time(current_incident_meta.get("incident_last_notified_at"))
     cooldown_hours = int(getattr(args, "notification_cooldown_hours", 24))
     deterministic_confirmation = bool(getattr(args, "deterministic_confirmation", False))
@@ -702,13 +710,25 @@ def report_incident(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
         action == "created"
         or reopened
         or args.severity == "urgent"
-        or SEVERITY_RANK.get(args.severity, 0) > SEVERITY_RANK.get(previous_severity, 0)
+        or severity_increased
         or requirement not in previous_requirements
         or (deterministic_confirmation and str(current_incident_meta.get("incident_deterministic_confirmed")).lower() != "true")
         or blocked_requirement_count > previous_blocked_count
         or previous_notified is None
         or (now - previous_notified).total_seconds() >= cooldown_hours * 3600
     )
+    if incident and severity_increased:
+        cli.json(
+            [
+                "issue",
+                "update",
+                incident_id,
+                "--priority",
+                effective_severity,
+                "--output",
+                "json",
+            ]
+        )
     if incident and notification_due:
         add_comment(cli, incident_id, f"Additional evidence from {source_id} at {utc_now()}\n\n{description}")
     all_requirements = sorted(previous_requirements | {requirement})
@@ -737,7 +757,7 @@ def report_incident(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
         "incident_dedupe_key": dedupe_key,
         "incident_rule_id": args.rule_id,
         "incident_status": "new" if action == "created" or reopened else current_incident_meta.get("incident_status", "new"),
-        "incident_severity": args.severity,
+        "incident_severity": effective_severity,
         "source_issue_id": source_id,
         "source_requirement_id": requirement,
         "reporter_agent_id": args.reporter_agent_id or os.environ.get("MULTICA_AGENT_ID", "unknown"),
@@ -762,12 +782,16 @@ def report_incident(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
     for key, value in metadata.items():
         set_metadata(cli, incident_id, key, value)
 
-    if args.severity in {"urgent", "high"} and notification_due:
+    if effective_severity in {"urgent", "high"} and notification_due:
         cli.json(["issue", "subscriber", "add", incident_id, "--user-id", approver_id, "--output", "json"])
     set_metadata(cli, source_id, "workflow_incident_id", incident_id)
     set_metadata(cli, source_id, "workflow_incident_last_evidence_at", seen_at)
     if notification_due:
-        add_comment(cli, source_id, f"WORKFLOW INCIDENT {action.upper()}: {incident_id} (`{args.rule_id}`, {args.severity})")
+        add_comment(
+            cli,
+            source_id,
+            f"WORKFLOW INCIDENT {action.upper()}: {incident_id} (`{args.rule_id}`, {effective_severity})",
+        )
     if args.block_source:
         cli.json(["issue", "update", source_id, "--status", "blocked", "--output", "json"])
         set_metadata(cli, source_id, "waiting_on", "workflow_fix")
@@ -895,9 +919,54 @@ def approval_findings(
         str(metadata.get(key)).lower() == "true"
         for key in ["plan_approved", "requirement_approved", "release_approved", "approval_recorded"]
     )
+    if approval_recorded and (
+        metadata.get("approval_author_type") != "member"
+        or str(metadata.get("approval_author_id") or "") != human_id
+    ):
+        findings.append(
+            finding(
+                "WF-APPROVAL-001",
+                "urgent",
+                issue,
+                "recorded approval stores the durable human member identity",
+                (
+                    f"approval_author_type={metadata.get('approval_author_type')}, "
+                    f"approval_author_id={metadata.get('approval_author_id')}, "
+                    f"human_approver_id={human_id}"
+                ),
+            )
+        )
     expected_lines = set()
-    approved_plan_revision = str(metadata.get("approved_plan_revision") or metadata.get("plan_revision") or "")
-    approval_revision = str(metadata.get("approval_revision") or metadata.get("plan_revision") or "")
+    approved_plan_revision = str(metadata.get("approved_plan_revision") or "")
+    approval_revision = str(metadata.get("approval_revision") or "")
+    current_plan_revision = str(metadata.get("plan_revision") or "")
+    if str(metadata.get("plan_approved")).lower() == "true" and (
+        not approved_plan_revision or approved_plan_revision != current_plan_revision
+    ):
+        findings.append(
+            finding(
+                "WF-APPROVAL-001",
+                "urgent",
+                issue,
+                "Plan approval binds the current plan_revision",
+                (
+                    f"approved_plan_revision={approved_plan_revision}, "
+                    f"plan_revision={current_plan_revision}"
+                ),
+            )
+        )
+    if str(metadata.get("requirement_approved")).lower() == "true" and (
+        not approval_revision or approval_revision != current_plan_revision
+    ):
+        findings.append(
+            finding(
+                "WF-APPROVAL-001",
+                "urgent",
+                issue,
+                "Requirement approval binds the current plan_revision",
+                f"approval_revision={approval_revision}, plan_revision={current_plan_revision}",
+            )
+        )
     if str(metadata.get("plan_approved")).lower() == "true" and approved_plan_revision:
         expected_lines.add(f"APPROVE PLAN {approved_plan_revision}")
     if str(metadata.get("requirement_approved")).lower() == "true" and approval_revision:
@@ -957,6 +1026,151 @@ def approval_findings(
             )
         )
     return findings
+
+
+def maintenance_review_findings(
+    cli: CLI, issue: dict[str, Any], metadata: dict[str, Any]
+) -> list[dict[str, Any]]:
+    status = str(issue.get("status") or "")
+    review_expected = status in {"in_review", "done"} or any(
+        metadata.get(key)
+        for key in ["review_comment_id", "reviewed_commit_sha", "pr_head_sha"]
+    )
+    if not review_expected:
+        return []
+    results = []
+    required = [
+        "maintainer_id",
+        "maintenance_reviewer_id",
+        "review_comment_id",
+        "plan_revision",
+        "reviewed_commit_sha",
+        "pr_head_sha",
+    ]
+    missing = [key for key in required if not metadata.get(key)]
+    if missing:
+        results.append(
+            finding(
+                "WF-MAINT-REVIEW-001",
+                "high",
+                issue,
+                "Maintenance Review records durable identities, comment, Plan and PR head SHA",
+                f"missing metadata: {missing}",
+            )
+        )
+    maintainer_id = str(metadata.get("maintainer_id") or "")
+    reviewer_id = str(metadata.get("maintenance_reviewer_id") or "")
+    if maintainer_id and reviewer_id and maintainer_id == reviewer_id:
+        results.append(
+            finding(
+                "WF-MAINT-REVIEW-001",
+                "high",
+                issue,
+                "Maintenance Reviewer is independent from the Maintainer",
+                "maintenance_reviewer_id equals maintainer_id",
+            )
+        )
+    try:
+        agents = detailed_items(
+            cli,
+            as_list(cli.json(["agent", "list", "--output", "json"]), "agents"),
+            "agent",
+        )
+        managed_maintainer = managed_match(
+            agents, MAINTAINER_AGENT_KEY, "instructions"
+        )
+        managed_reviewer = managed_match(
+            agents, MAINTENANCE_REVIEWER_AGENT_KEY, "instructions"
+        )
+        if maintainer_id != str(managed_maintainer.get("id") or ""):
+            results.append(
+                finding(
+                    "WF-MAINT-REVIEW-001",
+                    "high",
+                    issue,
+                    "maintainer_id references the managed Workflow Maintainer",
+                    f"maintainer_id={maintainer_id}",
+                )
+            )
+        if reviewer_id != str(managed_reviewer.get("id") or ""):
+            results.append(
+                finding(
+                    "WF-MAINT-REVIEW-001",
+                    "high",
+                    issue,
+                    "maintenance_reviewer_id references the managed Maintenance Reviewer",
+                    f"maintenance_reviewer_id={reviewer_id}",
+                )
+            )
+    except ObserverError as exc:
+        results.append(
+            finding(
+                "WF-MAINT-REVIEW-001",
+                "high",
+                issue,
+                "managed maintenance identities are uniquely resolvable",
+                str(exc),
+            )
+        )
+    comment_id = str(metadata.get("review_comment_id") or "")
+    comments = as_list(
+        cli.json(
+            ["issue", "comment", "list", issue_ref(issue), "--full", "--output", "json"]
+        ),
+        "comments",
+    )
+    matches = [item for item in comments if str(item.get("id") or "") == comment_id]
+    if comment_id and len(matches) != 1:
+        results.append(
+            finding(
+                "WF-MAINT-REVIEW-001",
+                "high",
+                issue,
+                "review_comment_id resolves to exactly one Review comment",
+                f"review_comment_id={comment_id}, matches={len(matches)}",
+            )
+        )
+    elif len(matches) == 1:
+        comment = matches[0]
+        content = str(comment.get("content") or "")
+        first = next((line.strip() for line in content.splitlines() if line.strip()), "")
+        plan_bindings = re.findall(r"(?m)^\s*plan_revision=([^\s]+)\s*$", content)
+        sha_bindings = re.findall(
+            r"(?m)^\s*reviewed_commit_sha=([^\s]+)\s*$", content
+        )
+        if (
+            comment.get("author_type") != "agent"
+            or str(comment.get("author_id") or "") != reviewer_id
+            or first != "APPROVED"
+            or plan_bindings != [str(metadata.get("plan_revision") or "")]
+            or sha_bindings != [str(metadata.get("reviewed_commit_sha") or "")]
+        ):
+            results.append(
+                finding(
+                    "WF-MAINT-REVIEW-001",
+                    "high",
+                    issue,
+                    "Maintenance Review comment has the managed author and exact approval bindings",
+                    (
+                        f"comment_id={comment_id}, author_type={comment.get('author_type')}, "
+                        f"author_id={comment.get('author_id')}, verdict={first}, "
+                        f"plan_bindings={plan_bindings}, sha_bindings={sha_bindings}"
+                    ),
+                )
+            )
+    reviewed_sha = str(metadata.get("reviewed_commit_sha") or "")
+    current_sha = str(metadata.get("pr_head_sha") or "")
+    if reviewed_sha and current_sha and reviewed_sha != current_sha:
+        results.append(
+            finding(
+                "WF-MAINT-REVIEW-001",
+                "high",
+                issue,
+                "Maintenance Review binds the current PR head SHA",
+                f"reviewed_commit_sha={reviewed_sha}, pr_head_sha={current_sha}",
+            )
+        )
+    return results
 
 
 def marker_keys(items: list[dict[str, Any]], field: str) -> list[str]:
@@ -1032,6 +1246,25 @@ def audit_control_plane(cli: CLI, coverage_issue: str | None) -> list[dict[str, 
         "projects": sorted(f"project.{key}" for key in contract["projects"]),
         "autopilots": sorted(f"autopilot.{key}" for key in contract["autopilots"]),
     }
+    operations = contract.get("operations") or {}
+    operation_autopilot_key = str(operations.get("autopilot") or "")
+    operation_autopilot = next(
+        (
+            item
+            for item in autopilots
+            if (parse_marker(str(item.get("description") or "")) or {}).get(
+                "object_key"
+            )
+            == f"autopilot.{operation_autopilot_key}"
+        ),
+        None,
+    )
+    operations_mode = (
+        "disabled"
+        if operation_autopilot and str(operation_autopilot.get("status") or "") == "paused"
+        else "enabled"
+    )
+    operations_mode_spec = (operations.get("modes") or {}).get(operations_mode) or {}
     drift = {}
     collisions = {}
 
@@ -1253,6 +1486,16 @@ def audit_control_plane(cli: CLI, coverage_issue: str | None) -> list[dict[str, 
         expected_managed = sorted(
             name for name, spec in contract["skills"].items() if key in spec.get("attach_to", [])
         )
+        observer_skill_name = str(operations.get("observer_skill_name") or "")
+        if observer_skill_name:
+            expected_managed = sorted(
+                name
+                for name in expected_managed
+                if name != observer_skill_name
+            )
+            if key in set(operations_mode_spec.get("observer_skill_attach_to") or []):
+                expected_managed.append(observer_skill_name)
+                expected_managed.sort()
         if actual_managed != expected_managed:
             attachment_drift[key] = {"expected": expected_managed, "actual": actual_managed}
     if attachment_drift:
@@ -1359,7 +1602,10 @@ def audit_control_plane(cli: CLI, coverage_issue: str | None) -> list[dict[str, 
                 "actual": project_marker_hash,
             }
 
-    for key, desired in contract["autopilots"].items():
+    for key, desired_value in contract["autopilots"].items():
+        desired = dict(desired_value)
+        if key == operation_autopilot_key and operations_mode_spec.get("autopilot_status"):
+            desired["status"] = operations_mode_spec["autopilot_status"]
         matches = [
             item
             for item in autopilots
@@ -1499,6 +1745,8 @@ def audit_issue(cli: CLI, issue: dict[str, Any], backlog_hours: int) -> list[dic
     status = str(issue.get("status") or "")
     findings = []
     findings.extend(approval_findings(cli, issue, meta))
+    if object_type == "maintenance_change":
+        findings.extend(maintenance_review_findings(cli, issue, meta))
     try:
         requirement_id, authoritative_protocol, _ = resolve_requirement_context(
             cli, issue, meta

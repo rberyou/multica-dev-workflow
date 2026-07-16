@@ -27,6 +27,7 @@ from workflow_lib import (  # noqa: E402
     render_marker,
     sha256_value,
     strip_marker,
+    validate_repository,
     write_json,
 )
 import workflow as workflow_cli  # noqa: E402
@@ -405,6 +406,42 @@ class ReconcileTests(unittest.TestCase):
         self.assertEqual(types.count("CREATE_SKILL"), 3)
         self.assertEqual(types.count("ATTACH_SKILL"), 10)
 
+    def test_repository_validation_enforces_complete_workflow_schema(self):
+        cases = {
+            "invalid autopilot mode": lambda value: value["autopilots"][0].update(
+                {"mode": "invalid"}
+            ),
+            "invalid autopilot status": lambda value: value["autopilots"][0].update(
+                {"status": "invalid"}
+            ),
+            "missing schedule cron": lambda value: value["autopilots"][0][
+                "triggers"
+            ][0].pop("cron"),
+            "missing schedule timezone": lambda value: value["autopilots"][0][
+                "triggers"
+            ][0].pop("timezone"),
+            "missing trigger kind": lambda value: value["autopilots"][0][
+                "triggers"
+            ][0].pop("kind"),
+            "missing trigger label": lambda value: value["autopilots"][0][
+                "triggers"
+            ][0].pop("label"),
+            "unknown project property": lambda value: value["projects"][0].update(
+                {"unexpected": True}
+            ),
+            "unknown autopilot property": lambda value: value["autopilots"][0].update(
+                {"unexpected": True}
+            ),
+        }
+        for label, mutate in cases.items():
+            with self.subTest(case=label), committed_temp_repo() as temp_root:
+                path = temp_root / "workflow.json"
+                manifest = json.loads(path.read_text(encoding="utf-8"))
+                mutate(manifest)
+                write_json(path, manifest)
+                with self.assertRaisesRegex(WorkflowError, "workflow.json schema"):
+                    validate_repository(temp_root, "quality")
+
     def test_redaction_handles_nested_secret_objects(self):
         value = {"token": "secret", "mcp_config": {"servers": []}, "nested": [{"password": "p"}]}
         result = redact(value)
@@ -469,6 +506,22 @@ class ReconcileTests(unittest.TestCase):
             write_json(initial_path, initial)
             apply_plan(temp_root, cli, initial_path, initial["plan_digest"][:12])
 
+            local_skill = {
+                "id": "skill-local-manager",
+                "name": "multica-workflow-manager",
+            }
+            cli.skills.append(local_skill)
+            cli.skill_details[local_skill["id"]] = {
+                **local_skill,
+                "content": "name: multica-workflow-manager\n",
+            }
+            leader = next(
+                item
+                for item in cli.agents
+                if parse_marker(item["instructions"])["object_key"] == "agent.leader"
+            )
+            cli.agent_skills[leader["id"]].append(cli.skill_details[local_skill["id"]])
+
             disabled = build_plan(
                 temp_root,
                 cli,
@@ -511,6 +564,10 @@ class ReconcileTests(unittest.TestCase):
                 {item["id"] for item in cli.agent_skills[observer_agent["id"]]},
             )
             self.assertEqual(cli.autopilots[0]["status"], "paused")
+            self.assertIn(
+                local_skill["id"],
+                {item["id"] for item in cli.agent_skills[leader["id"]]},
+            )
 
     def test_disable_operations_blocks_active_v3_without_explicit_degraded_approval(self):
         with committed_temp_repo() as temp_root:

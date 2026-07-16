@@ -20,7 +20,7 @@ Accept a confirmed Workflow Incident or an explicit human enhancement request. R
 1. Create a versioned Change Plan covering root cause, impact, compatibility, tests, canary, rollout and rollback.
 2. Run an independent Plan Review Loop. Decision-bearing findings go to the durable human approver.
 3. Implement on a non-main branch and open a PR.
-4. Bind independent Review to the current PR head SHA. Any change invalidates Review.
+4. Bind independent Review to the current PR head SHA. Record the observed head as `pr_head_sha`, the approved head as `reviewed_commit_sha`, and the Review comment ID. Any change invalidates Review.
 5. Regenerate the Observer desired-state contract with `python scripts/generate_audit_contract.py`, then run its `--check` mode, schema, compile, unit/integration, Skill packaging, portability and secret checks.
 6. Prepare an RC and a digest-bound canary execution Plan.
 7. Require Observer verification and rollback rehearsal before stable release.

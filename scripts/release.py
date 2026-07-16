@@ -168,6 +168,12 @@ def maintenance_evidence(
         raise ReleaseError(
             "Maintenance Review comment does not bind exactly one exact reviewed_commit_sha line"
         )
+    review_created_at = str(comment.get("created_at") or comment.get("createdAt") or "")
+    merged_at = str(pr.get("mergedAt") or pr.get("merged_at") or "")
+    review_time = parse_iso_datetime(review_created_at, "Maintenance Review comment")
+    merge_time = parse_iso_datetime(merged_at, "merged PR")
+    if review_time >= merge_time:
+        raise ReleaseError("Maintenance Review must be created before the PR is merged")
     return {
         "mode": "maintenance",
         "issue_id": issue_id,
@@ -177,8 +183,10 @@ def maintenance_evidence(
         "plan_revision": plan_revision,
         "reviewed_commit_sha": reviewed_sha,
         "review_comment_id": review_comment_id,
+        "review_created_at": review_created_at,
         "github_pr_number": int(pr["number"]),
         "github_merge_commit_sha": merge_sha,
+        "github_merged_at": merged_at,
     }
 
 
@@ -291,6 +299,18 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def parse_iso_datetime(value: str, label: str) -> datetime:
+    if not value:
+        raise ReleaseError(f"{label} timestamp is missing")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ReleaseError(f"{label} timestamp is invalid: {value}") from exc
+    if parsed.tzinfo is None:
+        raise ReleaseError(f"{label} timestamp must include a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
 def git_head(root: Path) -> str:
     return run(["git", "rev-parse", "HEAD"], root).stdout.strip()
 
@@ -348,6 +368,52 @@ def verify_versions(root: Path, version: str) -> list[str]:
     if mismatches:
         raise ReleaseError(f"release version mismatch for {version}: {mismatches}")
     return sorted(values)
+
+
+def normalized_expected_assets(value: Any) -> list[str]:
+    if not isinstance(value, list) or not value:
+        raise ReleaseError("release Plan expected_assets must be a non-empty list")
+    assets = [str(item) for item in value]
+    invalid = [
+        item
+        for item in assets
+        if not item or Path(item).name != item or item in {".", ".."}
+    ]
+    if invalid:
+        raise ReleaseError(f"release Plan contains invalid asset names: {invalid}")
+    if len(assets) != len(set(assets)):
+        raise ReleaseError("release Plan expected_assets contains duplicates")
+    return sorted(assets)
+
+
+def expected_assets_sha256(value: Any) -> str:
+    return digest(normalized_expected_assets(value))
+
+
+def expected_assets_from_annotation(annotation: str) -> list[str]:
+    hash_matches = re.findall(r"(?m)^expected_assets_sha256=([a-f0-9]{64})$", annotation)
+    if len(hash_matches) != 1:
+        raise ReleaseError("annotated tag must contain exactly one expected_assets_sha256")
+    assets = normalized_expected_assets(
+        re.findall(r"(?m)^expected_asset=([^\r\n]+)$", annotation)
+    )
+    if expected_assets_sha256(assets) != hash_matches[0]:
+        raise ReleaseError("annotated tag expected asset manifest hash does not match")
+    return assets
+
+
+def verify_asset_directory(annotation: str, directory: Path) -> list[str]:
+    expected = expected_assets_from_annotation(annotation)
+    if not directory.is_dir():
+        raise ReleaseError(f"release asset directory does not exist: {directory}")
+    actual = sorted(path.name for path in directory.iterdir() if path.is_file())
+    if actual != expected:
+        missing = sorted(set(expected) - set(actual))
+        extra = sorted(set(actual) - set(expected))
+        raise ReleaseError(
+            f"release asset set differs from the approved manifest; missing={missing}, extra={extra}"
+        )
+    return actual
 
 
 def merged_pr_for_commit(root: Path, commit: str) -> dict[str, Any]:
@@ -480,6 +546,7 @@ def build_plan(
             "title": pr["title"],
             "head_sha": pr["headRefOid"],
             "merge_commit_sha": (pr.get("mergeCommit") or {}).get("oid"),
+            "merged_at": pr.get("mergedAt"),
         },
         "validation": validation,
         "version_files": checked_versions,
@@ -534,9 +601,33 @@ def verify_current_state(root: Path, plan: dict[str, Any]) -> None:
     )
     verify_versions(root, plan["version"])
     pr = merged_pr_for_commit(root, plan["source_commit"])
-    if pr["number"] != plan["merged_pr"]["number"] or pr["headRefOid"] != plan["merged_pr"]["head_sha"]:
+    if (
+        pr["number"] != plan["merged_pr"]["number"]
+        or pr["headRefOid"] != plan["merged_pr"]["head_sha"]
+        or pr.get("mergedAt") != plan["merged_pr"].get("merged_at")
+    ):
         raise ReleaseError("merged PR provenance changed after release planning")
     verify_validation_record(root, plan["validation"], plan["source_commit"])
+
+
+def verify_bootstrap_authorization(root: Path, plan: dict[str, Any]) -> dict[str, Any]:
+    authorization = plan.get("release_authorization") or {}
+    if authorization.get("mode") != "bootstrap":
+        raise ReleaseError("release Plan is not authorized by the v6 bootstrap")
+    bootstrap_plan = str(plan.get("bootstrap_plan") or "")
+    version = str(plan.get("version") or "")
+    pr_number = (plan.get("merged_pr") or {}).get("number")
+    if not bootstrap_plan or not version or pr_number is None:
+        raise ReleaseError("bootstrap release Plan provenance is incomplete")
+    current = bootstrap_evidence(
+        root,
+        version,
+        bootstrap_plan,
+        {"number": int(pr_number)},
+    )
+    if current != authorization:
+        raise ReleaseError("bootstrap authorization evidence changed after release planning")
+    return current
 
 
 def verify_release_approval(
@@ -553,6 +644,7 @@ def verify_release_approval(
             "number": plan["merged_pr"]["number"],
             "headRefOid": plan["merged_pr"]["head_sha"],
             "mergeCommit": {"oid": plan["merged_pr"]["merge_commit_sha"]},
+            "mergedAt": plan["merged_pr"].get("merged_at"),
         },
     )
     if current != authorization:
@@ -654,9 +746,7 @@ def verify_github_release_approval(
 
 
 def verify_bootstrap_release_approval(root: Path, plan: dict[str, Any]) -> dict[str, Any]:
-    authorization = plan.get("release_authorization") or {}
-    if authorization.get("mode") != "bootstrap":
-        raise ReleaseError("GitHub bootstrap approval is only valid for the v6 bootstrap release")
+    authorization = verify_bootstrap_authorization(root, plan)
     record = release_approver_record(root)
     if (
         str(authorization.get("approver_login") or "").lower()
@@ -705,6 +795,8 @@ def command_approval_block(args: argparse.Namespace, root: Path) -> int:
         )
     elif authorization.get("mode") != "bootstrap":
         raise ReleaseError("release Plan has no recognized authorization mode")
+    else:
+        verify_bootstrap_authorization(root, plan)
     print(github_release_approval_block(expected, provenance))
     return 0
 
@@ -744,6 +836,7 @@ def command_apply(args: argparse.Namespace, root: Path) -> int:
         raise ReleaseError(f"tag already exists locally: {tag}")
     if run(["git", "ls-remote", "--tags", "origin", f"refs/tags/{tag}"], root).stdout.strip():
         raise ReleaseError(f"tag already exists on origin: {tag}")
+    expected_assets = normalized_expected_assets(plan.get("expected_assets"))
     message = (
         f"Multica Workflow {tag}\n\n"
         f"release_plan_digest={expected}\n"
@@ -752,6 +845,8 @@ def command_apply(args: argparse.Namespace, root: Path) -> int:
         f"validation_run_id={plan['validation']['databaseId']}\n"
         f"authorization_mode={authorization['mode']}\n"
         f"github_approval_comment_id={github_approval['comment_id']}\n"
+        f"expected_assets_sha256={expected_assets_sha256(expected_assets)}\n"
+        + "".join(f"expected_asset={name}\n" for name in expected_assets)
     )
     if authorization.get("mode") == "maintenance":
         message += "".join(
@@ -793,6 +888,7 @@ def command_verify_tag(args: argparse.Namespace, root: Path) -> int:
     if not commit:
         raise ReleaseError(f"tag not found: {tag}")
     annotation = run(["git", "tag", "-l", tag, "--format=%(contents)"], root).stdout
+    expected_assets = expected_assets_from_annotation(annotation)
     match = re.search(r"(?m)^release_plan_digest=([a-f0-9]{64})$", annotation)
     if not match:
         raise ReleaseError("annotated tag has no release_plan_digest")
@@ -876,12 +972,24 @@ def command_verify_tag(args: argparse.Namespace, root: Path) -> int:
                 "commit": commit,
                 "release_plan_digest": match.group(1),
                 "authorization_mode": authorization_mode,
+                "expected_assets": expected_assets,
                 "github_release_approval": github_approval,
                 "validation_run": validation,
             },
             indent=2,
         )
     )
+    return 0
+
+
+def command_verify_assets(args: argparse.Namespace, root: Path) -> int:
+    annotation = run(
+        ["git", "tag", "-l", args.tag, "--format=%(contents)"], root
+    ).stdout
+    if not annotation.strip():
+        raise ReleaseError(f"tag not found or has no annotation: {args.tag}")
+    assets = verify_asset_directory(annotation, Path(args.directory).resolve())
+    print(json.dumps({"tag": args.tag, "assets": assets}, indent=2))
     return 0
 
 
@@ -912,6 +1020,10 @@ def parser() -> argparse.ArgumentParser:
     verify_tag = sub.add_parser("verify-tag")
     verify_tag.add_argument("--tag", required=True)
     verify_tag.set_defaults(func=command_verify_tag)
+    verify_assets = sub.add_parser("verify-assets")
+    verify_assets.add_argument("--tag", required=True)
+    verify_assets.add_argument("--directory", required=True)
+    verify_assets.set_defaults(func=command_verify_assets)
     return root
 
 

@@ -8,6 +8,7 @@
 - Bind releases to verified Multica Maintenance Review and human approval comments, with a one-time v6 RC bootstrap exception.
 - Bind maintenance tag provenance to an exact fixed-approver GitHub block, merged-main PR and CI run, without publishing raw Multica UUIDs.
 - Add parent-authoritative protocol inheritance, full desired-state drift auditing, recoverable Incident payloads, notification cooldown and active-v3 rollback gates.
+- Revalidate bootstrap and pre-merge Review evidence at release time, preserve maximum Incident severity, enforce the complete workflow schema, preserve local-only Skill attachments, model reviewed disabled operations state and bind the exact release asset set.
 
 ## 1.0.0
 

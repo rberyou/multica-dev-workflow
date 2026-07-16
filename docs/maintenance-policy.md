@@ -21,6 +21,8 @@ Workflow defects enter through a standardized Incident in the managed `工作流
 
 Any desired Agent, instruction, Runtime profile, Skill, Squad, Project or Autopilot change must regenerate `skills/multica-workflow-observer/references/control-plane-contract.json`. CI rejects a stale contract.
 
+While Review is active, the Maintenance Issue records both `reviewed_commit_sha` and the observed current `pr_head_sha`. They must match, and the Review comment timestamp must precede the PR merge timestamp.
+
 ## Versioning
 
 - Patch: backward-compatible defect correction.
