@@ -43,6 +43,13 @@ SEVERITY_RANK = {"low": 0, "medium": 1, "high": 2, "urgent": 3}
 APPROVAL_LINE_RE = re.compile(
     r"^APPROVE (?:PLAN v\S+|REQUIREMENT v\S+|WORKFLOW (?:PLAN|RELEASE|CANARY) \S+)$"
 )
+MAINTENANCE_WORKFLOW_TYPES = {
+    "maintenance_change",
+    "change_plan",
+    "maintenance_implementation",
+    "canary_validation",
+    "rollout_verification",
+}
 EXPECTED_AGENT_KEYS = {
     "agent.leader",
     "agent.planner",
@@ -383,6 +390,14 @@ def issue_ref(issue: dict[str, Any]) -> str:
     return str(issue.get("identifier") or issue.get("key") or issue.get("id") or "")
 
 
+def is_maintenance_workflow_issue(metadata: dict[str, Any]) -> bool:
+    if str(metadata.get("workflow_id") or "") != WORKFLOW_ID:
+        return False
+    object_type = str(metadata.get("workflow_object_type") or "")
+    stage = str(metadata.get("workflow_stage") or "")
+    return object_type in MAINTENANCE_WORKFLOW_TYPES or stage in MAINTENANCE_WORKFLOW_TYPES
+
+
 def metadata_map(cli: CLI, issue_id: str) -> dict[str, Any]:
     value = cli.json(["issue", "metadata", "list", issue_id, "--output", "json"])
     if isinstance(value, dict):
@@ -396,6 +411,71 @@ def metadata_map(cli: CLI, issue_id: str) -> dict[str, Any]:
         if key:
             result[str(key)] = item.get("value")
     return result
+
+
+def approval_comment_issue_ids(
+    cli: CLI, issue: dict[str, Any], metadata: dict[str, Any]
+) -> list[str]:
+    issue_id = issue_ref(issue)
+    result = [issue_id]
+    if not is_maintenance_workflow_issue(metadata) or str(
+        metadata.get("workflow_object_type") or ""
+    ) == "maintenance_change":
+        return result
+
+    child_incident = str(metadata.get("source_incident_id") or "")
+
+    def include_if_associated(
+        parent: dict[str, Any], fallback_id: str
+    ) -> tuple[bool, dict[str, Any]]:
+        parent_ref = issue_ref(parent) or fallback_id
+        parent_metadata = metadata_map(cli, parent_ref)
+        parent_incident = str(parent_metadata.get("source_incident_id") or "")
+        if (
+            is_maintenance_workflow_issue(parent_metadata)
+            and str(parent_metadata.get("workflow_object_type") or "")
+            == "maintenance_change"
+            and (
+                not child_incident
+                or not parent_incident
+                or child_incident == parent_incident
+            )
+        ):
+            result.append(parent_ref)
+            return True, parent_metadata
+        return False, parent_metadata
+
+    maintenance_change_id = str(metadata.get("maintenance_change_id") or "")
+    if maintenance_change_id:
+        parent = cli.json(
+            ["issue", "get", maintenance_change_id, "--output", "json"]
+        )
+        if not isinstance(parent, dict):
+            raise ObserverError(
+                f"maintenance Change is unreadable: {maintenance_change_id}"
+            )
+        include_if_associated(parent, maintenance_change_id)
+        return list(dict.fromkeys(result))
+
+    current = issue
+    seen = set()
+    while current.get("parent_issue_id"):
+        parent_id = str(current["parent_issue_id"])
+        if parent_id in seen:
+            raise ObserverError("Issue parent chain contains a cycle")
+        seen.add(parent_id)
+        if len(seen) > 100:
+            raise ObserverError("Issue parent chain exceeds 100 levels")
+        parent = cli.json(["issue", "get", parent_id, "--output", "json"])
+        if not isinstance(parent, dict):
+            raise ObserverError(f"parent Issue is unreadable: {parent_id}")
+        included, parent_metadata = include_if_associated(parent, parent_id)
+        if included:
+            break
+        if not is_maintenance_workflow_issue(parent_metadata):
+            break
+        current = parent
+    return list(dict.fromkeys(result))
 
 
 def resolve_requirement_context(
@@ -900,10 +980,30 @@ def approval_findings(
     cli: CLI, issue: dict[str, Any], metadata: dict[str, Any]
 ) -> list[dict[str, Any]]:
     issue_id = issue_ref(issue)
-    comments = as_list(
-        cli.json(["issue", "comment", "list", issue_id, "--full", "--output", "json"]),
-        "comments",
-    )
+    comments = []
+    seen_comment_ids = set()
+    for comment_issue_id in approval_comment_issue_ids(cli, issue, metadata):
+        scoped_comments = as_list(
+            cli.json(
+                [
+                    "issue",
+                    "comment",
+                    "list",
+                    comment_issue_id,
+                    "--full",
+                    "--output",
+                    "json",
+                ]
+            ),
+            "comments",
+        )
+        for comment in scoped_comments:
+            comment_id = str(comment.get("id") or "")
+            if comment_id and comment_id in seen_comment_ids:
+                continue
+            if comment_id:
+                seen_comment_ids.add(comment_id)
+            comments.append(comment)
     candidates = []
     for comment in comments:
         lines = [line.strip() for line in str(comment.get("content") or "").splitlines()]
@@ -981,7 +1081,12 @@ def approval_findings(
             )
         )
     if str(metadata.get("plan_approved")).lower() == "true" and approved_plan_revision:
-        expected_lines.add(f"APPROVE PLAN {approved_plan_revision}")
+        prefix = (
+            "APPROVE WORKFLOW PLAN"
+            if is_maintenance_workflow_issue(metadata)
+            else "APPROVE PLAN"
+        )
+        expected_lines.add(f"{prefix} {approved_plan_revision}")
     if str(metadata.get("requirement_approved")).lower() == "true" and approval_revision:
         expected_lines.add(f"APPROVE REQUIREMENT {approval_revision}")
     release_digest = str(metadata.get("release_plan_digest") or "")
@@ -994,7 +1099,9 @@ def approval_findings(
         )
     if approval_comment_id and not expected_lines:
         stage = str(metadata.get("workflow_stage") or "")
-        if stage in {"plan", "design"} and approval_revision:
+        if is_maintenance_workflow_issue(metadata) and approval_revision:
+            expected_lines.add(f"APPROVE WORKFLOW PLAN {approval_revision}")
+        elif stage in {"plan", "design"} and approval_revision:
             expected_lines.add(f"APPROVE PLAN {approval_revision}")
         elif stage == "requirement" and approval_revision:
             expected_lines.add(f"APPROVE REQUIREMENT {approval_revision}")
@@ -1822,14 +1929,19 @@ def audit_issue(cli: CLI, issue: dict[str, Any], backlog_hours: int) -> list[dic
                 )
             )
         if status == "in_review":
-            missing_review_ids = [key for key in ["original_owner_id", "reviewer_id"] if not meta.get(key)]
+            review_keys = (
+                ["maintainer_id", "maintenance_reviewer_id"]
+                if is_maintenance_workflow_issue(meta)
+                else ["original_owner_id", "reviewer_id"]
+            )
+            missing_review_ids = [key for key in review_keys if not meta.get(key)]
             if missing_review_ids:
                 findings.append(
                     finding(
                         "WF-REVIEW-002",
                         "high",
                         issue,
-                        "review stage records independent owner and reviewer IDs",
+                        "review stage records the contract-specific independent owner and reviewer IDs",
                         f"missing metadata: {missing_review_ids}",
                     )
                 )
@@ -1880,8 +1992,21 @@ def audit_issue(cli: CLI, issue: dict[str, Any], backlog_hours: int) -> list[dic
     current = meta.get("pr_head_sha") or meta.get("current_commit_sha")
     if reviewed and current and reviewed != current:
         findings.append(finding("WF-REVIEW-001", "high", issue, "Review SHA equals current PR head", f"reviewed={reviewed}, current={current}"))
-    if meta.get("original_owner_id") and meta.get("reviewer_id") == meta.get("original_owner_id"):
-        findings.append(finding("WF-REVIEW-002", "high", issue, "reviewer is independent", "reviewer_id equals original_owner_id"))
+    owner_key, reviewer_key = (
+        ("maintainer_id", "maintenance_reviewer_id")
+        if is_maintenance_workflow_issue(meta)
+        else ("original_owner_id", "reviewer_id")
+    )
+    if meta.get(owner_key) and meta.get(reviewer_key) == meta.get(owner_key):
+        findings.append(
+            finding(
+                "WF-REVIEW-002",
+                "high",
+                issue,
+                "reviewer is independent",
+                f"{reviewer_key} equals {owner_key}",
+            )
+        )
     if str(meta.get("implementation_started")).lower() == "true" and str(meta.get("plan_approved")).lower() != "true":
         findings.append(finding("WF-PLAN-001", "high", issue, "approved Plan precedes Implementation", "implementation_started without plan_approved"))
     if status in {"todo", "in_progress"} and str(meta.get("dependencies_satisfied")).lower() == "false":

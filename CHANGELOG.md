@@ -4,6 +4,8 @@
 
 - Normalize Autopilot schedule trigger aliases from real CLI responses, including `cron_expression`, while preserving `cron` and `schedule` compatibility.
 - Keep Observer drift detection strict for wrong cron values, disabled triggers, timezone drift, missing triggers and duplicate managed trigger labels.
+- Validate workflow maintenance Plan approvals with `APPROVE WORKFLOW PLAN <revision>` and resolve recorded approval evidence only from the associated Maintenance Change.
+- Scope review-owner metadata checks by workflow object type so maintenance reviews use `maintainer_id` and `maintenance_reviewer_id` without weakening development review checks.
 
 ## 1.1.0-rc.2
 

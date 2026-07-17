@@ -29,6 +29,23 @@ class AuditCLI:
         raise AssertionError(args)
 
 
+class MaintenanceApprovalCLI(AuditCLI):
+    def __init__(self, metadata, comments=None, issues=None, metadata_by_issue=None):
+        super().__init__(metadata, comments)
+        self.issues = issues or {}
+        self.metadata_by_issue = metadata_by_issue or {}
+        self.comments_by_issue = comments or {}
+
+    def json(self, args, input_text=None):
+        if args[:2] == ["issue", "get"]:
+            return self.issues[args[2]]
+        if args[:3] == ["issue", "metadata", "list"]:
+            return self.metadata_by_issue.get(args[3], {})
+        if args[:3] == ["issue", "comment", "list"]:
+            return self.comments_by_issue.get(args[3], [])
+        raise AssertionError(args)
+
+
 class MaintenanceAuditCLI(AuditCLI):
     def __init__(self, metadata, comments=None):
         super().__init__(metadata, comments)
@@ -595,6 +612,228 @@ class ObserverTests(unittest.TestCase):
                 self.assertIn(
                     "WF-APPROVAL-001", {item["rule_id"] for item in findings}
                 )
+
+    def test_workflow_maintenance_plan_approval_requires_workflow_phrase(self):
+        metadata = {
+            "workflow_id": observer.WORKFLOW_ID,
+            "workflow_object_type": "maintenance_change",
+            "human_approver_id": "human-1",
+            "plan_approved": True,
+            "plan_revision": "v1",
+            "approved_plan_revision": "v1",
+            "approval_author_type": "member",
+            "approval_author_id": "human-1",
+            "approval_comment_id": "approval-1",
+        }
+        valid_comment = {
+            "id": "approval-1",
+            "author_type": "member",
+            "author_id": "human-1",
+            "content": "APPROVE WORKFLOW PLAN v1",
+        }
+        findings = observer.approval_findings(
+            AuditCLI(metadata, [valid_comment]),
+            {"identifier": "WOR-10", "status": "in_progress"},
+            metadata,
+        )
+        self.assertNotIn("WF-APPROVAL-001", {item["rule_id"] for item in findings})
+
+        invalid_comment = {**valid_comment, "content": "APPROVE PLAN v1"}
+        findings = observer.approval_findings(
+            AuditCLI(metadata, [invalid_comment]),
+            {"identifier": "WOR-10", "status": "in_progress"},
+            metadata,
+        )
+        self.assertIn("WF-APPROVAL-001", {item["rule_id"] for item in findings})
+
+    def test_maintenance_child_reads_only_associated_change_approval(self):
+        child_metadata = {
+            "workflow_id": observer.WORKFLOW_ID,
+            "workflow_object_type": "maintenance_implementation",
+            "maintenance_change_id": "WOR-10",
+            "source_incident_id": "WOR-9",
+            "human_approver_id": "human-1",
+            "plan_approved": True,
+            "plan_revision": "v1",
+            "approved_plan_revision": "v1",
+            "approval_author_type": "member",
+            "approval_author_id": "human-1",
+            "approval_comment_id": "approval-1",
+        }
+        parent_metadata = {
+            "workflow_id": observer.WORKFLOW_ID,
+            "workflow_object_type": "maintenance_change",
+            "source_incident_id": "WOR-9",
+        }
+        approval = {
+            "id": "approval-1",
+            "author_type": "member",
+            "author_id": "human-1",
+            "content": "APPROVE WORKFLOW PLAN v1",
+        }
+        cli = MaintenanceApprovalCLI(
+            child_metadata,
+            comments={"WOR-14": [], "WOR-10": [approval], "WOR-99": [approval]},
+            issues={"WOR-10": {"identifier": "WOR-10", "status": "in_progress"}},
+            metadata_by_issue={"WOR-10": parent_metadata},
+        )
+        findings = observer.approval_findings(
+            cli,
+            {"identifier": "WOR-14", "status": "in_progress"},
+            child_metadata,
+        )
+        self.assertNotIn("WF-APPROVAL-001", {item["rule_id"] for item in findings})
+
+        cli.metadata_by_issue["WOR-10"]["source_incident_id"] = "WOR-other"
+        findings = observer.approval_findings(
+            cli,
+            {"identifier": "WOR-14", "status": "in_progress"},
+            child_metadata,
+        )
+        self.assertIn("WF-APPROVAL-001", {item["rule_id"] for item in findings})
+
+        cli.metadata_by_issue["WOR-10"]["source_incident_id"] = "WOR-9"
+        cli.comments_by_issue["WOR-10"] = [
+            {**approval, "author_type": "agent", "author_id": "agent-1"}
+        ]
+        findings = observer.approval_findings(
+            cli,
+            {"identifier": "WOR-14", "status": "in_progress"},
+            child_metadata,
+        )
+        self.assertIn("WF-APPROVAL-001", {item["rule_id"] for item in findings})
+
+        cli.comments_by_issue["WOR-10"] = []
+        findings = observer.approval_findings(
+            cli,
+            {"identifier": "WOR-14", "status": "in_progress"},
+            child_metadata,
+        )
+        self.assertIn("WF-APPROVAL-001", {item["rule_id"] for item in findings})
+
+    def test_maintenance_child_can_resolve_bounded_parent_chain(self):
+        child_metadata = {
+            "workflow_id": observer.WORKFLOW_ID,
+            "workflow_object_type": "maintenance_implementation",
+            "source_incident_id": "WOR-15",
+            "human_approver_id": "human-1",
+            "plan_approved": True,
+            "plan_revision": "v1",
+            "approved_plan_revision": "v1",
+            "approval_author_type": "member",
+            "approval_author_id": "human-1",
+            "approval_comment_id": "approval-1",
+        }
+        approval = {
+            "id": "approval-1",
+            "author_type": "member",
+            "author_id": "human-1",
+            "content": "APPROVE WORKFLOW PLAN v1",
+        }
+        cli = MaintenanceApprovalCLI(
+            child_metadata,
+            comments={"WOR-24": [], "WOR-25": [], "WOR-21": [approval]},
+            issues={
+                "plan-id": {
+                    "identifier": "WOR-25",
+                    "status": "done",
+                    "parent_issue_id": "change-id",
+                },
+                "change-id": {
+                    "identifier": "WOR-21",
+                    "status": "in_progress",
+                },
+            },
+            metadata_by_issue={
+                "WOR-25": {
+                    "workflow_id": observer.WORKFLOW_ID,
+                    "workflow_object_type": "change_plan",
+                    "source_incident_id": "WOR-15",
+                },
+                "WOR-21": {
+                    "workflow_id": observer.WORKFLOW_ID,
+                    "workflow_object_type": "maintenance_change",
+                    "source_incident_id": "WOR-15",
+                },
+            },
+        )
+        findings = observer.approval_findings(
+            cli,
+            {
+                "identifier": "WOR-24",
+                "status": "in_progress",
+                "parent_issue_id": "plan-id",
+            },
+            child_metadata,
+        )
+        self.assertNotIn("WF-APPROVAL-001", {item["rule_id"] for item in findings})
+
+    def test_ordinary_plan_approval_keeps_existing_phrase(self):
+        metadata = {
+            "human_approver_id": "human-1",
+            "plan_approved": True,
+            "plan_revision": "v1",
+            "approved_plan_revision": "v1",
+            "approval_author_type": "member",
+            "approval_author_id": "human-1",
+            "approval_comment_id": "approval-1",
+        }
+        comment = {
+            "id": "approval-1",
+            "author_type": "member",
+            "author_id": "human-1",
+            "content": "APPROVE PLAN v1",
+        }
+        findings = observer.approval_findings(
+            AuditCLI(metadata, [comment]),
+            {"identifier": "T-ordinary", "status": "in_progress"},
+            metadata,
+        )
+        self.assertNotIn("WF-APPROVAL-001", {item["rule_id"] for item in findings})
+
+    def test_review_identity_contract_is_scoped_to_maintenance_objects(self):
+        maintenance = {
+            "workflow_id": observer.WORKFLOW_ID,
+            "workflow_version": "1.1.0-rc.3",
+            "protocol_revision": "v3",
+            "top_protocol_revision": "v3",
+            "human_approver_id": "human-1",
+            "workflow_object_type": "change_plan",
+            "workflow_stage": "change_plan",
+            "plan_revision": "v1",
+            "maintainer_id": "agent-maintainer",
+            "maintenance_reviewer_id": "agent-reviewer",
+        }
+        issue = {"identifier": "WOR-32", "status": "in_review"}
+        findings = observer.audit_issue(AuditCLI(maintenance), issue, 24)
+        self.assertNotIn("WF-REVIEW-002", {item["rule_id"] for item in findings})
+
+        cases = [
+            ({key: value for key, value in maintenance.items() if key != "maintainer_id"}, "maintainer_id"),
+            (
+                {
+                    **maintenance,
+                    "maintenance_reviewer_id": "agent-maintainer",
+                },
+                "maintenance_reviewer_id equals maintainer_id",
+            ),
+        ]
+        for case_metadata, expected in cases:
+            with self.subTest(expected=expected):
+                findings = observer.audit_issue(AuditCLI(case_metadata), issue, 24)
+                review_findings = [
+                    item for item in findings if item["rule_id"] == "WF-REVIEW-002"
+                ]
+                self.assertTrue(review_findings)
+                self.assertTrue(any(expected in item["actual"] for item in review_findings))
+
+        unknown = {
+            **maintenance,
+            "workflow_object_type": "unknown_review_object",
+            "workflow_stage": "unknown_review_stage",
+        }
+        findings = observer.audit_issue(AuditCLI(unknown), issue, 24)
+        self.assertIn("WF-REVIEW-002", {item["rule_id"] for item in findings})
 
     def test_maintenance_review_audit_binds_managed_identity_comment_and_sha(self):
         metadata = {
