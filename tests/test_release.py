@@ -49,6 +49,83 @@ def asset_annotation(assets):
     )
 
 
+BATCH_MAPPINGS = [
+    {
+        "incident": "WOR-9",
+        "plan_issue": "WOR-11",
+        "plan_revision": "v1",
+        "implementation": "WOR-14",
+    },
+    {
+        "incident": "WOR-15",
+        "plan_issue": "WOR-25",
+        "plan_revision": "v1",
+        "implementation": "WOR-24",
+    },
+    {
+        "incident": "WOR-20",
+        "plan_issue": "WOR-32",
+        "plan_revision": "v1",
+        "implementation": "WOR-33",
+    },
+]
+
+
+def bounded_review_content():
+    return (
+        "APPROVED\n"
+        "\n"
+        "plan_revision=v1\n"
+        "reviewed_commit_sha=head-sha\n"
+        "\n"
+        "Batch mappings reviewed:\n"
+        "- incident=WOR-9 plan_issue=WOR-11 plan_revision=v1 implementation=WOR-14\n"
+        "- incident=WOR-15 plan_issue=WOR-25 plan_revision=v1 implementation=WOR-24\n"
+        "- incident=WOR-20 plan_issue=WOR-32 plan_revision=v1 implementation=WOR-33"
+    )
+
+
+def bounded_batch_cli():
+    cli = FakeMultica()
+    cli.metadata.update(
+        {
+            "plan_revision": "v1",
+            "review_issue_id": "WOR-14",
+            "batch_review_mappings": json.dumps(BATCH_MAPPINGS),
+            "delivery_batch": "RC3 Observer Reliability Batch",
+            "source_incident_id": "WOR-9",
+        }
+    )
+    cli.issues["WOR-14"] = {
+        "id": "implementation-internal",
+        "identifier": "WOR-14",
+        "parent_issue_id": "maintenance-internal",
+        "status": "in_review",
+    }
+    cli.metadata_by_issue["WOR-14"] = {
+        "workflow_id": "development-delivery",
+        "workflow_object_type": "maintenance_implementation",
+        "maintenance_change_id": "T-200",
+        "source_incident_id": "WOR-9",
+        "maintenance_reviewer_id": "agent-reviewer",
+        "review_comment_id": "review-1",
+        "reviewed_commit_sha": "head-sha",
+        "plan_revision": "v1",
+        "github_pr_number": "3",
+        "github_merge_commit_sha": "merge-sha",
+    }
+    cli.comments_by_issue["WOR-14"] = [
+        {
+            "id": "review-1",
+            "author_type": "agent",
+            "author_id": "agent-reviewer",
+            "created_at": "2026-07-15T11:00:00Z",
+            "content": bounded_review_content(),
+        }
+    ]
+    return cli
+
+
 class FakeMultica:
     def __init__(self):
         self.profile = "test-profile"
@@ -73,15 +150,27 @@ class FakeMultica:
                 "content": "APPROVED\nplan_revision=v3\nreviewed_commit_sha=head-sha",
             }
         ]
+        self.issues = {
+            "T-200": {
+                "id": "maintenance-internal",
+                "identifier": "T-200",
+                "status": "in_review",
+            }
+        }
+        self.metadata_by_issue = {}
+        self.comments_by_issue = {}
 
     def json(self, args):
         args = list(args)
         if args[:2] == ["issue", "get"]:
-            return {"id": args[2], "identifier": args[2], "status": "in_review"}
+            return self.issues.get(
+                args[2],
+                {"id": args[2], "identifier": args[2], "status": "in_review"},
+            )
         if args[:3] == ["issue", "metadata", "list"]:
-            return self.metadata
+            return self.metadata_by_issue.get(args[3], self.metadata)
         if args[:3] == ["issue", "comment", "list"]:
-            return self.comments
+            return self.comments_by_issue.get(args[3], self.comments)
         if args[:2] == ["agent", "list"]:
             return [
                 {
@@ -322,6 +411,8 @@ class ReleaseTests(unittest.TestCase):
             "multica_approval_comment_id": "approval-1",
             "maintenance_evidence_sha256": "1" * 64,
             "multica_approval_author_sha256": "2" * 64,
+            "review_issue_id": "WOR-14",
+            "batch_review_mappings_sha256": "3" * 64,
         }
         comment = {
             "comments": [
@@ -371,6 +462,76 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(evidence["reviewed_commit_sha"], "head-sha")
         self.assertEqual(evidence["review_comment_id"], "review-1")
         self.assertEqual(evidence["github_merged_at"], pr["mergedAt"])
+
+    def test_maintenance_evidence_resolves_bounded_implementation_review(self):
+        cli = bounded_batch_cli()
+        evidence = release.maintenance_evidence(ROOT, cli, "T-200", maintenance_pr())
+        self.assertEqual(evidence["review_issue_id"], "WOR-14")
+        self.assertEqual(evidence["review_comment_id"], "review-1")
+        self.assertEqual(evidence["plan_revision"], "v1")
+        self.assertIn("batch_review_mappings_sha256", evidence)
+
+    def test_bounded_implementation_review_must_belong_to_maintenance_change(self):
+        cases = {
+            "wrong parent": lambda cli: cli.issues["WOR-14"].update(
+                {"parent_issue_id": "other-maintenance"}
+            ),
+            "wrong maintenance_change_id": lambda cli: cli.metadata_by_issue[
+                "WOR-14"
+            ].update({"maintenance_change_id": "T-999"}),
+            "wrong object type": lambda cli: cli.metadata_by_issue["WOR-14"].update(
+                {"workflow_object_type": "maintenance_change"}
+            ),
+            "wrong source": lambda cli: cli.metadata_by_issue["WOR-14"].update(
+                {"source_incident_id": "WOR-999"}
+            ),
+            "wrong review sha": lambda cli: cli.metadata_by_issue["WOR-14"].update(
+                {"reviewed_commit_sha": "old-head"}
+            ),
+            "wrong reviewer": lambda cli: cli.metadata_by_issue["WOR-14"].update(
+                {"maintenance_reviewer_id": "agent-maintainer"}
+            ),
+            "unreadable target": lambda cli: cli.issues.update({"WOR-14": []}),
+        }
+        for label, mutate in cases.items():
+            with self.subTest(case=label):
+                cli = bounded_batch_cli()
+                mutate(cli)
+                with self.assertRaises(release.ReleaseError):
+                    release.maintenance_evidence(
+                        ROOT, cli, "T-200", maintenance_pr()
+                    )
+
+    def test_delivery_batch_review_requires_exact_mappings(self):
+        cli = bounded_batch_cli()
+        cli.comments_by_issue["WOR-14"][0]["content"] = bounded_review_content().replace(
+            "implementation=WOR-33", "implementation=WOR-34"
+        )
+        with self.assertRaisesRegex(release.ReleaseError, "batch mappings"):
+            release.maintenance_evidence(ROOT, cli, "T-200", maintenance_pr())
+
+        cli = bounded_batch_cli()
+        cli.metadata["batch_review_mappings"] = json.dumps(BATCH_MAPPINGS[:2])
+        with self.assertRaisesRegex(release.ReleaseError, "batch mappings"):
+            release.maintenance_evidence(ROOT, cli, "T-200", maintenance_pr())
+
+        cli = bounded_batch_cli()
+        cli.metadata.pop("review_issue_id")
+        with self.assertRaisesRegex(release.ReleaseError, "review_issue_id"):
+            release.maintenance_evidence(ROOT, cli, "T-200", maintenance_pr())
+
+    def test_maintenance_github_provenance_contains_bounded_review_hashes(self):
+        authorization = release.maintenance_evidence(
+            ROOT, bounded_batch_cli(), "T-200", maintenance_pr()
+        )
+        provenance = release.maintenance_github_provenance(
+            authorization, {"comment_id": "approval-1", "author_id": "human-1"}
+        )
+        self.assertEqual(provenance["review_issue_id"], "WOR-14")
+        self.assertEqual(
+            provenance["batch_review_mappings_sha256"],
+            authorization["batch_review_mappings_sha256"],
+        )
 
     def test_rc2_pending_incident_exception_is_bounded_and_hash_only(self):
         cli = RecoveryMultica()

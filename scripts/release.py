@@ -287,8 +287,28 @@ def maintenance_evidence(
     merge_sha = str((pr.get("mergeCommit") or {}).get("oid") or "")
     if str(metadata.get("github_merge_commit_sha") or "") != merge_sha:
         raise ReleaseError("Maintenance Issue github_merge_commit_sha does not match the release commit")
+    review_issue_id = str(metadata.get("review_issue_id") or "")
+    comment_issue_id = issue_id
+    if review_issue_id:
+        if review_issue_id not in issue_refs(issue_id, issue):
+            bounded_review_issue(
+                cli, issue_id, issue, metadata, identities, review_issue_id
+            )
+        comment_issue_id = review_issue_id
+    elif str(metadata.get("delivery_batch") or ""):
+        raise ReleaseError("delivery batch Maintenance releases require review_issue_id")
     comments = as_list(
-        cli.json(["issue", "comment", "list", issue_id, "--full", "--output", "json"]),
+        cli.json(
+            [
+                "issue",
+                "comment",
+                "list",
+                comment_issue_id,
+                "--full",
+                "--output",
+                "json",
+            ]
+        ),
         "comments",
     )
     matches = [item for item in comments if str(item.get("id") or "") == review_comment_id]
@@ -323,7 +343,29 @@ def maintenance_evidence(
     merge_time = parse_iso_datetime(merged_at, "merged PR")
     if review_time >= merge_time:
         raise ReleaseError("Maintenance Review must be created before the PR is merged")
-    return {
+    batch_review_mappings = normalized_batch_review_mappings(
+        metadata.get("batch_review_mappings")
+    )
+    batch_evidence: dict[str, str] = {}
+    if str(metadata.get("delivery_batch") or "") or batch_review_mappings:
+        if not review_issue_id:
+            raise ReleaseError("delivery batch Maintenance releases require review_issue_id")
+        if not batch_review_mappings:
+            raise ReleaseError("delivery batch Maintenance releases require batch_review_mappings")
+        if not any(item["implementation"] == review_issue_id for item in batch_review_mappings):
+            raise ReleaseError("review_issue_id is not one of the batch_review_mappings implementation issues")
+        observed_mappings = review_comment_batch_mappings(content)
+        if observed_mappings != batch_review_mappings:
+            raise ReleaseError("Maintenance Review comment batch mappings do not exactly match batch_review_mappings")
+        batch_evidence = {
+            "batch_review_mappings_sha256": digest(
+                {
+                    "review_issue_id": review_issue_id,
+                    "batch_review_mappings": batch_review_mappings,
+                }
+            )
+        }
+    evidence = {
         "mode": "maintenance",
         "issue_id": issue_id,
         "workspace_id": cli.workspace_id,
@@ -338,6 +380,10 @@ def maintenance_evidence(
         "github_merge_commit_sha": merge_sha,
         "github_merged_at": merged_at,
     }
+    if review_issue_id:
+        evidence["review_issue_id"] = review_issue_id
+    evidence.update(batch_evidence)
+    return evidence
 
 
 def bootstrap_evidence(
@@ -417,6 +463,136 @@ def digest(value: Any) -> str:
     return hashlib.sha256(canonical(value).encode("utf-8")).hexdigest()
 
 
+def issue_refs(issue_id: str, issue: dict[str, Any]) -> set[str]:
+    return {
+        value
+        for value in {
+            str(issue_id or ""),
+            str(issue.get("id") or ""),
+            str(issue.get("identifier") or ""),
+        }
+        if value
+    }
+
+
+def require_issue_ref(value: Any, refs: set[str], label: str) -> None:
+    if str(value or "") not in refs:
+        raise ReleaseError(f"{label} does not resolve to the selected Maintenance Change")
+
+
+def compare_if_present(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    key: str,
+    label: str,
+) -> None:
+    left_value = str(left.get(key) or "")
+    right_value = str(right.get(key) or "")
+    if left_value and right_value and left_value != right_value:
+        raise ReleaseError(f"bounded Maintenance Review issue {label} does not match the selected Maintenance Change")
+
+
+def normalized_batch_review_mappings(value: Any) -> list[dict[str, str]]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ReleaseError("batch_review_mappings must be a JSON array") from exc
+    if not isinstance(value, list):
+        raise ReleaseError("batch_review_mappings must be a JSON array")
+    normalized = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise ReleaseError("batch_review_mappings items must be objects")
+        mapping = {
+            key: str(item.get(key) or "")
+            for key in ["incident", "plan_issue", "plan_revision", "implementation"]
+        }
+        if not all(mapping.values()):
+            raise ReleaseError("batch_review_mappings items must bind incident, plan_issue, plan_revision and implementation")
+        normalized.append(mapping)
+    deduped = {canonical(item): item for item in normalized}
+    if len(deduped) != len(normalized):
+        raise ReleaseError("batch_review_mappings contains duplicate entries")
+    return sorted(
+        normalized,
+        key=lambda item: (
+            item["incident"],
+            item["plan_issue"],
+            item["plan_revision"],
+            item["implementation"],
+        ),
+    )
+
+
+def review_comment_batch_mappings(content: str) -> list[dict[str, str]]:
+    matches = re.findall(
+        r"(?m)^\s*-\s*incident=([^\s]+)\s+plan_issue=([^\s]+)\s+plan_revision=([^\s]+)\s+implementation=([^\s]+)\s*$",
+        content,
+    )
+    return normalized_batch_review_mappings(
+        [
+            {
+                "incident": incident,
+                "plan_issue": plan_issue,
+                "plan_revision": plan_revision,
+                "implementation": implementation,
+            }
+            for incident, plan_issue, plan_revision, implementation in matches
+        ]
+    )
+
+
+def bounded_review_issue(
+    cli: MulticaCLI,
+    selected_issue_id: str,
+    selected_issue: dict[str, Any],
+    selected_metadata: dict[str, Any],
+    identities: dict[str, str],
+    review_issue_id: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    review_issue = cli.json(["issue", "get", review_issue_id, "--output", "json"])
+    if not isinstance(review_issue, dict):
+        raise ReleaseError(f"Maintenance Review issue is unreadable: {review_issue_id}")
+    review_metadata = metadata_map(
+        cli.json(["issue", "metadata", "list", review_issue_id, "--output", "json"])
+    )
+    if str(review_metadata.get("workflow_id") or "") != "development-delivery":
+        raise ReleaseError("bounded Maintenance Review issue workflow_id is not development-delivery")
+    if str(review_metadata.get("workflow_object_type") or "") != "maintenance_implementation":
+        raise ReleaseError("bounded Maintenance Review issue is not a maintenance_implementation")
+    selected_refs = issue_refs(selected_issue_id, selected_issue)
+    require_issue_ref(review_issue.get("parent_issue_id"), selected_refs, "bounded Maintenance Review issue parent")
+    require_issue_ref(
+        review_metadata.get("maintenance_change_id"),
+        selected_refs,
+        "bounded Maintenance Review issue maintenance_change_id",
+    )
+    for key in [
+        "source_incident_id",
+        "source_issue",
+        "source_issue_id",
+        "source_requirement_id",
+        "workflow_incident_id",
+    ]:
+        compare_if_present(selected_metadata, review_metadata, key, key)
+    for key in [
+        "review_comment_id",
+        "reviewed_commit_sha",
+        "plan_revision",
+        "github_pr_number",
+        "github_merge_commit_sha",
+    ]:
+        compare_if_present(selected_metadata, review_metadata, key, key)
+    for key in ["maintenance_reviewer_id", "reviewer_agent_id"]:
+        value = str(review_metadata.get(key) or "")
+        if value and value != identities["maintenance_reviewer_id"]:
+            raise ReleaseError("bounded Maintenance Review issue reviewer identity does not match the managed Maintenance Reviewer")
+    return review_issue, review_metadata
+
+
 def maintenance_github_provenance(
     authorization: dict[str, Any], release_approval: dict[str, Any]
 ) -> dict[str, str]:
@@ -435,6 +611,10 @@ def maintenance_github_provenance(
             approval_author_id.encode("utf-8")
         ).hexdigest(),
     }
+    for key in ["review_issue_id", "batch_review_mappings_sha256"]:
+        value = str(authorization.get(key) or "")
+        if value:
+            provenance[key] = value
     if authorization.get("recovery_mode") == RC2_RECOVERY_MODE:
         for key in [
             "recovery_mode",
@@ -1137,8 +1317,9 @@ def command_verify_tag(args: argparse.Namespace, root: Path) -> int:
                     "recovery_decision_sha256",
                 ]
             )
+        optional = ["review_issue_id", "batch_review_mappings_sha256"]
         values = {}
-        for key in required:
+        for key in required + optional:
             pattern = rf"(?m)^{key}=([a-f0-9]{{64}})$" if key.endswith("sha256") else rf"(?m)^{key}=(\S+)$"
             value_match = re.search(pattern, annotation)
             if value_match:
