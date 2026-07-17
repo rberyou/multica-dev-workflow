@@ -4,7 +4,7 @@ description: Maintain the Git-managed Multica workflow product from a confirmed 
 metadata:
   managed_by: multica-dev-workflow
   workflow_id: development-delivery
-  version: 1.1.0-rc.2
+  version: 1.1.0-rc.3
 ---
 
 # Multica Workflow Maintainer

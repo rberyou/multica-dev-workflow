@@ -160,7 +160,7 @@ class RecoveryMultica(FakeMultica):
 
 class ReleaseTests(unittest.TestCase):
     def test_all_version_files_match_rc(self):
-        checked = release.verify_versions(ROOT, "1.1.0-rc.2")
+        checked = release.verify_versions(ROOT, "1.1.0-rc.3")
         self.assertIn("VERSION", checked)
         self.assertIn("skills/multica-workflow-observer/SKILL.md", checked)
         self.assertIn("instructions/roles/leader.md", checked)
@@ -172,13 +172,13 @@ class ReleaseTests(unittest.TestCase):
             leader = temp_root / "instructions/roles/leader.md"
             leader.write_text(
                 leader.read_text(encoding="utf-8").replace(
-                    "workflow_version=1.1.0-rc.2",
+                    "workflow_version=1.1.0-rc.3",
                     "workflow_version=1.1.0-rc.1",
                 ),
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(release.ReleaseError, "workflow_version"):
-                release.verify_versions(temp_root, "1.1.0-rc.2")
+                release.verify_versions(temp_root, "1.1.0-rc.3")
 
     def test_release_plan_binds_exact_merge_pr_and_validation(self):
         pr = {

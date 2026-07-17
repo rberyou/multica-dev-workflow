@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.0-rc.3
+
+- Normalize Autopilot schedule trigger aliases from real CLI responses, including `cron_expression`, while preserving `cron` and `schedule` compatibility.
+- Keep Observer drift detection strict for wrong cron values, disabled triggers, timezone drift, missing triggers and duplicate managed trigger labels.
+
 ## 1.1.0-rc.2
 
 - Remove the deleted Multica v0.4.2 Autopilot priority field from desired state, CLI mutations, schema, audit contracts and verification.

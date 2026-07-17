@@ -848,6 +848,44 @@ class ObserverTests(unittest.TestCase):
         cli = ControlPlaneCLI()
         self.assertEqual(observer.audit_control_plane(cli, "T-audit"), [])
 
+    def test_control_plane_audit_accepts_schedule_cron_aliases(self):
+        for alias in ["cron", "cron_expression", "schedule"]:
+            with self.subTest(alias=alias):
+                cli = ControlPlaneCLI()
+                trigger = cli.autopilots[0]["triggers"][0]
+                cron = trigger.pop("cron")
+                trigger[alias] = cron
+                self.assertEqual(observer.audit_control_plane(cli, "T-audit"), [])
+
+    def test_control_plane_audit_still_reports_trigger_drift(self):
+        cases = [
+            "wrong cron_expression",
+            "disabled trigger",
+            "wrong timezone",
+            "missing trigger",
+            "duplicate label",
+        ]
+        for case in cases:
+            with self.subTest(case=case):
+                cli = ControlPlaneCLI()
+                trigger = cli.autopilots[0]["triggers"][0]
+                if case == "wrong cron_expression":
+                    trigger.pop("cron")
+                    trigger["cron_expression"] = "30 * * * *"
+                elif case == "disabled trigger":
+                    trigger["enabled"] = False
+                elif case == "wrong timezone":
+                    trigger["timezone"] = "UTC"
+                elif case == "missing trigger":
+                    cli.autopilots[0]["triggers"] = []
+                elif case == "duplicate label":
+                    cli.autopilots[0]["triggers"].append(
+                        {**trigger, "id": "trigger-duplicate"}
+                    )
+                findings = observer.audit_control_plane(cli, "T-audit")
+                self.assertEqual(findings[0]["rule_id"], "WF-DRIFT-001")
+                self.assertIn("autopilot_specs", findings[0]["actual"])
+
     def test_control_plane_audit_accepts_reviewed_disabled_operations_mode(self):
         cli = ControlPlaneCLI()
         manifest = json.loads((ROOT / "workflow.json").read_text(encoding="utf-8"))

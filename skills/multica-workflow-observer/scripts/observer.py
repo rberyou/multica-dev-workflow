@@ -148,6 +148,10 @@ def normalized_ids(value: Any) -> list[str]:
     return sorted(set(result))
 
 
+def trigger_cron(trigger: dict[str, Any]) -> Any:
+    return trigger.get("cron") or trigger.get("cron_expression") or trigger.get("schedule") or ""
+
+
 def managed_match(items: list[dict[str, Any]], object_key: str, field: str) -> dict[str, Any]:
     matches = []
     for item in items:
@@ -1691,7 +1695,7 @@ def audit_control_plane(cli: CLI, coverage_issue: str | None) -> list[dict[str, 
                 "kind": current_trigger.get("kind") or current_trigger.get("type"),
                 "label": current_trigger.get("label") or "",
                 "enabled": bool(current_trigger.get("enabled", True)),
-                "cron": current_trigger.get("cron") or current_trigger.get("schedule") or "",
+                "cron": trigger_cron(current_trigger),
                 "timezone": current_trigger.get("timezone") or "UTC",
             }
             expected_trigger_spec = {

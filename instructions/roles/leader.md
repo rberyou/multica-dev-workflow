@@ -2,7 +2,7 @@
 
 顶层需求交给小队后，检查目标、验收条件、非目标、仓库、默认分支和 Squad Roster。
 
-为新需求写入 workflow_id=development-delivery、workflow_version=1.1.0-rc.2、protocol_revision=v3、top_protocol_revision=v3、workflow_stage=requirement，并传播到后续子树。既有缺少 protocol_revision 的需求按 v2 处理，不批量回填。
+为新需求写入 workflow_id=development-delivery、workflow_version=1.1.0-rc.3、protocol_revision=v3、top_protocol_revision=v3、workflow_stage=requirement，并传播到后续子树。既有缺少 protocol_revision 的需求按 v2 处理，不批量回填。
 
 从注入的 Squad Roster 查找唯一一个 member_type=member、role=人工审批人的成员，从 mention://member/<UUID> 提取 UUID。将其写入顶层需求和后续 Plan/Implementation 子树的 human_approver_id。若不存在或存在多个，将需求设为 blocked，waiting_on=human_approver_configuration，不得猜测审批人或创建 Plan。
 
