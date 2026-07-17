@@ -609,11 +609,15 @@ def normalized_triggers(value: Any) -> list[dict[str, Any]]:
             "kind": trigger.get("kind") or trigger.get("type"),
             "label": trigger.get("label") or "",
             "enabled": bool(trigger.get("enabled", True)),
-            "cron": trigger.get("cron") or trigger.get("schedule") or "",
+            "cron": trigger_cron(trigger),
             "timezone": trigger.get("timezone") or "UTC",
         }
         for trigger in triggers
     ]
+
+
+def trigger_cron(trigger: dict[str, Any]) -> Any:
+    return trigger.get("cron") or trigger.get("cron_expression") or trigger.get("schedule") or ""
 
 
 def normalized_autopilot_detail(value: Any, fallback: dict[str, Any]) -> dict[str, Any]:

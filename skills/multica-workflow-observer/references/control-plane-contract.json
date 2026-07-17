@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "workflow_version": "1.1.0-rc.2",
+  "workflow_version": "1.1.0-rc.3",
   "protocol_revision": "v3",
-  "observer_source_hash": "c4562a61fef3090a1dee80289e4af223fddade40008581e816cc0437fe7db05a",
+  "observer_source_hash": "fb85be00e6b47ca4c3a2231a8327f4dba71e79f063a30cf25dcdd1a8a3e4cc3f",
   "agents": {
     "leader": {
       "name": "开发队长",
@@ -10,11 +10,11 @@
       "runtime_binding": "codex-orchestrator",
       "max_concurrent_tasks": 1,
       "permission_mode": "public_to_workspace",
-      "instructions_sha256": "deb2f59055943e2391549760284eeef6431e224c48f013dafc94315186e7ae06",
+      "instructions_sha256": "a7e84c952d17d46a18cd615ce263878d94c83c35455ec759b75805c3e7d2d3c0",
       "spec_hashes": {
-        "codex-only": "fbb0dd627110a386beee2837b7ecdaf71237035c036d3072ccc5d19b8222762a",
-        "opencode-only": "9750bcb3d246bb7cfd887a919538b5ccc2d038d08d6e32b54b1c00e26526d0a6",
-        "quality": "fbb0dd627110a386beee2837b7ecdaf71237035c036d3072ccc5d19b8222762a"
+        "codex-only": "0ea8279d9466a1b74ccb3b8fd42050980ad2f7ffdb31716b0f37221dc9307a48",
+        "opencode-only": "f212293894670340c61a67134c75a4c35bbbfcd19a9aa62acb21fec78b3158cd",
+        "quality": "0ea8279d9466a1b74ccb3b8fd42050980ad2f7ffdb31716b0f37221dc9307a48"
       }
     },
     "planner": {
@@ -201,7 +201,7 @@
     "multica-requirement-intake": {
       "key": "requirement-intake",
       "attach_to": [],
-      "package_hash": "8754c0d7fecd5a983ee0ba72becb932e180070ffd5882343502b6a7fce6589f0"
+      "package_hash": "893020699507e1eafedcd885fc5e20fd2e025b8d2128f5a43a69fcd2127fda26"
     },
     "multica-workflow-observer": {
       "key": "workflow-observer",
@@ -223,7 +223,7 @@
         "workflow-maintainer",
         "workflow-maintenance-reviewer"
       ],
-      "package_hash": "7de593d2d377c9721654c31a770ad4b90a8ff98d22a833fe0ed784a2d5fc42a9"
+      "package_hash": "38c8e84b9755ba8b6743c3832830cc6a18fc8cc4a024413fdcc710b07fe74050"
     }
   },
   "squad": {

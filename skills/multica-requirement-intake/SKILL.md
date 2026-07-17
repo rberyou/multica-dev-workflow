@@ -4,7 +4,7 @@ description: Create, draft, submit, and follow top-level development requirement
 metadata:
   managed_by: multica-dev-workflow
   workflow_id: development-delivery
-  version: 1.1.0-rc.2
+  version: 1.1.0-rc.3
 ---
 
 # Multica Requirement Intake

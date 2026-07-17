@@ -587,6 +587,41 @@ class ReconcileTests(unittest.TestCase):
                 [],
             )
 
+    def test_real_autopilot_cron_expression_trigger_is_idempotent(self):
+        with committed_temp_repo() as temp_root:
+            cli = MutatingCLI()
+            cli.real_autopilot_responses = True
+            workspace = {"id": cli.workspace_id, "name": "Test", "slug": "test"}
+            runtime_map = temp_root / ".multica/runtime-map.local.json"
+            initial = build_plan(
+                temp_root, cli, workspace, "quality", runtime_map, False, False
+            )
+            initial_path = temp_root / ".multica/plans/initial.json"
+            write_json(initial_path, initial)
+            apply_plan(temp_root, cli, initial_path, initial["plan_digest"][:12])
+
+            trigger = cli.autopilots[0]["triggers"][0]
+            trigger["cron_expression"] = trigger.pop("cron")
+
+            verification = build_plan(
+                temp_root,
+                cli,
+                workspace,
+                "quality",
+                runtime_map,
+                False,
+                False,
+                write_archives=False,
+            )
+            self.assertEqual(
+                [
+                    item
+                    for item in verification["actions"]
+                    if item["type"] not in {"NO_CHANGE", "WARNING"}
+                ],
+                [],
+            )
+
     def test_paused_autopilot_create_uses_one_minimal_status_update(self):
         with committed_temp_repo() as temp_root:
             cli = MutatingCLI()
