@@ -18,7 +18,8 @@ The base architecture is recorded in [docs/design-plan-v5.md](docs/design-plan-v
 - Runtime, workspace, agent, squad and member UUIDs remain local.
 - Existing unrelated skills and non-conflicting roster members are preserved.
 - v1.1 does not prune, destroy or archive managed objects.
-- Observer reporting may create/update Incident data only; it cannot release or Apply workflow changes.
+- Observer reporting may create/update Incident data only. Maintenance intake is human-gated and later stages are created lazily.
+- Local release tooling can validate and dispatch a request but cannot create tags or Releases. Publication runs only behind the protected `workflow-release` GitHub Environment.
 
 ## Quick Start
 
@@ -57,3 +58,11 @@ python scripts/workflow.py plan --workspace <id-or-slug> --disable-operations
 See `skills/multica-workflow-manager/SKILL.md` for the external Agent workflow.
 
 Tagged releases publish requirement-intake, workflow-manager, workflow-observer and workflow-maintainer Skills, the complete repository bundle and SHA256 checksums.
+
+Release control is configured in `docs/release-control.json`. RC4 requires the repository to be public and to provide the protected Environment plus the main-only deployment policy and a `refs/tags/v*` ruleset whose only bypass is the GitHub Actions App. Before planning a release, run:
+
+```text
+python scripts/release.py doctor
+```
+
+The required GitHub Environment reviewer must use a credential unavailable to Agent runtimes. Owner/admin `gh` accounts, any identity with repository `push`, owner-capable SSH access and reusable GitHub HTTPS credential-helper entries must be removed from release-capable Agent runtimes before privileged GitHub changes. The remaining dispatcher is Contents-read-only and carries only the bounded Actions permission required to start the workflow. `release.py apply` dispatches the request; `github-actions[bot]` creates the approved tag and Release after Environment approval.

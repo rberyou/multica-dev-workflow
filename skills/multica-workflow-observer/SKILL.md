@@ -4,7 +4,7 @@ description: Report, detect, deduplicate, triage, and verify workflow incidents 
 metadata:
   managed_by: multica-dev-workflow
   workflow_id: development-delivery
-  version: 1.1.0-rc.3
+  version: 1.1.0-rc.4
 ---
 
 # Multica Workflow Observer
@@ -42,7 +42,8 @@ Observer Mode is authorized only by the managed Workflow Observer instructions o
 - Use `scripts/observer.py health` from an external operator context to check Autopilot freshness.
 - Triage reports into only the verdicts in [triage-runbook.md](references/triage-runbook.md).
 - Do not modify workflow Git source or managed Multica configuration.
-- Create exactly one Maintenance Change child for a confirmed workflow defect.
+- Create or reuse only the Incident. For a confirmed defect set `waiting_on=maintenance_intake`; do not create Maintenance, Plan, Implementation, Canary or Rollout Issues.
+- Honor `maintenance_intake_mode=human_gated`, `automatic_expansion=false`, and stabilization freezes. Stage expansion and Observer resume require separate human-approved operations.
 - Keep Incident evidence redacted and bounded.
 - Preserve one redacted pending payload, its stable scan index, original Reporter identity and the source pending marker until Incident metadata and source linkage are complete. Reuse the stable fingerprint on retry, preserve evidence in the bounded Incident log, and apply cooldown to human-facing comments and escalation notification.
 

@@ -1,92 +1,140 @@
 name: release
 
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
     inputs:
-      tag:
-        description: Existing approved release tag to recover
+      request_b64:
+        description: Base64url-encoded, digest-bound release Request
         required: true
         type: string
+      recover_existing_tag:
+        description: Recover asset publication for the existing approved tag
+        required: true
+        default: false
+        type: boolean
 
 permissions:
-  contents: write
+  contents: read
   actions: read
   pull-requests: read
 
 jobs:
-  release:
+  validate-request:
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
-    env:
-      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    outputs:
+      release_request_digest: ${{ steps.request.outputs.release_request_digest }}
+      release_plan_digest: ${{ steps.request.outputs.release_plan_digest }}
+      source_commit: ${{ steps.request.outputs.source_commit }}
+      tag: ${{ steps.request.outputs.tag }}
+      version: ${{ steps.request.outputs.version }}
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
-      - name: Resolve approved release tag
-        shell: bash
-        run: |
-          [[ "${RELEASE_TAG}" == v* ]]
-          remote_tag_ref="refs/tags/${RELEASE_TAG}"
-          temporary_ref="refs/release-fetch/${GITHUB_RUN_ID}"
-          git fetch --no-tags origin "${remote_tag_ref}:${temporary_ref}"
-          remote_tag_object=$(git rev-parse "${temporary_ref}")
-          test "$(git cat-file -t "${remote_tag_object}")" = "tag"
-          if git show-ref --verify --quiet "${remote_tag_ref}"; then
-            test "$(git rev-parse "${remote_tag_ref}")" = "${remote_tag_object}"
-          else
-            git update-ref "${remote_tag_ref}" "${remote_tag_object}" ""
-          fi
-          git update-ref -d "${temporary_ref}"
-          release_sha=$(git rev-list -n 1 "${RELEASE_TAG}")
-          test -n "${release_sha}"
-          test "${release_sha}" = "$(git rev-parse HEAD)"
-          echo "RELEASE_SHA=${release_sha}" >> "${GITHUB_ENV}"
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
+      - name: Decode release Request
+        env:
+          REQUEST_B64: ${{ inputs.request_b64 }}
+        shell: bash
+        run: |
+          mkdir -p .multica/release-request
+          python - <<'PY'
+          import base64
+          import os
+          from pathlib import Path
+
+          encoded = os.environ["REQUEST_B64"]
+          padding = "=" * (-len(encoded) % 4)
+          Path(".multica/release-request/request.json").write_bytes(
+              base64.urlsafe_b64decode(encoded + padding)
+          )
+          PY
       - name: Install validation tools
         run: python -m pip install -r requirements.txt check-jsonschema
+      - name: Verify release Request
+        id: request
+        run: |
+          python scripts/release.py verify-request \
+            --request .multica/release-request/request.json \
+            --expected-source "${GITHUB_SHA}" \
+            --github-output "${GITHUB_OUTPUT}"
       - name: Validate and test
         run: |
           check-jsonschema --schemafile workflow.schema.json workflow.json
           python -m py_compile scripts/workflow.py scripts/workflow_lib.py scripts/package_skills.py scripts/generate_audit_contract.py scripts/release.py skills/multica-workflow-observer/scripts/observer.py
           python scripts/generate_audit_contract.py --check
           python -m unittest discover -s tests -v
-      - name: Verify release provenance
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-request-${{ steps.request.outputs.release_request_digest }}
+          path: .multica/release-request/request.json
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: validate-request
+    runs-on: ubuntu-latest
+    environment: workflow-release
+    permissions:
+      contents: write
+      actions: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.validate-request.outputs.source_commit }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Install validation tools
+        run: python -m pip install -r requirements.txt check-jsonschema
+      - uses: actions/download-artifact@v5
+        with:
+          name: release-request-${{ needs.validate-request.outputs.release_request_digest }}
+          path: .multica/release-request
+      - name: Configure protected release operator
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - name: Create or recover approved tag
         env:
           GH_TOKEN: ${{ github.token }}
+          RECOVER_EXISTING_TAG: ${{ inputs.recover_existing_tag }}
         shell: bash
         run: |
-          git fetch --no-tags origin main
-          git merge-base --is-ancestor "${RELEASE_SHA}" origin/main
-          python scripts/release.py verify-tag --tag "${RELEASE_TAG}"
-          pr_count=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${RELEASE_SHA}/pulls" \
-            --jq '[.[] | select(.merged_at != null and .base.ref == "main" and .merge_commit_sha == "'"${RELEASE_SHA}"'")] | length')
-          test "${pr_count}" -eq 1
-          green_count=$(gh run list --commit "${RELEASE_SHA}" --workflow validate --limit 20 \
-            --json status,conclusion,headSha \
-            --jq '[.[] | select(.status == "completed" and .conclusion == "success" and .headSha == "'"${RELEASE_SHA}"'")] | length')
-          test "${green_count}" -ge 1
+          recovery_flag=""
+          if [[ "${RECOVER_EXISTING_TAG}" == "true" ]]; then
+            recovery_flag="--recover-existing-tag"
+          fi
+          python scripts/release.py publish \
+            --request .multica/release-request/request.json \
+            --workflow-run-id "${GITHUB_RUN_ID}" \
+            --environment workflow-release \
+            ${recovery_flag}
+      - name: Verify protected tag provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/release.py verify-tag --tag "${{ needs.validate-request.outputs.tag }}"
       - name: Build release assets
         run: |
           mkdir -p build/release
-          python scripts/package_skills.py skills/multica-requirement-intake build/release/multica-requirement-intake-${RELEASE_TAG}.zip
-          python scripts/package_skills.py skills/multica-workflow-manager build/release/multica-workflow-manager-${RELEASE_TAG}.zip
-          python scripts/package_skills.py skills/multica-workflow-observer build/release/multica-workflow-observer-${RELEASE_TAG}.zip
-          python scripts/package_skills.py skills/multica-workflow-maintainer build/release/multica-workflow-maintainer-${RELEASE_TAG}.zip
-          git archive --format=zip --output=build/release/multica-dev-workflow-${RELEASE_TAG}.zip "${RELEASE_TAG}"
+          python scripts/package_skills.py skills/multica-requirement-intake build/release/multica-requirement-intake-${{ needs.validate-request.outputs.tag }}.zip
+          python scripts/package_skills.py skills/multica-workflow-manager build/release/multica-workflow-manager-${{ needs.validate-request.outputs.tag }}.zip
+          python scripts/package_skills.py skills/multica-workflow-observer build/release/multica-workflow-observer-${{ needs.validate-request.outputs.tag }}.zip
+          python scripts/package_skills.py skills/multica-workflow-maintainer build/release/multica-workflow-maintainer-${{ needs.validate-request.outputs.tag }}.zip
+          git archive --format=zip --output=build/release/multica-dev-workflow-${{ needs.validate-request.outputs.tag }}.zip "${{ needs.validate-request.outputs.tag }}"
           cd build/release
           sha256sum *.zip > checksums.txt
       - name: Verify approved release asset set
-        run: python scripts/release.py verify-assets --tag "${RELEASE_TAG}" --directory build/release
+        run: python scripts/release.py verify-assets --tag "${{ needs.validate-request.outputs.tag }}" --directory build/release
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.validate-request.outputs.tag }}
         shell: bash
         run: |
           prerelease=""

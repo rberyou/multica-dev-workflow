@@ -6,7 +6,7 @@ Git is desired state. Multica Agents, Skills, Project, Autopilot and Squad are d
 
 ## Intake
 
-Workflow defects enter through a standardized Incident in the managed `工作流运维` Project. The Observer deduplicates and classifies reports. Only confirmed workflow defects or human-approved enhancements enter Maintenance Change.
+Workflow defects enter through a standardized Incident in the managed `工作流运维` Project. The Observer deduplicates and classifies reports but does not create a maintenance tree. Only a durable human or explicitly authorized external Maintainer may select a batch or start Maintenance Change. Plan, Implementation, Canary and Rollout stages are created lazily after their preceding gates.
 
 ## Change Gates
 
@@ -18,6 +18,8 @@ Workflow defects enter through a standardized Incident in the managed `工作流
 6. Observer verification and rollback rehearsal.
 7. Digest-bound release approval comment authored by the durable human approver on the Maintenance Issue.
 8. Separate digest-bound deployment approval per Workspace.
+
+Automatic maintenance-tree expansion is disabled. A stabilization freeze blocks Issue creation, stage promotion, Release, Canary, rollout and Observer resume until each named gate is explicitly reopened.
 
 Any desired Agent, instruction, Runtime profile, Skill, Squad, Project or Autopilot change must regenerate `skills/multica-workflow-observer/references/control-plane-contract.json`. CI rejects a stale contract.
 
@@ -32,4 +34,4 @@ While Review is active, the Maintenance Issue records both `reviewed_commit_sha`
 
 ## Residual Controls
 
-Agent role boundaries are governance, not shell RBAC. The private repository currently lacks protected-branch enforcement, so released tags additionally require exact merged-PR and green-CI provenance. Owner bypass remains auditable but not impossible.
+Agent role boundaries are governance, not shell RBAC. Release mutation therefore runs only inside the protected `workflow-release` GitHub Environment after approval by a human reviewer whose credential is unavailable to Agent runtimes. An active `refs/tags/v*` ruleset rejects ordinary tag creation/update/deletion and grants the sole bypass to the GitHub Actions App. The Environment-scoped `github-actions[bot]` token is the release operator. Local Maintainer runtimes may validate and dispatch a request but cannot create tags or Releases.

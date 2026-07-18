@@ -378,6 +378,10 @@ def validate_repository(root: Path, deployment_profile: str) -> tuple[dict[str, 
             errors.append(f"operations.reporter_agents reference unknown agents: {sorted(unknown_reporters)}")
         if operations.get("autopilot") not in set(autopilot_keys):
             errors.append("operations.autopilot must reference a managed autopilot")
+        if operations.get("maintenance_intake_mode") != "human_gated":
+            errors.append("operations.maintenance_intake_mode must be human_gated")
+        if operations.get("automatic_expansion") is not False:
+            errors.append("operations.automatic_expansion must be false")
         reporter_agents = set(operations.get("reporter_agents") or [])
         squad_agents = {
             str(member.get("agent") or "")
@@ -667,14 +671,6 @@ def desired_skill_attachments(
             continue
         for agent_key in skill.get("attach_to", []):
             desired.setdefault(agent_key, set()).add(skill["key"])
-    operations = manifest.get("operations") or {}
-    if disable_operations and operations:
-        observer_skill = operations.get("observer_skill")
-        for agent_key in operations.get("reporter_agents") or []:
-            desired.setdefault(agent_key, set()).discard(observer_skill)
-        observer_agent = operations.get("observer_agent")
-        if observer_agent and observer_skill:
-            desired.setdefault(observer_agent, set()).add(observer_skill)
     return desired
 
 

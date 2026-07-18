@@ -2,11 +2,13 @@
 
 1. Determine whether the defect is workflow-level rather than product code or requirement ambiguity.
 2. Choose severity and block the source only when correctness, approval, security, privacy or Git history is at risk.
-3. Use `multica-workflow-observer` Reporter Mode to create/reuse the Incident.
+3. Use `multica-workflow-observer` Reporter Mode to create or reuse one Incident.
 4. Preserve links and compact redacted evidence; never copy secrets or unredacted user content.
-5. Observer triage chooses one allowed verdict and creates one Maintenance Change only for confirmed workflow defects/gaps.
-6. Keep the Incident open through fix, RC, canary, release, affected-Workspace rollout and Observer verification.
-7. Same-release unresolved recurrence reuses the original Maintenance tree; later/post-fix recurrence links with `recurrence_of`.
+5. Observer triage records one allowed verdict. Confirmed defects move to `waiting_on=maintenance_intake`; Observer does not create a maintenance tree.
+6. A durable human or explicitly authorized external Maintainer selects an existing batch or starts one Maintenance Change. Plan, Implementation, Canary and Rollout stages are created lazily after their preceding gates.
+7. During `maintenance_intake_mode=human_gated`, `automatic_expansion=false`, or a stabilization freeze, automatic expansion and status promotion fail closed.
+8. Keep the Incident open through fix, RC, Canary, release, affected-Workspace rollout and Observer verification.
+9. Same-release unresolved recurrence reuses the Incident and selected Maintenance batch; later/post-fix recurrence links with `recurrence_of`.
 
 Observer scheduler outage requires an external `workflow.py health` check; the scheduler cannot fully monitor itself.
 

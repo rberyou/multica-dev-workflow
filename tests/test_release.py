@@ -248,8 +248,177 @@ class RecoveryMultica(FakeMultica):
 
 
 class ReleaseTests(unittest.TestCase):
+    @staticmethod
+    def release_boundary_fixture():
+        return {
+            "repository": "rberyou/multica-dev-workflow",
+            "repository_owner": "rberyou",
+            "repository_visibility": "public",
+            "repository_default_branch": "main",
+            "environment": "workflow-release",
+            "deployment_branch": "main",
+            "operator_login": "github-actions[bot]",
+            "reviewers": ["isolated-reviewer"],
+            "prevent_self_review": True,
+            "admin_bypass": {
+                "api_field": "can_admins_bypass",
+                "readback_supported": False,
+                "status": "not_exposed_by_rest_api",
+                "residual_risk": "repository_owner_can_reconfigure_release_controls",
+            },
+            "environment_sha256": "2" * 64,
+            "tag_ruleset": {
+                "name": "workflow-release-tags",
+                "id": "99",
+                "github_actions_app_id": 15368,
+                "sha256": "3" * 64,
+            },
+            "runtime_boundary": {"checked": False},
+        }
+
+    @staticmethod
+    def protected_environment_gh(
+        args,
+        reviewer="isolated-reviewer",
+        login="release-dispatcher",
+        visibility="public",
+        permissions=None,
+        configured_logins=None,
+        can_admins_bypass=None,
+    ):
+        if args[:2] == ["api", "repos/rberyou/multica-dev-workflow"]:
+            return {
+                "visibility": visibility,
+                "private": visibility != "public",
+                "owner": {"login": "rberyou"},
+                "default_branch": "main",
+                "permissions": permissions
+                or {
+                    "admin": False,
+                    "maintain": False,
+                    "push": False,
+                    "triage": True,
+                    "pull": True,
+                },
+            }
+        if args[:2] == ["api", "user"]:
+            return {"login": login}
+        if args[:2] == ["auth", "status"]:
+            accounts = configured_logins or [login]
+            return {
+                "hosts": {
+                    "github.com": [
+                        {
+                            "state": "success",
+                            "active": account == login,
+                            "login": account,
+                        }
+                        for account in accounts
+                    ]
+                }
+            }
+        if args[:2] == ["api", "repos/rberyou/multica-dev-workflow/environments/workflow-release"]:
+            detail = {
+                "id": 42,
+                "name": "workflow-release",
+                "protection_rules": [
+                    {
+                        "type": "required_reviewers",
+                        "prevent_self_review": True,
+                        "reviewers": [
+                            {
+                                "type": "User",
+                                "reviewer": {"id": 7, "login": reviewer},
+                            }
+                        ],
+                    }
+                ],
+                "deployment_branch_policy": {
+                    "protected_branches": False,
+                    "custom_branch_policies": True,
+                },
+            }
+            if can_admins_bypass is not None:
+                detail["can_admins_bypass"] = can_admins_bypass
+            return detail
+        if args[:2] == [
+            "api",
+            "repos/rberyou/multica-dev-workflow/environments/workflow-release/deployment-branch-policies",
+        ]:
+            return {"branch_policies": [{"name": "main"}]}
+        if args[:2] == ["api", "repos/rberyou/multica-dev-workflow/rulesets"]:
+            return [{"id": 99, "name": "workflow-release-tags"}]
+        if args[:2] == ["api", "repos/rberyou/multica-dev-workflow/rulesets/99"]:
+            return {
+                "id": 99,
+                "name": "workflow-release-tags",
+                "target": "tag",
+                "enforcement": "active",
+                "conditions": {
+                    "ref_name": {"include": ["refs/tags/v*"], "exclude": []}
+                },
+                "rules": [
+                    {"type": "creation"},
+                    {"type": "update"},
+                    {"type": "deletion"},
+                ],
+                "bypass_actors": [
+                    {
+                        "actor_type": "Integration",
+                        "actor_id": 15368,
+                        "bypass_mode": "always",
+                    }
+                ],
+            }
+        if args[:2] == ["api", "apps/github-actions"]:
+            return {"id": 15368, "slug": "github-actions"}
+        raise AssertionError(args)
+
+    @staticmethod
+    def release_request_fixture():
+        request = {
+            "schema_version": 1,
+            "created_at": "2026-07-18T00:00:00Z",
+            "version": "1.1.0-rc.4",
+            "tag": "v1.1.0-rc.4",
+            "source_commit": "a" * 40,
+            "origin_main_sha": "a" * 40,
+            "source_hash": "b" * 64,
+            "merged_pr": {
+                "number": 9,
+                "head_sha": "c" * 40,
+                "merge_commit_sha": "a" * 40,
+                "merged_at": "2026-07-18T00:00:00Z",
+            },
+            "validation": {"databaseId": 123, "headSha": "a" * 40},
+            "version_files": ["VERSION"],
+            "changelog_hash": "d" * 64,
+            "expected_assets": ["checksums.txt", "workflow.zip"],
+            "release_plan_digest": "e" * 64,
+            "maintenance_provenance": {
+                "maintenance_issue": "WOR-43",
+                "review_comment_id": "review-1",
+                "multica_approval_comment_id": "approval-1",
+                "maintenance_evidence_sha256": "f" * 64,
+                "multica_approval_author_sha256": "1" * 64,
+            },
+            "release_control": {
+                "repository": "rberyou/multica-dev-workflow",
+                "required_visibility": "public",
+                "environment": "workflow-release",
+                "deployment_branch": "main",
+                "operator_login": "github-actions[bot]",
+                "tag_ruleset": "workflow-release-tags",
+            },
+            "release_boundary": release.release_boundary_snapshot(
+                ReleaseTests.release_boundary_fixture()
+            ),
+        }
+        request["release_request_digest"] = release.digest(request)
+        return request
+
     def test_all_version_files_match_rc(self):
-        checked = release.verify_versions(ROOT, "1.1.0-rc.3")
+        checked = release.verify_versions(ROOT, "1.1.0-rc.4")
         self.assertIn("VERSION", checked)
         self.assertIn("skills/multica-workflow-observer/SKILL.md", checked)
         self.assertIn("instructions/roles/leader.md", checked)
@@ -261,13 +430,13 @@ class ReleaseTests(unittest.TestCase):
             leader = temp_root / "instructions/roles/leader.md"
             leader.write_text(
                 leader.read_text(encoding="utf-8").replace(
-                    "workflow_version=1.1.0-rc.3",
+                    "workflow_version=1.1.0-rc.4",
                     "workflow_version=1.1.0-rc.1",
                 ),
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(release.ReleaseError, "workflow_version"):
-                release.verify_versions(temp_root, "1.1.0-rc.3")
+                release.verify_versions(temp_root, "1.1.0-rc.4")
 
     def test_release_plan_binds_exact_merge_pr_and_validation(self):
         pr = {
@@ -718,6 +887,401 @@ class ReleaseTests(unittest.TestCase):
         plan["version"] = "1.1.0"
         with self.assertRaisesRegex(release.ReleaseError, "digest is invalid"):
             release.verify_plan_file(plan, plan["release_plan_digest"][:12])
+
+    def test_release_environment_requires_isolated_reviewer(self):
+        with (
+            patch.object(
+                release,
+                "gh_json",
+                side_effect=lambda root, args: self.protected_environment_gh(args),
+            ),
+            patch.object(release, "github_ssh_login", return_value=""),
+        ):
+            boundary = release.verify_release_environment(ROOT)
+        self.assertEqual(boundary["reviewers"], ["isolated-reviewer"])
+        self.assertEqual(boundary["operator_login"], "github-actions[bot]")
+
+        with (
+            patch.object(
+                release,
+                "gh_json",
+                side_effect=lambda root, args: self.protected_environment_gh(
+                    args, reviewer="release-dispatcher"
+                ),
+            ),
+            patch.object(release, "github_ssh_login", return_value=""),
+            self.assertRaisesRegex(release.ReleaseError, "credentials are visible"),
+        ):
+            release.verify_release_environment(ROOT)
+
+    def test_release_environment_requires_public_repository(self):
+        with (
+            patch.object(
+                release,
+                "gh_json",
+                side_effect=lambda root, args: self.protected_environment_gh(
+                    args, visibility="private"
+                ),
+            ),
+            patch.object(release, "github_ssh_login", return_value=""),
+            self.assertRaisesRegex(release.ReleaseError, "visibility must be public"),
+        ):
+            release.verify_release_environment(ROOT)
+
+    def test_release_environment_rejects_owner_or_admin_runtime(self):
+        cases = {
+            "owner login": {
+                "login": "rberyou",
+                "permissions": None,
+                "message": "owner/admin",
+            },
+            "admin permission": {
+                "login": "release-dispatcher",
+                "permissions": {
+                    "admin": True,
+                    "maintain": True,
+                    "push": True,
+                    "triage": True,
+                    "pull": True,
+                },
+                "message": "privileged repository permissions",
+            },
+            "contents write permission": {
+                "login": "release-dispatcher",
+                "permissions": {
+                    "admin": False,
+                    "maintain": False,
+                    "push": True,
+                    "triage": True,
+                    "pull": True,
+                },
+                "message": "Contents-read-only",
+            },
+        }
+        for label, case in cases.items():
+            with self.subTest(case=label):
+                with (
+                    patch.object(
+                        release,
+                        "gh_json",
+                        side_effect=lambda root, args, case=case: self.protected_environment_gh(
+                            args,
+                            login=case["login"],
+                            permissions=case["permissions"],
+                        ),
+                    ),
+                    patch.object(release, "github_ssh_login", return_value=""),
+                    self.assertRaisesRegex(release.ReleaseError, case["message"]),
+                ):
+                    release.verify_release_environment(ROOT)
+
+    def test_release_environment_rejects_inactive_switchable_gh_account(self):
+        with (
+            patch.object(
+                release,
+                "gh_json",
+                side_effect=lambda root, args: self.protected_environment_gh(
+                    args,
+                    login="release-dispatcher",
+                    configured_logins=["release-dispatcher", "inactive-admin"],
+                ),
+            ),
+            patch.object(release, "github_ssh_login", return_value=""),
+            self.assertRaisesRegex(release.ReleaseError, "gh auth switch"),
+        ):
+            release.verify_release_environment(ROOT)
+
+    def test_release_environment_rejects_github_ssh_credential(self):
+        with (
+            patch.object(
+                release,
+                "gh_json",
+                side_effect=lambda root, args: self.protected_environment_gh(args),
+            ),
+            patch.object(release, "github_ssh_login", return_value="rberyou"),
+            self.assertRaisesRegex(release.ReleaseError, "SSH credentials are available"),
+        ):
+            release.verify_release_environment(ROOT)
+
+    def test_release_environment_rejects_github_https_credential_helper(self):
+        with (
+            patch.object(
+                release,
+                "gh_json",
+                side_effect=lambda root, args: self.protected_environment_gh(args),
+            ),
+            patch.object(release, "github_ssh_login", return_value=""),
+            patch.object(
+                release, "github_https_credential_login", return_value="rberyou"
+            ),
+            self.assertRaisesRegex(release.ReleaseError, "credential helper"),
+        ):
+            release.verify_release_environment(ROOT)
+
+    def test_release_control_hashes_include_full_normalized_configuration(self):
+        with patch.object(
+            release,
+            "gh_json",
+            side_effect=lambda root, args: self.protected_environment_gh(args),
+        ):
+            baseline = release.verify_release_environment(
+                ROOT, reject_runtime_credentials=False
+            )
+
+        def changed_environment(root, args):
+            value = self.protected_environment_gh(args)
+            if args[:2] == [
+                "api",
+                "repos/rberyou/multica-dev-workflow/environments/workflow-release",
+            ]:
+                value = json.loads(json.dumps(value))
+                value["protection_rules"].append(
+                    {"type": "wait_timer", "wait_timer": 5}
+                )
+            return value
+
+        with patch.object(release, "gh_json", side_effect=changed_environment):
+            changed = release.verify_release_environment(
+                ROOT, reject_runtime_credentials=False
+            )
+        self.assertNotEqual(
+            baseline["environment_sha256"], changed["environment_sha256"]
+        )
+
+        def changed_ruleset(root, args):
+            value = self.protected_environment_gh(args)
+            if args[:2] == [
+                "api",
+                "repos/rberyou/multica-dev-workflow/rulesets/99",
+            ]:
+                value = json.loads(json.dumps(value))
+                value["rules"].append(
+                    {"type": "required_signatures", "parameters": {"required": True}}
+                )
+            return value
+
+        with patch.object(release, "gh_json", side_effect=changed_ruleset):
+            changed = release.verify_release_environment(
+                ROOT, reject_runtime_credentials=False
+            )
+        self.assertNotEqual(
+            baseline["tag_ruleset"]["sha256"], changed["tag_ruleset"]["sha256"]
+        )
+
+    def test_release_environment_records_or_rejects_admin_bypass(self):
+        with patch.object(
+            release,
+            "gh_json",
+            side_effect=lambda root, args: self.protected_environment_gh(args),
+        ):
+            unsupported = release.verify_release_environment(
+                ROOT, reject_runtime_credentials=False
+            )
+        self.assertIs(
+            unsupported["admin_bypass"]["readback_supported"], False
+        )
+        self.assertIn("residual_risk", unsupported["admin_bypass"])
+
+        with patch.object(
+            release,
+            "gh_json",
+            side_effect=lambda root, args: self.protected_environment_gh(
+                args, can_admins_bypass=False
+            ),
+        ):
+            disabled = release.verify_release_environment(
+                ROOT, reject_runtime_credentials=False
+            )
+        self.assertEqual(
+            disabled["admin_bypass"],
+            {
+                "api_field": "can_admins_bypass",
+                "readback_supported": True,
+                "can_admins_bypass": False,
+            },
+        )
+        self.assertNotEqual(
+            unsupported["environment_sha256"], disabled["environment_sha256"]
+        )
+
+        with (
+            patch.object(
+                release,
+                "gh_json",
+                side_effect=lambda root, args: self.protected_environment_gh(
+                    args, can_admins_bypass=True
+                ),
+            ),
+            self.assertRaisesRegex(release.ReleaseError, "administrator bypass"),
+        ):
+            release.verify_release_environment(ROOT, reject_runtime_credentials=False)
+
+    def test_environment_approval_is_bound_to_required_reviewer(self):
+        def fake_gh(root, args):
+            if args[:2] == [
+                "api",
+                "repos/rberyou/multica-dev-workflow/actions/runs/123/approvals",
+            ]:
+                return [
+                    {
+                        "id": 7,
+                        "state": "approved",
+                        "user": {"login": "isolated-reviewer"},
+                        "environments": [{"name": "workflow-release"}],
+                    }
+                ]
+            return self.protected_environment_gh(args)
+
+        with patch.object(release, "gh_json", side_effect=fake_gh):
+            approval = release.verify_environment_approval(ROOT, "123")
+        self.assertEqual(approval["actor_login"], "isolated-reviewer")
+        self.assertRegex(approval["approval_sha256"], r"^[a-f0-9]{64}$")
+
+    def test_release_request_rejects_modification(self):
+        request = self.release_request_fixture()
+        with (
+            patch.object(release, "verify_current_state"),
+            patch.object(
+                release,
+                "release_control",
+                return_value=request["release_control"],
+            ),
+        ):
+            self.assertEqual(
+                release.verify_release_request(
+                    ROOT, request, expected_source=request["source_commit"]
+                ),
+                request["release_request_digest"],
+            )
+            request["tag"] = "v1.1.0-rc.4-forged"
+            with self.assertRaisesRegex(release.ReleaseError, "digest is invalid"):
+                release.verify_release_request(ROOT, request)
+
+    def test_local_release_apply_only_dispatches_request(self):
+        request = self.release_request_fixture()
+        plan = {
+            "release_plan_digest": "e" * 64,
+            "release_authorization": {
+                "mode": "maintenance",
+                "workspace_id": "workspace-test",
+            },
+        }
+        args = SimpleNamespace(
+            plan="plan.json",
+            approve="e" * 12,
+            multica_bin=None,
+            profile=None,
+            workspace=None,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            plan_path = root / "plan.json"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            args.plan = str(plan_path)
+            fake_cli = SimpleNamespace(workspace_id="workspace-test")
+            with (
+                patch.object(release, "verify_plan_file", return_value="e" * 64),
+                patch.object(release, "verify_current_state"),
+                patch.object(release, "release_cli", return_value=(fake_cli, {})),
+                patch.object(
+                    release,
+                    "verify_release_approval",
+                    return_value={"comment_id": "approval-1", "author_id": "human-1"},
+                ),
+                patch.object(release, "release_request", return_value=request),
+                patch.object(
+                    release,
+                    "verify_release_environment",
+                    return_value={
+                        "repository": "rberyou/multica-dev-workflow",
+                        "deployment_branch": "main",
+                        "environment": "workflow-release",
+                    },
+                ),
+                patch.object(
+                    release,
+                    "save_release_request",
+                    return_value=root / "request.json",
+                ),
+                patch.object(
+                    release,
+                    "run",
+                    return_value=SimpleNamespace(stdout="", stderr="", returncode=0),
+                ) as run_mock,
+                patch("builtins.print"),
+            ):
+                self.assertEqual(release.command_apply(args, root), 0)
+        calls = [call.args[0] for call in run_mock.call_args_list]
+        self.assertEqual(calls[0][:3], ["gh", "workflow", "run"])
+        self.assertFalse(any(call[:2] == ["git", "tag"] for call in calls))
+        self.assertFalse(any(call[:2] == ["git", "push"] for call in calls))
+        self.assertFalse(any(call[:3] == ["gh", "release", "create"] for call in calls))
+
+    def test_protected_tag_message_binds_environment_evidence(self):
+        request = self.release_request_fixture()
+        approval = {
+            "run_id": "123",
+            "environment": "workflow-release",
+            "actor_login": "isolated-reviewer",
+            "approval_sha256": "2" * 64,
+            "operator_login": "github-actions[bot]",
+        }
+        message = release.protected_tag_message(request, approval)
+        self.assertIn("authorization_mode=protected_environment", message)
+        self.assertIn("release_workflow_run_id=123", message)
+        self.assertIn("environment_approval_actor=isolated-reviewer", message)
+        self.assertIn("release_operator=github-actions[bot]", message)
+        self.assertIn("repository_visibility=public", message)
+        self.assertIn("release_environment_sha256=" + "2" * 64, message)
+        self.assertIn("release_ruleset_id=99", message)
+        self.assertIn("release_ruleset_sha256=" + "3" * 64, message)
+
+    def test_publish_checks_environment_approval_before_tag_mutation(self):
+        request = self.release_request_fixture()
+        args = SimpleNamespace(
+            request="request.json",
+            workflow_run_id="123",
+            environment="workflow-release",
+            recover_existing_tag=False,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            request_path = root / "request.json"
+            request_path.write_text(json.dumps(request), encoding="utf-8")
+            args.request = str(request_path)
+            with (
+                patch.dict(
+                    release.os.environ,
+                    {
+                        "GITHUB_ACTIONS": "true",
+                        "GITHUB_RUN_ID": "123",
+                        "GITHUB_REPOSITORY": "rberyou/multica-dev-workflow",
+                    },
+                    clear=True,
+                ),
+                patch.object(release, "git_head", return_value=request["source_commit"]),
+                patch.object(release, "verify_release_request"),
+                patch.object(
+                    release,
+                    "release_control",
+                    return_value=request["release_control"],
+                ),
+                patch.object(
+                    release,
+                    "verify_release_environment",
+                    return_value=self.release_boundary_fixture(),
+                ),
+                patch.object(
+                    release,
+                    "verify_environment_approval",
+                    side_effect=release.ReleaseError("approval missing"),
+                ),
+                patch.object(release, "run") as run_mock,
+                self.assertRaisesRegex(release.ReleaseError, "approval missing"),
+            ):
+                release.command_publish(args, root)
+        self.assertFalse(any(call.args[0][:2] == ["git", "tag"] for call in run_mock.call_args_list))
+        self.assertFalse(any(call.args[0][:2] == ["git", "push"] for call in run_mock.call_args_list))
 
     def test_exact_validation_run_is_reverified(self):
         validation = {

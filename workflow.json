@@ -4,7 +4,7 @@
   "workflow": {
     "id": "development-delivery",
     "name": "开发交付小队",
-    "version": "1.1.0-rc.3",
+    "version": "1.1.0-rc.4",
     "protocol_revision": "v3",
     "approver_role": "人工审批人"
   },
@@ -183,7 +183,9 @@
       "developer-b",
       "code-reviewer"
     ],
-    "autopilot": "workflow-health-audit"
+    "autopilot": "workflow-health-audit",
+    "maintenance_intake_mode": "human_gated",
+    "automatic_expansion": false
   },
   "squad": {
     "key": "development-delivery",

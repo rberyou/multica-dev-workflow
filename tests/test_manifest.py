@@ -81,42 +81,38 @@ class ManifestTests(unittest.TestCase):
         self.assertIn("audit --scope issues --report", autopilot["description"])
         self.assertIn("workflow.py health", autopilot["description"])
 
-    def test_release_workflow_resolves_explicit_tag_commit(self):
+    def test_release_workflow_uses_protected_environment_request(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text(
             encoding="utf-8"
         )
         self.assertIn("workflow_dispatch:", workflow)
+        self.assertNotIn("push:\n    tags:", workflow)
+        self.assertIn("ref: ${{ github.sha }}", workflow)
+        self.assertIn("environment: workflow-release", workflow)
+        self.assertIn("python scripts/release.py verify-request", workflow)
+        self.assertIn("python scripts/release.py publish", workflow)
+        self.assertIn('git config user.name "github-actions[bot]"', workflow)
+        self.assertEqual(workflow.count("contents: write"), 1)
+        self.assertIn("recover_existing_tag", workflow)
         self.assertIn(
-            "if: github.event_name == 'push' || github.ref == 'refs/heads/main'",
-            workflow,
-        )
-        self.assertIn(
-            'temporary_ref="refs/release-fetch/${GITHUB_RUN_ID}"', workflow
-        )
-        self.assertNotIn("git fetch --force", workflow)
-        self.assertIn(
-            'test "$(git rev-parse "${remote_tag_ref}")" = "${remote_tag_object}"',
-            workflow,
-        )
-        self.assertIn(
-            'test "${release_sha}" = "$(git rev-parse HEAD)"', workflow
-        )
-        self.assertIn('RELEASE_SHA=${release_sha}', workflow)
-        self.assertIn('merge-base --is-ancestor "${RELEASE_SHA}"', workflow)
-        self.assertIn('gh run list --commit "${RELEASE_SHA}"', workflow)
-        self.assertIn(
-            'python scripts/release.py verify-tag --tag "${RELEASE_TAG}"',
-            workflow,
-        )
-        self.assertIn(
-            'python scripts/release.py verify-assets --tag "${RELEASE_TAG}"',
+            'python scripts/release.py verify-assets --tag "${{ needs.validate-request.outputs.tag }}"',
             workflow,
         )
         self.assertIn('gh release create "${RELEASE_TAG}"', workflow)
-        self.assertNotIn(
-            'python scripts/release.py verify-tag --tag "${GITHUB_REF_NAME}"',
+        self.assertIn(
+            "release-request-${{ steps.request.outputs.release_request_digest }}",
             workflow,
         )
+
+        control = json.loads((ROOT / "docs/release-control.json").read_text(encoding="utf-8"))
+        self.assertEqual(control["required_visibility"], "public")
+
+    def test_operations_disable_automatic_maintenance_expansion(self):
+        manifest = json.loads((ROOT / "workflow.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            manifest["operations"]["maintenance_intake_mode"], "human_gated"
+        )
+        self.assertIs(manifest["operations"]["automatic_expansion"], False)
 
     def test_operations_contract_is_required_for_v2(self):
         with tempfile.TemporaryDirectory() as temp:
