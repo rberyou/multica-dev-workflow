@@ -144,7 +144,7 @@
     "operations": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["project", "observer_agent", "observer_skill", "reporter_agents", "autopilot"],
+      "required": ["project", "observer_agent", "observer_skill", "reporter_agents", "autopilot", "maintenance_intake_mode", "automatic_expansion"],
       "properties": {
         "project": {"$ref": "#/$defs/key"},
         "observer_agent": {"$ref": "#/$defs/key"},
@@ -155,7 +155,9 @@
           "uniqueItems": true,
           "items": {"$ref": "#/$defs/key"}
         },
-        "autopilot": {"$ref": "#/$defs/key"}
+        "autopilot": {"$ref": "#/$defs/key"},
+        "maintenance_intake_mode": {"const": "human_gated"},
+        "automatic_expansion": {"const": false}
       }
     },
     "squad": {

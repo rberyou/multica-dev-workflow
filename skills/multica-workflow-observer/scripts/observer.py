@@ -398,6 +398,47 @@ def is_maintenance_workflow_issue(metadata: dict[str, Any]) -> bool:
     return object_type in MAINTENANCE_WORKFLOW_TYPES or stage in MAINTENANCE_WORKFLOW_TYPES
 
 
+def has_managed_workflow_contract(metadata: dict[str, Any]) -> bool:
+    if (
+        metadata.get("workflow_version")
+        and metadata.get("protocol_revision")
+        and not any(
+            metadata.get(key)
+            for key in [
+                "workflow_id",
+                "workflow_object_type",
+                "workflow_stage",
+                "human_approver_id",
+            ]
+        )
+    ):
+        return False
+    contract_keys = {
+        "workflow_id",
+        "workflow_object_type",
+        "workflow_stage",
+        "human_approver_id",
+        "workflow_incident_pending",
+        "workflow_incident_pending_payload",
+        "blocked_reason",
+        "waiting_on",
+        "review_commit_sha",
+        "reviewed_commit_sha",
+        "pr_head_sha",
+        "original_owner_id",
+        "reviewer_id",
+        "maintainer_id",
+        "maintenance_reviewer_id",
+        "implementation_started",
+        "plan_approved",
+        "dependencies_satisfied",
+        "approved_plan_revision",
+        "runtime_failure_count",
+        "incident_severity",
+    }
+    return any(key in metadata for key in contract_keys)
+
+
 def metadata_map(cli: CLI, issue_id: str) -> dict[str, Any]:
     value = cli.json(["issue", "metadata", "list", issue_id, "--output", "json"])
     if isinstance(value, dict):
@@ -1870,14 +1911,27 @@ def audit_issue(cli: CLI, issue: dict[str, Any], backlog_hours: int) -> list[dic
         return []
     status = str(issue.get("status") or "")
     findings = []
-    findings.extend(approval_findings(cli, issue, meta))
-    if object_type == "maintenance_change":
-        findings.extend(maintenance_review_findings(cli, issue, meta))
+    pending_payload_without_link = bool(meta.get("workflow_incident_pending_payload")) and not meta.get(
+        "workflow_incident_id"
+    )
+    if str(meta.get("workflow_incident_pending")).lower() == "true" or pending_payload_without_link:
+        findings.append(
+            finding(
+                "WF-INCIDENT-001",
+                "medium",
+                issue,
+                "pending report is recovered or visibly failed",
+                "workflow Incident pending payload requires recovery",
+            )
+        )
+    explicit_managed = has_managed_workflow_contract(meta)
     try:
-        requirement_id, authoritative_protocol, _ = resolve_requirement_context(
+        requirement_id, authoritative_protocol, requirement_meta = resolve_requirement_context(
             cli, issue, meta
         )
     except ObserverError as exc:
+        if not explicit_managed:
+            return findings
         findings.append(
             finding(
                 "WF-PROTOCOL-001",
@@ -1889,6 +1943,12 @@ def audit_issue(cli: CLI, issue: dict[str, Any], backlog_hours: int) -> list[dic
         )
         authoritative_protocol = str(meta.get("top_protocol_revision") or "v2")
         requirement_id = issue_id
+        requirement_meta = meta
+    if not explicit_managed and not has_managed_workflow_contract(requirement_meta):
+        return findings
+    findings.extend(approval_findings(cli, issue, meta))
+    if object_type == "maintenance_change":
+        findings.extend(maintenance_review_findings(cli, issue, meta))
     effective_protocol = authoritative_protocol
     stage = str(meta.get("workflow_stage") or issue.get("stage") or "")
     if effective_protocol == "v3":
@@ -1975,19 +2035,6 @@ def audit_issue(cli: CLI, issue: dict[str, Any], backlog_hours: int) -> list[dic
                 )
     if status == "blocked" and (not meta.get("blocked_reason") or not meta.get("waiting_on")):
         findings.append(finding("WF-BLOCKED-001", "medium", issue, "blocked_reason and waiting_on are present", "blocked metadata is incomplete"))
-    pending_payload_without_link = bool(meta.get("workflow_incident_pending_payload")) and not meta.get(
-        "workflow_incident_id"
-    )
-    if str(meta.get("workflow_incident_pending")).lower() == "true" or pending_payload_without_link:
-        findings.append(
-            finding(
-                "WF-INCIDENT-001",
-                "medium",
-                issue,
-                "pending report is recovered or visibly failed",
-                "workflow Incident pending payload requires recovery",
-            )
-        )
     reviewed = meta.get("review_commit_sha") or meta.get("reviewed_commit_sha")
     current = meta.get("pr_head_sha") or meta.get("current_commit_sha")
     if reviewed and current and reviewed != current:

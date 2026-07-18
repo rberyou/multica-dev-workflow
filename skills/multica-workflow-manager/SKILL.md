@@ -4,7 +4,7 @@ description: Plan, rebuild, update, verify, audit, disable, and release a Git-ma
 metadata:
   managed_by: multica-dev-workflow
   workflow_id: development-delivery
-  version: 1.1.0-rc.3
+  version: 1.1.0-rc.4
 ---
 
 # Multica Workflow Manager

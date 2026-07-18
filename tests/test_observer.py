@@ -560,6 +560,28 @@ class ObserverTests(unittest.TestCase):
         findings = observer.audit_issue(cli, {"identifier": "T-1", "status": "in_review"}, 24)
         self.assertIn("WF-APPROVAL-001", {item["rule_id"] for item in findings})
 
+    def test_legacy_recovery_intake_is_not_treated_as_managed_v3_requirement(self):
+        metadata = {
+            "workflow_version": "1.1.0-rc.1",
+            "protocol_revision": "v3",
+            "blocked_reason": "historical partial Apply",
+            "waiting_on": "workflow_fix",
+        }
+        findings = observer.audit_issue(
+            AuditCLI(metadata),
+            {"identifier": "WOR-1", "status": "blocked"},
+            24,
+        )
+        self.assertNotIn("WF-PROTOCOL-001", {item["rule_id"] for item in findings})
+
+        metadata["workflow_incident_pending"] = True
+        findings = observer.audit_issue(
+            AuditCLI(metadata),
+            {"identifier": "WOR-1", "status": "blocked"},
+            24,
+        )
+        self.assertIn("WF-INCIDENT-001", {item["rule_id"] for item in findings})
+
     def test_stale_plan_approval_comment_is_detected(self):
         cli = AuditCLI(
             {
@@ -794,7 +816,7 @@ class ObserverTests(unittest.TestCase):
     def test_review_identity_contract_is_scoped_to_maintenance_objects(self):
         maintenance = {
             "workflow_id": observer.WORKFLOW_ID,
-            "workflow_version": "1.1.0-rc.3",
+            "workflow_version": "1.1.0-rc.4",
             "protocol_revision": "v3",
             "top_protocol_revision": "v3",
             "human_approver_id": "human-1",
@@ -1151,16 +1173,6 @@ class ObserverTests(unittest.TestCase):
             autopilot_spec["description"].strip() + "\n",
             disabled_hash,
         )
-        observer_skill = operations["observer_skill_name"]
-        observer_agent = operations["observer_agent"]
-        for key, agent in cli.agent_by_key.items():
-            if key == observer_agent:
-                continue
-            cli.agent_skills[agent["id"]] = [
-                skill
-                for skill in cli.agent_skills[agent["id"]]
-                if skill.get("name") != observer_skill
-            ]
         self.assertEqual(observer.audit_control_plane(cli, "T-audit"), [])
         cli.agents[0]["description"] = "drifted instructions contract"
         cli.autopilots[0]["triggers"][0]["timezone"] = "UTC"

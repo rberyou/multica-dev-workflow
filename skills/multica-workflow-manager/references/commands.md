@@ -69,7 +69,7 @@ python scripts/generate_audit_contract.py --check
 python scripts/workflow.py plan --workspace <id-or-slug> --disable-operations
 ```
 
-Review and approve this Plan before checking out an older release. It pauses the managed Observer Autopilot and detaches Reporter capability from development Agents without deleting Incident history.
+Review and approve this Plan before checking out an older release. It pauses the managed Observer Autopilot while retaining Reporter capability and Incident history.
 
 ## Runtime Migration
 
@@ -87,7 +87,7 @@ python scripts/release.py approval-block --plan <release-plan>
 python scripts/release.py apply --plan <release-plan> --approve <short-digest>
 ```
 
-After Plan generation, the durable human approver must comment `APPROVE WORKFLOW RELEASE <short-digest>` on the Maintenance Issue. Run the read-only `approval-block` command after that comment exists, then have the immutable GitHub approver in `docs/bootstrap-v6.json` post its complete output on the selected merged PR. Apply verifies both comments and the independent Review record; `verify-tag` rechecks the complete GitHub provenance block, tag commit, exact merged PR and CI run before publication. The one-time `v1.1.0-rc.1` bootstrap may use `--bootstrap-plan v6`. No later release may use bootstrap mode.
+Run `python scripts/release.py doctor` before release planning. After Plan generation, the durable human approver must comment `APPROVE WORKFLOW RELEASE <short-digest>` on the Maintenance Issue. The read-only `approval-block` prints a Release Request summary. `apply` dispatches that request but cannot mutate tags or Releases. The isolated reviewer approves the protected `workflow-release` Environment outside Agent runtimes, and `github-actions[bot]` performs publication. `verify-tag` rechecks Environment, workflow-run, PR, CI and Maintenance provenance. Bootstrap mode is historical and cannot authorize a new release.
 
 ## Install Local Skills
 

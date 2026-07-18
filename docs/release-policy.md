@@ -7,20 +7,34 @@ Release planning binds:
 - green validation run for the merge commit;
 - tracked source hash and Changelog section;
 - expected release assets;
-- verified Maintenance Issue review evidence, or the one-time approved v6 bootstrap Plan for `v1.1.0-rc.1` only.
+- verified bounded Maintenance Implementation Review evidence;
+- exact Multica human release approval;
+- protected GitHub Environment, workflow run, independent reviewer and `github-actions[bot]` operator.
 
-The one-time `v1.1.0-rc.2` partial-deployment recovery still uses normal Maintenance release mode, never bootstrap mode. Its evidence additionally binds the durable pending Incident source, exact human recovery decision, affected/target release and control identities through bounded IDs and SHA256 commitments. It is rejected after the pending source is linked, when the decision changes, or for any later version.
-
-Required command sequence:
+Required sequence:
 
 ```text
+python scripts/release.py doctor
 python scripts/release.py plan --version <version> --maintenance-issue <T-ID>
 APPROVE WORKFLOW RELEASE <short-digest>
 python scripts/release.py approval-block --plan <file>
 python scripts/release.py apply --plan <file> --approve <short-digest>
 ```
 
-For normal releases, the durable human approver first posts the approval line on the Maintenance Issue. The read-only `approval-block` command then verifies that comment and prints a GitHub approval block containing the same digest, Maintenance Issue and Review comment IDs, Multica approval comment ID, and SHA256 commitments for the complete Maintenance evidence and approval author. The fixed workflow-product approver in `docs/bootstrap-v6.json` posts that exact block on the selected merged PR. Raw Multica member or Agent UUIDs are not written to Git. `apply` verifies both comments before creating a tag. For the one-time `v1.1.0-rc.1` bootstrap, the same record binds the already-approved Plan PR/comment and immutable approver login. `verify-tag` rechecks the exact GitHub approval block, tag commit, annotated source commit, exact merged-main PR and exact CI run so a hand-forged or stale tag cannot publish. The local `--approve` argument must match the same digest but does not replace durable approval records.
+Implementation, PR, CI and commit-bound Review precede privileged GitHub administration. While the repository is still private, the development owner credential may be used for that implementation work. Before making the repository public or creating/changing the Environment or Ruleset, remove owner/admin credentials from Agent and release-capable runtimes and hand those administrative actions to the human owner outside Agent runtimes. Continue only after read-only control verification succeeds.
 
-GitHub Release rejects tags without a release-plan annotation, exact merged-main PR provenance, matching versions or green CI. Publishing a Release does not authorize Multica Apply.
-The annotated tag also carries the complete expected asset manifest and its SHA256 commitment. Release automation compares the built asset basenames with that exact set before publication and rejects missing or extra files.
+`doctor` requires the repository to be public and verifies its owner/default branch, the `workflow-release` Environment, main-only branch policy, self-review prevention, explicit human reviewers and the normalized Environment configuration hash. If the GitHub API exposes `can_admins_bypass`, it must be false; otherwise the unavailable readback and residual owner-reconfiguration risk are recorded inside the hashed boundary. It also verifies an active `workflow-release-tags` ruleset for `refs/tags/v*`, hashes its complete normalized rule configuration, and requires creation/update/deletion restrictions with the GitHub Actions App as the sole bypass.
+
+The runtime credential preflight fails closed when an owner/admin or Environment-reviewer account is visible through `gh`, when any inactive configured account remains switchable but cannot be verified without activation, when the active repository principal has `admin`, `maintain` or `push`, or when reusable GitHub SSH or HTTPS credential-helper credentials are available. The dispatch identity must be Contents-read-only (`push=false`) while separately holding only the bounded Actions permission needed to trigger the reviewed workflow. Owner credentials must be removed before repository visibility, Environment, Ruleset, Release or tag mutation; those administrative changes happen outside Agent runtimes.
+
+`approval-block` is read-only. It verifies Multica approval and prints the bounded Release Request summary. It does not generate a GitHub approval comment.
+
+`apply` verifies the exact Plan and Multica evidence, writes a local request record and dispatches `.github/workflows/release.yml`. It must not create, delete or push tags and must not publish a Release.
+
+The workflow validates the request from the exact workflow-dispatch commit with read-only permissions. Its publish job is protected by the `workflow-release` Environment. The required reviewer credential must be unavailable to Codex, OpenCode, Maintainer runtimes and CI. Only the Environment-scoped `github-actions[bot]` token receives `contents: write` and creates the annotated tag and GitHub Release.
+
+Direct `v*` tag pushes do not trigger publication and are rejected by the tag ruleset for ordinary users and Agent credentials. Unauthorized tags are inert and must be reported. New tags bind the release Request digest, Plan digest, source commit, PR, CI run, expected assets, Maintenance provenance commitments, workflow run ID, Environment, approval actor and release operator.
+
+`verify-tag` rechecks the protected Environment approval and exact provenance. Legacy RC1-RC3 annotations remain verifiable as historical evidence but cannot authorize a new release or deployment.
+
+Publishing a Release does not authorize Multica Apply. Each Workspace requires a separate digest-bound deployment Plan and approval.

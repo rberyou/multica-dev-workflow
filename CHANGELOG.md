@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.1.0-rc.4
+
+- Move release tag and GitHub Release mutation behind the protected `workflow-release` Environment and an isolated human reviewer; `github-actions[bot]` is the only release operator.
+- Make local release apply dispatch a digest-bound Release Request without creating, deleting or pushing tags or publishing Releases; raw tag pushes no longer trigger publication.
+- Bind RC4 tag provenance to the Release Request, workflow run, Environment approval actor, merged PR, CI and bounded Maintenance Review evidence.
+- Scope Observer workflow gates to managed objects while preserving pending-Incident recovery for legacy/external intake.
+- Disable automatic maintenance-tree expansion, require human-gated maintenance intake and lazily create later stages.
+- Keep Reporter Skill available while Observer Autopilot operations are paused.
+
 ## 1.1.0-rc.3
 
 - Normalize Autopilot schedule trigger aliases from real CLI responses, including `cron_expression`, while preserving `cron` and `schedule` compatibility.

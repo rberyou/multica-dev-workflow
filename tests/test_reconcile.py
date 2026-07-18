@@ -812,7 +812,7 @@ class ReconcileTests(unittest.TestCase):
                 [],
             )
 
-    def test_disable_operations_pauses_autopilot_and_detaches_reporters(self):
+    def test_disable_operations_pauses_autopilot_and_retains_reporters(self):
         with committed_temp_repo() as temp_root:
             cli = MutatingCLI()
             workspace = {"id": cli.workspace_id, "name": "Test", "slug": "test"}
@@ -850,7 +850,7 @@ class ReconcileTests(unittest.TestCase):
                 write_archives=False,
             )
             types = [item["type"] for item in disabled["actions"]]
-            self.assertEqual(types.count("DETACH_SKILL"), 7)
+            self.assertEqual(types.count("DETACH_SKILL"), 0)
             self.assertEqual(types.count("UPDATE_AUTOPILOT"), 1)
             desired = next(item["desired"] for item in disabled["actions"] if item["type"] == "UPDATE_AUTOPILOT")
             self.assertEqual(desired["status"], "paused")
@@ -869,7 +869,7 @@ class ReconcileTests(unittest.TestCase):
                     if parse_marker(item["instructions"])["object_key"] == f"agent.{agent_key}"
                 )
                 assigned_ids = {item["id"] for item in cli.agent_skills[agent["id"]]}
-                self.assertNotIn(observer_skill_id, assigned_ids, agent_key)
+                self.assertIn(observer_skill_id, assigned_ids, agent_key)
             observer_agent = next(
                 item
                 for item in cli.agents

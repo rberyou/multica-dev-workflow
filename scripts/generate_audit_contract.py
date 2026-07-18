@@ -175,7 +175,7 @@ def build_contract(root: Path) -> dict:
             },
             "disabled": {
                 "autopilot_status": "paused",
-                "observer_skill_attach_to": [operations["observer_agent"]],
+                "observer_skill_attach_to": observer_skill.get("attach_to", []),
             },
         },
     }
