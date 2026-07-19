@@ -1364,6 +1364,7 @@ class ReleaseTests(unittest.TestCase):
     def test_release_request_rejects_modification(self):
         request = self.release_request_fixture()
         with (
+            patch.dict(release.os.environ, {}, clear=True),
             patch.object(release, "verify_current_state"),
             patch.object(
                 release,
@@ -1467,6 +1468,7 @@ class ReleaseTests(unittest.TestCase):
             {key: value for key, value in request.items() if key != "release_request_digest"}
         )
         with (
+            patch.dict(release.os.environ, {}, clear=True),
             patch.object(release, "verify_current_state"),
             patch.object(
                 release,

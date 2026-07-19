@@ -49,6 +49,9 @@ static void TestCommandPolicy()
 
 static void TestEnvironmentPolicy()
 {
+    var taskRoot = Path.Combine(Path.GetTempPath(), "runtime", "task");
+    var codexHome = Path.Combine(taskRoot, "codex");
+    var bin = Path.Combine(taskRoot, "bin");
     var source = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
     {
         ["SystemRoot"] = "C:\\Windows",
@@ -64,12 +67,12 @@ static void TestEnvironmentPolicy()
         ["USERPROFILE"] = "C:\\Users\\host"
     };
     var result = EnvironmentPolicy.ForTask(
-        source, "C:\\runtime\\task", "C:\\runtime\\task\\codex", "C:\\runtime\\bin", 46183);
+        source, taskRoot, codexHome, bin, 46183);
     True(result.ContainsKey("MULTICA_TOKEN"));
     False(result.ContainsKey("GH_TOKEN"));
     False(result.ContainsKey("GITHUB_TOKEN"));
     False(result.ContainsKey("SSH_AUTH_SOCK"));
-    Equal("C:\\runtime\\task\\command-home", result["USERPROFILE"]);
+    Equal(Path.Combine(taskRoot, "command-home"), result["USERPROFILE"]);
     Equal("", result["NO_PROXY"]);
 }
 
