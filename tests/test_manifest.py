@@ -90,15 +90,25 @@ class ManifestTests(unittest.TestCase):
         self.assertIn("ref: ${{ github.sha }}", workflow)
         self.assertIn("environment: workflow-release", workflow)
         self.assertIn("python scripts/release.py verify-request", workflow)
+        self.assertIn("python scripts/release.py verify-publish-gate", workflow)
         self.assertIn("python scripts/release.py publish", workflow)
-        self.assertIn('git config user.name "github-actions[bot]"', workflow)
-        self.assertEqual(workflow.count("contents: write"), 1)
+        self.assertIn("python scripts/release.py publish-release", workflow)
+        self.assertIn(
+            "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1",
+            workflow,
+        )
+        self.assertNotIn('git config user.name "github-actions[bot]"', workflow)
+        self.assertNotIn("contents: write", workflow)
+        self.assertGreaterEqual(workflow.count("persist-credentials: false"), 2)
+        self.assertIn("GH_TOKEN: ${{ github.token }}", workflow)
         self.assertIn("recover_existing_tag", workflow)
         self.assertIn(
             'python scripts/release.py verify-assets --tag "${{ needs.validate-request.outputs.tag }}"',
             workflow,
         )
-        self.assertIn('gh release create "${RELEASE_TAG}"', workflow)
+        self.assertIn("steps.publisher.outputs.token", workflow)
+        self.assertIn("multica-workflow-console-${{ needs.validate-request.outputs.tag }}.zip", workflow)
+        self.assertIn("multica-workflow-secure-runtime-win-x64-${{ needs.validate-request.outputs.tag }}.zip", workflow)
         self.assertIn(
             "release-request-${{ steps.request.outputs.release_request_digest }}",
             workflow,

@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>secure-agent-launcher</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\WorkflowSecureRuntime.Core\WorkflowSecureRuntime.Core.csproj" />
+  </ItemGroup>
+</Project>

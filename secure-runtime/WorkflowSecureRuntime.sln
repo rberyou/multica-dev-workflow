@@ -1,0 +1,48 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "WorkflowSecureRuntime.Core", "src\WorkflowSecureRuntime.Core\WorkflowSecureRuntime.Core.csproj", "{5A7D61F1-3799-4E22-8B27-3C97531A6C91}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SecureAgentLauncher", "src\SecureAgentLauncher\SecureAgentLauncher.csproj", "{8E993229-4D4D-4CD8-B362-E15C3E0791CA}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "WorkflowTokenBroker", "src\WorkflowTokenBroker\WorkflowTokenBroker.csproj", "{2B5329F7-44DA-414E-A0C7-3295D505736F}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "WorkflowSecureDaemonHost", "src\WorkflowSecureDaemonHost\WorkflowSecureDaemonHost.csproj", "{1C408A61-2D33-4FB1-8CB6-5303604EB066}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "WorkflowConsole", "src\WorkflowConsole\WorkflowConsole.csproj", "{8B32E6A6-7260-45C8-886B-52266BE09355}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "WorkflowSecureRuntime.Tests", "tests\WorkflowSecureRuntime.Tests\WorkflowSecureRuntime.Tests.csproj", "{37981646-D2A3-4C86-B6D0-7D9DBE7459D7}"
+EndProject
+Global
+  GlobalSection(SolutionConfigurationPlatforms) = preSolution
+    Debug|Any CPU = Debug|Any CPU
+    Release|Any CPU = Release|Any CPU
+  EndGlobalSection
+  GlobalSection(ProjectConfigurationPlatforms) = postSolution
+    {5A7D61F1-3799-4E22-8B27-3C97531A6C91}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+    {5A7D61F1-3799-4E22-8B27-3C97531A6C91}.Debug|Any CPU.Build.0 = Debug|Any CPU
+    {5A7D61F1-3799-4E22-8B27-3C97531A6C91}.Release|Any CPU.ActiveCfg = Release|Any CPU
+    {5A7D61F1-3799-4E22-8B27-3C97531A6C91}.Release|Any CPU.Build.0 = Release|Any CPU
+    {8E993229-4D4D-4CD8-B362-E15C3E0791CA}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+    {8E993229-4D4D-4CD8-B362-E15C3E0791CA}.Debug|Any CPU.Build.0 = Debug|Any CPU
+    {8E993229-4D4D-4CD8-B362-E15C3E0791CA}.Release|Any CPU.ActiveCfg = Release|Any CPU
+    {8E993229-4D4D-4CD8-B362-E15C3E0791CA}.Release|Any CPU.Build.0 = Release|Any CPU
+    {2B5329F7-44DA-414E-A0C7-3295D505736F}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+    {2B5329F7-44DA-414E-A0C7-3295D505736F}.Debug|Any CPU.Build.0 = Debug|Any CPU
+    {2B5329F7-44DA-414E-A0C7-3295D505736F}.Release|Any CPU.ActiveCfg = Release|Any CPU
+    {2B5329F7-44DA-414E-A0C7-3295D505736F}.Release|Any CPU.Build.0 = Release|Any CPU
+    {1C408A61-2D33-4FB1-8CB6-5303604EB066}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+    {1C408A61-2D33-4FB1-8CB6-5303604EB066}.Debug|Any CPU.Build.0 = Debug|Any CPU
+    {1C408A61-2D33-4FB1-8CB6-5303604EB066}.Release|Any CPU.ActiveCfg = Release|Any CPU
+    {1C408A61-2D33-4FB1-8CB6-5303604EB066}.Release|Any CPU.Build.0 = Release|Any CPU
+    {8B32E6A6-7260-45C8-886B-52266BE09355}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+    {8B32E6A6-7260-45C8-886B-52266BE09355}.Debug|Any CPU.Build.0 = Debug|Any CPU
+    {8B32E6A6-7260-45C8-886B-52266BE09355}.Release|Any CPU.ActiveCfg = Release|Any CPU
+    {8B32E6A6-7260-45C8-886B-52266BE09355}.Release|Any CPU.Build.0 = Release|Any CPU
+    {37981646-D2A3-4C86-B6D0-7D9DBE7459D7}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+    {37981646-D2A3-4C86-B6D0-7D9DBE7459D7}.Debug|Any CPU.Build.0 = Debug|Any CPU
+    {37981646-D2A3-4C86-B6D0-7D9DBE7459D7}.Release|Any CPU.ActiveCfg = Release|Any CPU
+    {37981646-D2A3-4C86-B6D0-7D9DBE7459D7}.Release|Any CPU.Build.0 = Release|Any CPU
+  EndGlobalSection
+EndGlobal

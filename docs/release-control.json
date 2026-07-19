@@ -1,9 +1,14 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "repository": "rberyou/multica-dev-workflow",
   "required_visibility": "public",
   "environment": "workflow-release",
   "deployment_branch": "main",
-  "operator_login": "github-actions[bot]",
-  "tag_ruleset": "workflow-release-tags"
+  "operator_type": "github_app",
+  "dispatcher_app_slug": "multica-workflow-dispatcher",
+  "publisher_app_slug": "multica-workflow-publisher",
+  "publisher_app_id_variable": "WORKFLOW_PUBLISHER_APP_ID",
+  "publisher_private_key_secret": "WORKFLOW_PUBLISHER_PRIVATE_KEY",
+  "tag_ruleset": "workflow-release-tags",
+  "administrator_evidence_path": "docs/release-control-evidence.json"
 }

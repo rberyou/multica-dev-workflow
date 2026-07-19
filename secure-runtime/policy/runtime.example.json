@@ -1,0 +1,58 @@
+{
+  "$schema": "./security-profile.schema.json",
+  "schema_version": 1,
+  "repository": "rberyou/multica-dev-workflow",
+  "service_root": "C:\\ProgramData\\MulticaWorkflow",
+  "workspaces_root": "C:\\ProgramData\\MulticaWorkflow\\workspaces",
+  "workflow_bundle_root": "C:\\ProgramData\\MulticaWorkflow\\bundle",
+  "workflow_bundle_manifest": "C:\\ProgramData\\MulticaWorkflow\\bundle\\secure-runtime\\policy\\workflow-bundle.manifest.json",
+  "multica_executable": {"path": "C:\\ProgramData\\MulticaWorkflow\\bin\\multica.exe", "sha256": "0000000000000000000000000000000000000000000000000000000000000000"},
+  "codex_executable": {"path": "C:\\ProgramData\\MulticaWorkflow\\bin\\codex.exe", "sha256": "0000000000000000000000000000000000000000000000000000000000000000"},
+  "git_executable": {"path": "C:\\Program Files\\Git\\cmd\\git.exe", "sha256": "0000000000000000000000000000000000000000000000000000000000000000"},
+  "launcher_executable": {"path": "C:\\ProgramData\\MulticaWorkflow\\bin\\secure-agent-launcher.exe", "sha256": "0000000000000000000000000000000000000000000000000000000000000000"},
+  "broker_executable": {"path": "C:\\ProgramData\\MulticaWorkflow\\bin\\workflow-token-broker.exe", "sha256": "0000000000000000000000000000000000000000000000000000000000000000"},
+  "console_executable": {"path": "C:\\ProgramData\\MulticaWorkflow\\bin\\workflow-console.exe", "sha256": "0000000000000000000000000000000000000000000000000000000000000000"},
+  "codex_credential_path": "C:\\ProgramData\\MulticaWorkflow\\credentials\\codex\\auth.json",
+  "agent_bindings_path": "C:\\ProgramData\\MulticaWorkflow\\config\\agent-bindings.local.json",
+  "broker_pipe_name": "multica-workflow-broker",
+  "proxy_port": 46183,
+  "multica_server_url": "https://api.multica.ai",
+  "multica_profile": "workflow-secure",
+  "multica_daemon_id": "workflow-secure-daemon",
+  "multica_runtime_name": "Workflow Secure Codex",
+  "capability_key_path": "C:\\ProgramData\\MulticaWorkflow\\credentials\\capability.key",
+  "audit_log_path": "C:\\ProgramData\\MulticaWorkflow\\audit\\runtime.jsonl",
+  "github": {
+    "api_url": "https://api.github.com",
+    "app_id": 1,
+    "installation_id": 1,
+    "private_key_path": "C:\\ProgramData\\MulticaWorkflow\\credentials\\github\\maintainer-app.pem"
+  },
+  "profiles": {
+    "workflow_maintainer": {
+      "permission_profile": "workflow_maintainer",
+      "github_mode": "maintainer_broker",
+      "allowed_branch_prefixes": ["stabilize/", "fix/", "docs/"],
+      "allowed_base_branches": ["main"],
+      "required_skills": ["multica-workflow-maintainer", "multica-workflow-observer"]
+    },
+    "workflow_reviewer": {
+      "permission_profile": "workflow_reviewer",
+      "github_mode": "none",
+      "allowed_branch_prefixes": [],
+      "allowed_base_branches": [],
+      "required_skills": ["multica-workflow-maintainer", "multica-workflow-observer"]
+    }
+  },
+  "denied_roots": ["C:\\Users"],
+  "network_domains": [
+    "api.multica.ai",
+    "api.github.com",
+    "github.com",
+    "objects.githubusercontent.com",
+    "raw.githubusercontent.com",
+    "api.openai.com",
+    "**.openai.com",
+    "chatgpt.com"
+  ]
+}

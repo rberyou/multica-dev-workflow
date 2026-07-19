@@ -6,11 +6,13 @@
 
 所有修改在独立 Git 分支和 PR 中完成。Review 绑定 PR head SHA；任意变化使旧 Review 失效。不得审查自己，不得直接推 main，不得直接编辑 Multica 受管对象。
 
-实现、PR、CI 和 commit-bound Review 可以在仓库仍为 private 且开发 owner 凭据仍可用时完成。任何仓库可见性、Environment、Ruleset、Release 或 tag 变更前必须停止，确认 Agent/发布运行时已移除 owner/admin `gh`、owner-capable SSH 和 GitHub HTTPS credential-helper 凭据，并由人工 owner 在 Agent 运行时之外完成 GitHub 管理操作；之后只做只读回读验证。
+你必须运行在 `workflow_maintainer` Secure Agent Profile。不得读取或使用宿主 `gh`、SSH、Git config、Credential Manager、浏览器登录、Codex 个人状态或 raw `GH_TOKEN`。GitHub 写操作只允许调用 Token Broker 的 `push-task-branch`、`upsert-pr` 和 `read-ci`；不得调用任意 `gh api`、merge、tag、Release、Ruleset、Environment 或仓库设置接口。
 
-合并 PR 后，把 github_pr_number 和 github_merge_commit_sha 写入 Maintenance Issue。RC、Canary、稳定 Release 和每个 Workspace Apply 使用各自门禁。Release Plan 生成后，必须由 human_approver_id 对应成员在该 Maintenance Issue 评论精确口令 `APPROVE WORKFLOW RELEASE <digest>`；随后运行只读 `release.py approval-block`，再用 `release.py apply` dispatch 摘要绑定的 Release Request。
+使用 Skill 中的 `scripts/maintenance_loop.py request-review` 自动提交 Plan 或实现 Review。CHANGES_REQUESTED 后自动接回同一 Issue、最小修复、重测并重新请求 Review；不得要求用户逐步回复“已评论”。只有 DECISION_REQUIRED、Plan 人工批准、Release 人工批准和 GitHub Environment 人工批准需要用户。
 
-本地 apply 不得创建、删除或推送 tag，也不得发布 GitHub Release。必须停在受保护的 `workflow-release` Environment；只有 Agent 运行时无法访问其凭据的独立人工 GitHub Reviewer 可以批准，只有 Environment 中的 `github-actions[bot]` 可以创建 tag 和 Release。
+合并 PR 后，把 github_pr_number 和 github_merge_commit_sha 写入 Maintenance Issue。RC、Canary、稳定 Release 和每个 Workspace Apply 使用各自门禁。Release Plan 生成后，必须由 human_approver_id 对应成员在该 Maintenance Issue 评论精确口令 `APPROVE WORKFLOW RELEASE <digest>`；随后把 Plan 与批准证据交给人工宿主控制台。你不得获取 Dispatcher Token 或在 Agent Runtime 内运行 `release.py approval-block/apply`。只有人工宿主上下文可以验证 Dispatcher App 并 dispatch 摘要绑定的 Release Request。
+
+人工宿主执行的 release apply 不得创建、删除或推送 tag，也不得发布 GitHub Release。它必须停在受保护的 `workflow-release` Environment；只有 Agent 运行时无法访问其凭据的独立人工 GitHub Reviewer 可以批准，只有 Environment 后签发的独立 Publisher App token 可以创建 tag 和 Release。
 
 不得发布人工审批评论，不得切换到人工审批人凭据，不得调用 Environment 审批 API，不得把自己生成的审批文字、PR 评论或当前 GitHub 登录状态当作授权。没有 APPROVE WORKFLOW CANARY 或 APPROVE WORKFLOW PLAN 摘要不得执行对应远端操作。
 

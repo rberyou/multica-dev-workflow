@@ -248,6 +248,107 @@ class RecoveryMultica(FakeMultica):
 
 
 class ReleaseTests(unittest.TestCase):
+    DISPATCHER_APP_ID = 11223
+    DISPATCHER_INSTALLATION_ID = 44556
+    PUBLISHER_APP_ID = 24680
+    PUBLISHER_INSTALLATION_ID = 13579
+
+    @classmethod
+    def release_control_evidence_fixture(cls):
+        environment_snapshot = {
+            "id": 42,
+            "name": "workflow-release",
+            "protection_rules": [
+                {
+                    "type": "required_reviewers",
+                    "prevent_self_review": True,
+                    "reviewers": [
+                        {"type": "User", "id": 7, "login": "isolated-reviewer"}
+                    ],
+                }
+            ],
+            "admin_bypass": {
+                "api_field": "can_admins_bypass",
+                "readback_supported": False,
+                "status": "not_exposed_by_rest_api",
+                "residual_risk": "repository_owner_can_reconfigure_release_controls",
+            },
+            "deployment_branch_policy": {
+                "protected_branches": False,
+                "custom_branch_policies": True,
+            },
+            "deployment_branches": ["main"],
+        }
+        evidence = {
+            "schema_version": 1,
+            "status": "reviewed",
+            "repository": "rberyou/multica-dev-workflow",
+            "recorded_at": "2026-07-19T00:00:00Z",
+            "recorded_by": "rberyou",
+            "multica_evidence_id": "WOR-44-admin-evidence",
+            "environment": {
+                "id": 42,
+                "name": "workflow-release",
+                "sha256": release.digest(environment_snapshot),
+            },
+            "dispatcher_app": {
+                "id": cls.DISPATCHER_APP_ID,
+                "slug": "multica-workflow-dispatcher",
+                "installation_id": cls.DISPATCHER_INSTALLATION_ID,
+                "account_login": "rberyou",
+                "repository_selection": "selected",
+                "repositories": ["rberyou/multica-dev-workflow"],
+                "permissions": {
+                    "actions": "write",
+                    "contents": "read",
+                    "metadata": "read",
+                },
+            },
+            "publisher_app": {
+                "id": cls.PUBLISHER_APP_ID,
+                "slug": "multica-workflow-publisher",
+                "installation_id": cls.PUBLISHER_INSTALLATION_ID,
+                "account_login": "rberyou",
+                "repository_selection": "selected",
+                "repositories": ["rberyou/multica-dev-workflow"],
+                "permissions": {"contents": "write", "metadata": "read"},
+            },
+            "tag_ruleset": {
+                "id": 99,
+                "name": "workflow-release-tags",
+                "source": "rberyou/multica-dev-workflow",
+                "target": "tag",
+                "enforcement": "active",
+                "updated_at": "2026-07-19T00:00:00Z",
+                "conditions": {
+                    "ref_name": {"include": ["refs/tags/v*"], "exclude": []}
+                },
+                "rules": [
+                    {"type": "creation"},
+                    {"type": "update"},
+                    {"type": "deletion"},
+                ],
+                "bypass_actors": [
+                    {
+                        "actor_type": "Integration",
+                        "actor_id": cls.PUBLISHER_APP_ID,
+                        "bypass_mode": "always",
+                    }
+                ],
+            },
+        }
+        evidence["sha256"] = release.digest(evidence)
+        return evidence
+
+    def setUp(self):
+        self.evidence_patch = patch.object(
+            release,
+            "load_release_control_evidence",
+            side_effect=lambda root, control: self.release_control_evidence_fixture(),
+        )
+        self.evidence_patch.start()
+        self.addCleanup(self.evidence_patch.stop)
+
     @staticmethod
     def release_boundary_fixture():
         return {
@@ -257,7 +358,43 @@ class ReleaseTests(unittest.TestCase):
             "repository_default_branch": "main",
             "environment": "workflow-release",
             "deployment_branch": "main",
-            "operator_login": "github-actions[bot]",
+            "operator_type": "github_app",
+            "dispatcher_app_id": ReleaseTests.DISPATCHER_APP_ID,
+            "dispatcher_app_slug": "multica-workflow-dispatcher",
+            "dispatcher_actor_login": "multica-workflow-dispatcher[bot]",
+            "dispatcher_installation_id": ReleaseTests.DISPATCHER_INSTALLATION_ID,
+            "dispatcher_account_login": "rberyou",
+            "dispatcher_repository_selection": "selected",
+            "dispatcher_repositories": ["rberyou/multica-dev-workflow"],
+            "dispatcher_permissions": {
+                "actions": "write",
+                "contents": "read",
+                "metadata": "read",
+            },
+            "dispatcher_installation_sha256": release.digest(
+                {
+                    "app_id": ReleaseTests.DISPATCHER_APP_ID,
+                    "app_slug": "multica-workflow-dispatcher",
+                    "installation_id": ReleaseTests.DISPATCHER_INSTALLATION_ID,
+                    "account_login": "rberyou",
+                    "repository_selection": "selected",
+                    "repositories": ["rberyou/multica-dev-workflow"],
+                    "permissions": {
+                        "actions": "write",
+                        "contents": "read",
+                        "metadata": "read",
+                    },
+                }
+            ),
+            "publisher_app_id": ReleaseTests.PUBLISHER_APP_ID,
+            "publisher_app_slug": "multica-workflow-publisher",
+            "publisher_installation_id": ReleaseTests.PUBLISHER_INSTALLATION_ID,
+            "publisher_account_login": "rberyou",
+            "publisher_repository_selection": "selected",
+            "publisher_repositories": ["rberyou/multica-dev-workflow"],
+            "publisher_permissions": {"contents": "write", "metadata": "read"},
+            "administrator_evidence_sha256": "4" * 64,
+            "administrator_evidence_id": "WOR-44-admin-evidence",
             "reviewers": ["isolated-reviewer"],
             "prevent_self_review": True,
             "admin_bypass": {
@@ -270,22 +407,53 @@ class ReleaseTests(unittest.TestCase):
             "tag_ruleset": {
                 "name": "workflow-release-tags",
                 "id": "99",
-                "github_actions_app_id": 15368,
+                "updated_at": "2026-07-19T00:00:00Z",
                 "sha256": "3" * 64,
             },
-            "runtime_boundary": {"checked": False},
+            "dispatcher_token_verified": False,
         }
 
     @staticmethod
     def protected_environment_gh(
         args,
         reviewer="isolated-reviewer",
-        login="release-dispatcher",
         visibility="public",
         permissions=None,
-        configured_logins=None,
         can_admins_bypass=None,
+        dispatcher_app_id=None,
+        dispatcher_installation_id=None,
+        dispatcher_permissions=None,
+        dispatcher_repositories=None,
     ):
+        dispatcher_app_id = dispatcher_app_id or ReleaseTests.DISPATCHER_APP_ID
+        dispatcher_installation_id = (
+            dispatcher_installation_id or ReleaseTests.DISPATCHER_INSTALLATION_ID
+        )
+        dispatcher_permissions = dispatcher_permissions or {
+            "actions": "write",
+            "contents": "read",
+            "metadata": "read",
+        }
+        dispatcher_repositories = dispatcher_repositories or [
+            "rberyou/multica-dev-workflow"
+        ]
+        if args[:2] == ["api", "installation"]:
+            return {
+                "id": dispatcher_installation_id,
+                "app_id": dispatcher_app_id,
+                "app_slug": "multica-workflow-dispatcher",
+                "account": {"login": "rberyou"},
+                "repository_selection": "selected",
+                "permissions": dispatcher_permissions,
+            }
+        if args[:2] == ["api", "installation/repositories?per_page=100"]:
+            return {
+                "total_count": len(dispatcher_repositories),
+                "repositories": [
+                    {"full_name": repository}
+                    for repository in dispatcher_repositories
+                ],
+            }
         if args[:2] == ["api", "repos/rberyou/multica-dev-workflow"]:
             return {
                 "visibility": visibility,
@@ -300,22 +468,6 @@ class ReleaseTests(unittest.TestCase):
                     "triage": True,
                     "pull": True,
                 },
-            }
-        if args[:2] == ["api", "user"]:
-            return {"login": login}
-        if args[:2] == ["auth", "status"]:
-            accounts = configured_logins or [login]
-            return {
-                "hosts": {
-                    "github.com": [
-                        {
-                            "state": "success",
-                            "active": account == login,
-                            "login": account,
-                        }
-                        for account in accounts
-                    ]
-                }
             }
         if args[:2] == ["api", "repos/rberyou/multica-dev-workflow/environments/workflow-release"]:
             detail = {
@@ -352,8 +504,10 @@ class ReleaseTests(unittest.TestCase):
             return {
                 "id": 99,
                 "name": "workflow-release-tags",
+                "source": "rberyou/multica-dev-workflow",
                 "target": "tag",
                 "enforcement": "active",
+                "updated_at": "2026-07-19T00:00:00Z",
                 "conditions": {
                     "ref_name": {"include": ["refs/tags/v*"], "exclude": []}
                 },
@@ -365,13 +519,16 @@ class ReleaseTests(unittest.TestCase):
                 "bypass_actors": [
                     {
                         "actor_type": "Integration",
-                        "actor_id": 15368,
+                        "actor_id": ReleaseTests.PUBLISHER_APP_ID,
                         "bypass_mode": "always",
                     }
                 ],
             }
-        if args[:2] == ["api", "apps/github-actions"]:
-            return {"id": 15368, "slug": "github-actions"}
+        if args[:2] == ["api", "apps/multica-workflow-publisher"]:
+            return {
+                "id": ReleaseTests.PUBLISHER_APP_ID,
+                "slug": "multica-workflow-publisher",
+            }
         raise AssertionError(args)
 
     @staticmethod
@@ -402,18 +559,48 @@ class ReleaseTests(unittest.TestCase):
                 "maintenance_evidence_sha256": "f" * 64,
                 "multica_approval_author_sha256": "1" * 64,
             },
+            "implementation_provenance": [
+                {
+                    "issue_id": "WOR-45",
+                    "maintenance_change_id": "WOR-43",
+                    "plan_revision": "v3",
+                    "review_comment_id": "review-45",
+                    "reviewed_commit_sha": "7" * 40,
+                    "github_pr_number": 9,
+                    "github_merge_commit_sha": "8" * 40,
+                    "github_merged_at": "2026-07-18T00:00:00Z",
+                },
+                {
+                    "issue_id": "WOR-48",
+                    "maintenance_change_id": "WOR-44",
+                    "plan_revision": "v5",
+                    "review_comment_id": "review-48",
+                    "reviewed_commit_sha": "9" * 40,
+                    "github_pr_number": 10,
+                    "github_merge_commit_sha": "a" * 40,
+                    "github_merged_at": "2026-07-19T00:00:00Z",
+                },
+            ],
             "release_control": {
                 "repository": "rberyou/multica-dev-workflow",
                 "required_visibility": "public",
                 "environment": "workflow-release",
                 "deployment_branch": "main",
-                "operator_login": "github-actions[bot]",
+                "operator_type": "github_app",
+                "dispatcher_app_slug": "multica-workflow-dispatcher",
+                "publisher_app_slug": "multica-workflow-publisher",
+                "publisher_app_id_variable": "WORKFLOW_PUBLISHER_APP_ID",
+                "publisher_private_key_secret": "WORKFLOW_PUBLISHER_PRIVATE_KEY",
                 "tag_ruleset": "workflow-release-tags",
+                "administrator_evidence_path": "docs/release-control-evidence.json",
             },
             "release_boundary": release.release_boundary_snapshot(
                 ReleaseTests.release_boundary_fixture()
             ),
         }
+        request["implementation_provenance_sha256"] = release.digest(
+            request["implementation_provenance"]
+        )
         request["release_request_digest"] = release.digest(request)
         return request
 
@@ -459,7 +646,7 @@ class ReleaseTests(unittest.TestCase):
             patch.object(release, "git_head", return_value="merge-sha"),
             patch.object(release, "git_dirty", return_value=False),
             patch.object(
-                release, "verify_origin_main_reachability", return_value="main-sha"
+                release, "verify_origin_main_reachability", return_value="merge-sha"
             ),
             patch.object(release, "merged_pr_for_commit", return_value=pr),
             patch.object(release, "successful_validation", return_value=validation),
@@ -484,9 +671,14 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(plan["merged_pr"]["head_sha"], "head-sha")
         self.assertEqual(plan["merged_pr"]["merge_commit_sha"], "merge-sha")
         self.assertEqual(plan["merged_pr"]["merged_at"], "2026-07-15T12:00:00Z")
-        self.assertEqual(plan["origin_main_sha"], "main-sha")
+        self.assertEqual(plan["origin_main_sha"], "merge-sha")
         self.assertEqual(len(plan["release_plan_digest"]), 64)
         self.assertIn("multica-workflow-observer-v1.1.0-rc.1.zip", plan["expected_assets"])
+        self.assertIn("multica-workflow-console-v1.1.0-rc.1.zip", plan["expected_assets"])
+        self.assertIn(
+            "multica-workflow-secure-runtime-win-x64-v1.1.0-rc.1.zip",
+            plan["expected_assets"],
+        )
         self.assertEqual(plan["release_authorization"]["mode"], "bootstrap")
         self.assertEqual(plan["release_authorization"]["approver_login"], "rberyou")
         self.assertEqual(
@@ -639,6 +831,53 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(evidence["review_comment_id"], "review-1")
         self.assertEqual(evidence["plan_revision"], "v1")
         self.assertIn("batch_review_mappings_sha256", evidence)
+
+    def test_planned_implementation_revalidation_avoids_dispatcher_pr_api(self):
+        cli = FakeMultica()
+        cli.issues["WOR-48"] = {
+            "id": "implementation-internal",
+            "identifier": "WOR-48",
+            "status": "done",
+        }
+        cli.metadata_by_issue["WOR-48"] = {
+            "workflow_id": "development-delivery",
+            "workflow_object_type": "maintenance_implementation",
+            "maintenance_change_id": "WOR-44",
+            "maintenance_reviewer_id": "agent-reviewer",
+            "plan_revision": "v5",
+            "reviewed_commit_sha": "9" * 40,
+            "review_comment_id": "review-48",
+            "github_pr_number": "10",
+            "github_merge_commit_sha": "a" * 40,
+        }
+        cli.comments_by_issue["WOR-48"] = [
+            {
+                "id": "review-48",
+                "author_type": "agent",
+                "author_id": "agent-reviewer",
+                "created_at": "2026-07-18T23:00:00Z",
+                "content": (
+                    "APPROVED\nplan_revision=v5\n"
+                    f"reviewed_commit_sha={'9' * 40}"
+                ),
+            }
+        ]
+        planned = {
+            "issue_id": "WOR-48",
+            "maintenance_change_id": "WOR-44",
+            "plan_revision": "v5",
+            "review_comment_id": "review-48",
+            "reviewed_commit_sha": "9" * 40,
+            "github_pr_number": 10,
+            "github_merge_commit_sha": "a" * 40,
+            "github_merged_at": "2026-07-19T00:00:00Z",
+        }
+        with patch.object(release, "merged_pr_by_number") as pr_mock:
+            evidence = release.maintenance_implementation_evidence(
+                ROOT, cli, "WOR-48", planned
+            )
+        pr_mock.assert_not_called()
+        self.assertEqual(evidence, planned)
 
     def test_bounded_implementation_review_must_belong_to_maintenance_change(self):
         cases = {
@@ -890,32 +1129,23 @@ class ReleaseTests(unittest.TestCase):
 
     def test_release_environment_requires_isolated_reviewer(self):
         with (
+            patch.dict(release.os.environ, {"GH_TOKEN": "dispatcher-token"}, clear=True),
             patch.object(
                 release,
                 "gh_json",
                 side_effect=lambda root, args: self.protected_environment_gh(args),
             ),
-            patch.object(release, "github_ssh_login", return_value=""),
         ):
             boundary = release.verify_release_environment(ROOT)
         self.assertEqual(boundary["reviewers"], ["isolated-reviewer"])
-        self.assertEqual(boundary["operator_login"], "github-actions[bot]")
-
-        with (
-            patch.object(
-                release,
-                "gh_json",
-                side_effect=lambda root, args: self.protected_environment_gh(
-                    args, reviewer="release-dispatcher"
-                ),
-            ),
-            patch.object(release, "github_ssh_login", return_value=""),
-            self.assertRaisesRegex(release.ReleaseError, "credentials are visible"),
-        ):
-            release.verify_release_environment(ROOT)
+        self.assertEqual(boundary["operator_type"], "github_app")
+        self.assertEqual(boundary["dispatcher_app_id"], self.DISPATCHER_APP_ID)
+        self.assertTrue(boundary["dispatcher_token_verified"])
+        self.assertEqual(boundary["publisher_app_id"], self.PUBLISHER_APP_ID)
 
     def test_release_environment_requires_public_repository(self):
         with (
+            patch.dict(release.os.environ, {"GH_TOKEN": "dispatcher-token"}, clear=True),
             patch.object(
                 release,
                 "gh_json",
@@ -923,100 +1153,108 @@ class ReleaseTests(unittest.TestCase):
                     args, visibility="private"
                 ),
             ),
-            patch.object(release, "github_ssh_login", return_value=""),
             self.assertRaisesRegex(release.ReleaseError, "visibility must be public"),
         ):
             release.verify_release_environment(ROOT)
 
-    def test_release_environment_rejects_owner_or_admin_runtime(self):
+    def test_dispatcher_token_is_limited_to_reviewed_installation(self):
+        evidence = self.release_control_evidence_fixture()
+        with (
+            patch.dict(release.os.environ, {"GH_TOKEN": "dispatcher-token"}, clear=True),
+            patch.object(
+                release,
+                "gh_json",
+                side_effect=lambda root, args: self.protected_environment_gh(args),
+            ),
+        ):
+            dispatcher = release.verify_dispatcher_installation(
+                ROOT,
+                release.release_control(ROOT),
+                evidence,
+            )
+        self.assertEqual(dispatcher["app_id"], self.DISPATCHER_APP_ID)
+        self.assertEqual(
+            dispatcher["permissions"],
+            {"actions": "write", "contents": "read", "metadata": "read"},
+        )
+
+    def test_dispatcher_token_requires_explicit_gh_token(self):
+        with (
+            patch.dict(release.os.environ, {}, clear=True),
+            self.assertRaisesRegex(release.ReleaseError, "explicitly through GH_TOKEN"),
+        ):
+            release.verify_dispatcher_installation(
+                ROOT,
+                release.release_control(ROOT),
+                self.release_control_evidence_fixture(),
+            )
+
+    def test_dispatcher_token_allows_host_credentials_to_remain(self):
+        with (
+            patch.dict(
+                release.os.environ,
+                {
+                    "GH_TOKEN": "dispatcher-token",
+                    "GITHUB_TOKEN": "unrelated-host-token",
+                    "GH_CONFIG_DIR": "C:/host/gh",
+                    "GIT_SSH_COMMAND": "ssh -i C:/host/id_ed25519",
+                },
+                clear=True,
+            ),
+            patch.object(
+                release,
+                "gh_json",
+                side_effect=lambda root, args: self.protected_environment_gh(args),
+            ),
+        ):
+            dispatcher = release.verify_dispatcher_installation(
+                ROOT,
+                release.release_control(ROOT),
+                self.release_control_evidence_fixture(),
+            )
+        self.assertEqual(dispatcher["installation_id"], self.DISPATCHER_INSTALLATION_ID)
+
+    def test_dispatcher_token_rejects_identity_scope_or_permission_drift(self):
         cases = {
-            "owner login": {
-                "login": "rberyou",
-                "permissions": None,
-                "message": "owner/admin",
+            "wrong app": {
+                "dispatcher_app_id": self.DISPATCHER_APP_ID + 1,
             },
-            "admin permission": {
-                "login": "release-dispatcher",
-                "permissions": {
-                    "admin": True,
-                    "maintain": True,
-                    "push": True,
-                    "triage": True,
-                    "pull": True,
-                },
-                "message": "privileged repository permissions",
+            "wrong installation": {
+                "dispatcher_installation_id": self.DISPATCHER_INSTALLATION_ID + 1,
             },
-            "contents write permission": {
-                "login": "release-dispatcher",
-                "permissions": {
-                    "admin": False,
-                    "maintain": False,
-                    "push": True,
-                    "triage": True,
-                    "pull": True,
+            "wrong repository": {
+                "dispatcher_repositories": ["rberyou/another-repository"],
+            },
+            "permission mismatch": {
+                "dispatcher_permissions": {
+                    "actions": "write",
+                    "contents": "write",
+                    "metadata": "read",
                 },
-                "message": "Contents-read-only",
             },
         }
         for label, case in cases.items():
             with self.subTest(case=label):
                 with (
+                    patch.dict(
+                        release.os.environ,
+                        {"GH_TOKEN": "dispatcher-token"},
+                        clear=True,
+                    ),
                     patch.object(
                         release,
                         "gh_json",
                         side_effect=lambda root, args, case=case: self.protected_environment_gh(
-                            args,
-                            login=case["login"],
-                            permissions=case["permissions"],
+                            args, **case
                         ),
                     ),
-                    patch.object(release, "github_ssh_login", return_value=""),
-                    self.assertRaisesRegex(release.ReleaseError, case["message"]),
+                    self.assertRaisesRegex(release.ReleaseError, "does not match reviewed"),
                 ):
-                    release.verify_release_environment(ROOT)
-
-    def test_release_environment_rejects_inactive_switchable_gh_account(self):
-        with (
-            patch.object(
-                release,
-                "gh_json",
-                side_effect=lambda root, args: self.protected_environment_gh(
-                    args,
-                    login="release-dispatcher",
-                    configured_logins=["release-dispatcher", "inactive-admin"],
-                ),
-            ),
-            patch.object(release, "github_ssh_login", return_value=""),
-            self.assertRaisesRegex(release.ReleaseError, "gh auth switch"),
-        ):
-            release.verify_release_environment(ROOT)
-
-    def test_release_environment_rejects_github_ssh_credential(self):
-        with (
-            patch.object(
-                release,
-                "gh_json",
-                side_effect=lambda root, args: self.protected_environment_gh(args),
-            ),
-            patch.object(release, "github_ssh_login", return_value="rberyou"),
-            self.assertRaisesRegex(release.ReleaseError, "SSH credentials are available"),
-        ):
-            release.verify_release_environment(ROOT)
-
-    def test_release_environment_rejects_github_https_credential_helper(self):
-        with (
-            patch.object(
-                release,
-                "gh_json",
-                side_effect=lambda root, args: self.protected_environment_gh(args),
-            ),
-            patch.object(release, "github_ssh_login", return_value=""),
-            patch.object(
-                release, "github_https_credential_login", return_value="rberyou"
-            ),
-            self.assertRaisesRegex(release.ReleaseError, "credential helper"),
-        ):
-            release.verify_release_environment(ROOT)
+                    release.verify_dispatcher_installation(
+                        ROOT,
+                        release.release_control(ROOT),
+                        self.release_control_evidence_fixture(),
+                    )
 
     def test_release_control_hashes_include_full_normalized_configuration(self):
         with patch.object(
@@ -1025,7 +1263,7 @@ class ReleaseTests(unittest.TestCase):
             side_effect=lambda root, args: self.protected_environment_gh(args),
         ):
             baseline = release.verify_release_environment(
-                ROOT, reject_runtime_credentials=False
+                ROOT, verify_dispatcher_token=False
             )
 
         def changed_environment(root, args):
@@ -1040,13 +1278,11 @@ class ReleaseTests(unittest.TestCase):
                 )
             return value
 
-        with patch.object(release, "gh_json", side_effect=changed_environment):
-            changed = release.verify_release_environment(
-                ROOT, reject_runtime_credentials=False
-            )
-        self.assertNotEqual(
-            baseline["environment_sha256"], changed["environment_sha256"]
-        )
+        with (
+            patch.object(release, "gh_json", side_effect=changed_environment),
+            self.assertRaisesRegex(release.ReleaseError, "Environment differs"),
+        ):
+            release.verify_release_environment(ROOT, verify_dispatcher_token=False)
 
         def changed_ruleset(root, args):
             value = self.protected_environment_gh(args)
@@ -1060,13 +1296,11 @@ class ReleaseTests(unittest.TestCase):
                 )
             return value
 
-        with patch.object(release, "gh_json", side_effect=changed_ruleset):
-            changed = release.verify_release_environment(
-                ROOT, reject_runtime_credentials=False
-            )
-        self.assertNotEqual(
-            baseline["tag_ruleset"]["sha256"], changed["tag_ruleset"]["sha256"]
-        )
+        with (
+            patch.object(release, "gh_json", side_effect=changed_ruleset),
+            self.assertRaisesRegex(release.ReleaseError, "Ruleset public readback differs"),
+        ):
+            release.verify_release_environment(ROOT, verify_dispatcher_token=False)
 
     def test_release_environment_records_or_rejects_admin_bypass(self):
         with patch.object(
@@ -1075,34 +1309,24 @@ class ReleaseTests(unittest.TestCase):
             side_effect=lambda root, args: self.protected_environment_gh(args),
         ):
             unsupported = release.verify_release_environment(
-                ROOT, reject_runtime_credentials=False
+                ROOT, verify_dispatcher_token=False
             )
         self.assertIs(
             unsupported["admin_bypass"]["readback_supported"], False
         )
         self.assertIn("residual_risk", unsupported["admin_bypass"])
 
-        with patch.object(
-            release,
-            "gh_json",
-            side_effect=lambda root, args: self.protected_environment_gh(
-                args, can_admins_bypass=False
+        with (
+            patch.object(
+                release,
+                "gh_json",
+                side_effect=lambda root, args: self.protected_environment_gh(
+                    args, can_admins_bypass=False
+                ),
             ),
+            self.assertRaisesRegex(release.ReleaseError, "Environment differs"),
         ):
-            disabled = release.verify_release_environment(
-                ROOT, reject_runtime_credentials=False
-            )
-        self.assertEqual(
-            disabled["admin_bypass"],
-            {
-                "api_field": "can_admins_bypass",
-                "readback_supported": True,
-                "can_admins_bypass": False,
-            },
-        )
-        self.assertNotEqual(
-            unsupported["environment_sha256"], disabled["environment_sha256"]
-        )
+            release.verify_release_environment(ROOT, verify_dispatcher_token=False)
 
         with (
             patch.object(
@@ -1114,7 +1338,7 @@ class ReleaseTests(unittest.TestCase):
             ),
             self.assertRaisesRegex(release.ReleaseError, "administrator bypass"),
         ):
-            release.verify_release_environment(ROOT, reject_runtime_credentials=False)
+            release.verify_release_environment(ROOT, verify_dispatcher_token=False)
 
     def test_environment_approval_is_bound_to_required_reviewer(self):
         def fake_gh(root, args):
@@ -1157,6 +1381,227 @@ class ReleaseTests(unittest.TestCase):
             with self.assertRaisesRegex(release.ReleaseError, "digest is invalid"):
                 release.verify_release_request(ROOT, request)
 
+    def test_release_request_requires_reviewed_dispatcher_actor_in_actions(self):
+        request = self.release_request_fixture()
+        with (
+            patch.dict(
+                release.os.environ,
+                {
+                    "GITHUB_ACTIONS": "true",
+                    "GITHUB_ACTOR": "different-actor",
+                },
+                clear=True,
+            ),
+            patch.object(release, "verify_current_state"),
+            patch.object(
+                release,
+                "release_control",
+                return_value=request["release_control"],
+            ),
+            self.assertRaisesRegex(release.ReleaseError, "reviewed Dispatcher App"),
+        ):
+            release.verify_release_request(
+                ROOT, request, expected_source=request["source_commit"]
+            )
+
+        forged = json.loads(json.dumps(request))
+        forged["release_boundary"]["dispatcher_actor_login"] = "different-actor"
+        forged["release_request_digest"] = release.digest(
+            {
+                key: value
+                for key, value in forged.items()
+                if key != "release_request_digest"
+            }
+        )
+        with (
+            patch.dict(
+                release.os.environ,
+                {
+                    "GITHUB_ACTIONS": "true",
+                    "GITHUB_ACTOR": "different-actor",
+                },
+                clear=True,
+            ),
+            patch.object(release, "verify_current_state"),
+            patch.object(
+                release,
+                "release_control",
+                return_value=request["release_control"],
+            ),
+            self.assertRaisesRegex(release.ReleaseError, "trusted release control"),
+        ):
+            release.verify_release_request(
+                ROOT, forged, expected_source=forged["source_commit"]
+            )
+
+        with (
+            patch.dict(
+                release.os.environ,
+                {
+                    "GITHUB_ACTIONS": "true",
+                    "GITHUB_ACTOR": "multica-workflow-dispatcher[bot]",
+                },
+                clear=True,
+            ),
+            patch.object(release, "verify_current_state"),
+            patch.object(
+                release,
+                "release_control",
+                return_value=request["release_control"],
+            ),
+        ):
+            self.assertEqual(
+                release.verify_release_request(
+                    ROOT, request, expected_source=request["source_commit"]
+                ),
+                request["release_request_digest"],
+            )
+
+    def test_rc4_release_request_requires_both_implementation_records(self):
+        request = self.release_request_fixture()
+        request["implementation_provenance"] = request["implementation_provenance"][:1]
+        request["implementation_provenance_sha256"] = release.digest(
+            request["implementation_provenance"]
+        )
+        request["release_request_digest"] = release.digest(
+            {key: value for key, value in request.items() if key != "release_request_digest"}
+        )
+        with (
+            patch.object(release, "verify_current_state"),
+            patch.object(
+                release,
+                "release_control",
+                return_value=request["release_control"],
+            ),
+            self.assertRaisesRegex(release.ReleaseError, "bind two Implementation Issues"),
+        ):
+            release.verify_release_request(ROOT, request)
+
+    def test_publish_gate_is_digest_bound_and_rejects_tampering(self):
+        request = self.release_request_fixture()
+        boundary = self.release_boundary_fixture()
+        approval = {
+            "run_id": "123",
+            "environment": "workflow-release",
+            "actor_login": "isolated-reviewer",
+            "approval_sha256": "2" * 64,
+        }
+        gate = release.publish_gate_record(request, boundary, approval)
+        self.assertEqual(
+            release.verify_publish_gate(
+                gate,
+                request,
+                gate["publish_gate_digest"],
+                workflow_run_id="123",
+                environment="workflow-release",
+            ),
+            gate["publish_gate_digest"],
+        )
+        gate["tag"] = "v1.1.0-rc.4-forged"
+        with self.assertRaisesRegex(release.ReleaseError, "gate digest is invalid"):
+            release.verify_publish_gate(
+                gate,
+                request,
+                gate["publish_gate_digest"],
+                workflow_run_id="123",
+                environment="workflow-release",
+            )
+
+    def test_publisher_token_is_limited_to_reviewed_installation(self):
+        evidence = self.release_control_evidence_fixture()
+
+        def publisher_gh(root, args):
+            if args[:2] == ["api", "installation"]:
+                publisher = evidence["publisher_app"]
+                return {
+                    "id": publisher["installation_id"],
+                    "app_id": publisher["id"],
+                    "app_slug": publisher["slug"],
+                    "account": {"login": publisher["account_login"]},
+                    "repository_selection": publisher["repository_selection"],
+                    "permissions": publisher["permissions"],
+                }
+            if args[:2] == ["api", "installation/repositories?per_page=100"]:
+                return {
+                    "total_count": 1,
+                    "repositories": [{"full_name": "rberyou/multica-dev-workflow"}],
+                }
+            raise AssertionError(args)
+
+        with (
+            patch.dict(release.os.environ, {"GH_TOKEN": "publisher-token"}, clear=True),
+            patch.object(release, "gh_json", side_effect=publisher_gh),
+        ):
+            publisher = release.verify_publisher_installation(
+                ROOT,
+                release.release_control(ROOT),
+                evidence,
+            )
+        self.assertEqual(publisher["installation_id"], self.PUBLISHER_INSTALLATION_ID)
+
+        overprivileged = json.loads(json.dumps(evidence))
+        overprivileged["publisher_app"]["permissions"]["administration"] = "write"
+        with (
+            patch.dict(release.os.environ, {"GH_TOKEN": "publisher-token"}, clear=True),
+            patch.object(release, "gh_json", side_effect=publisher_gh),
+            self.assertRaisesRegex(release.ReleaseError, "does not match reviewed"),
+        ):
+            release.verify_publisher_installation(
+                ROOT,
+                release.release_control(ROOT),
+                overprivileged,
+            )
+
+    def test_protected_tag_uses_git_database_api_without_git_push(self):
+        request = self.release_request_fixture()
+        boundary = self.release_boundary_fixture()
+        gate = release.publish_gate_record(
+            request,
+            boundary,
+            {
+                "run_id": "123",
+                "environment": "workflow-release",
+                "actor_login": "isolated-reviewer",
+                "approval_sha256": "2" * 64,
+            },
+        )
+        publisher = {
+            "app_id": self.PUBLISHER_APP_ID,
+            "app_slug": "multica-workflow-publisher",
+            "installation_id": self.PUBLISHER_INSTALLATION_ID,
+            "sha256": "6" * 64,
+        }
+
+        def fake_run(args, root, check=True):
+            if args[:3] == ["git", "tag", "--list"]:
+                return SimpleNamespace(stdout="", stderr="", returncode=0)
+            if args[:3] == ["git", "ls-remote", "--tags"]:
+                return SimpleNamespace(stdout="", stderr="", returncode=0)
+            if args[:3] == ["git", "fetch", "--no-tags"]:
+                return SimpleNamespace(stdout="", stderr="", returncode=0)
+            raise AssertionError(args)
+
+        with (
+            patch.object(release, "run", side_effect=fake_run) as run_mock,
+            patch.object(
+                release,
+                "gh_api_json",
+                side_effect=[
+                    {"sha": "7" * 40},
+                    {"ref": "refs/tags/v1.1.0-rc.4", "object": {"sha": "7" * 40}},
+                ],
+            ) as api_mock,
+        ):
+            result = release.create_protected_tag(
+                ROOT, request, gate, publisher
+            )
+        self.assertEqual(result["tag_object_sha"], "7" * 40)
+        self.assertEqual(api_mock.call_args_list[0].args[1:3], ("POST", "repos/rberyou/multica-dev-workflow/git/tags"))
+        self.assertEqual(api_mock.call_args_list[1].args[1:3], ("POST", "repos/rberyou/multica-dev-workflow/git/refs"))
+        self.assertFalse(
+            any(call.args[0][:2] == ["git", "push"] for call in run_mock.call_args_list)
+        )
+
     def test_local_release_apply_only_dispatches_request(self):
         request = self.release_request_fixture()
         plan = {
@@ -1181,7 +1626,12 @@ class ReleaseTests(unittest.TestCase):
             fake_cli = SimpleNamespace(workspace_id="workspace-test")
             with (
                 patch.object(release, "verify_plan_file", return_value="e" * 64),
-                patch.object(release, "verify_current_state"),
+                patch.object(
+                    release,
+                    "verify_dispatcher_installation",
+                    return_value={"app_id": self.DISPATCHER_APP_ID},
+                ),
+                patch.object(release, "verify_current_state") as state_mock,
                 patch.object(release, "release_cli", return_value=(fake_cli, {})),
                 patch.object(
                     release,
@@ -1211,6 +1661,7 @@ class ReleaseTests(unittest.TestCase):
                 patch("builtins.print"),
             ):
                 self.assertEqual(release.command_apply(args, root), 0)
+        state_mock.assert_called_once_with(root, plan, verify_merged_pr=False)
         calls = [call.args[0] for call in run_mock.call_args_list]
         self.assertEqual(calls[0][:3], ["gh", "workflow", "run"])
         self.assertFalse(any(call[:2] == ["git", "tag"] for call in calls))
@@ -1219,18 +1670,36 @@ class ReleaseTests(unittest.TestCase):
 
     def test_protected_tag_message_binds_environment_evidence(self):
         request = self.release_request_fixture()
-        approval = {
+        gate = {
+            "publish_gate_digest": "5" * 64,
+            "environment_approval": {
             "run_id": "123",
             "environment": "workflow-release",
             "actor_login": "isolated-reviewer",
             "approval_sha256": "2" * 64,
-            "operator_login": "github-actions[bot]",
+            },
         }
-        message = release.protected_tag_message(request, approval)
+        publisher = {
+            "app_id": self.PUBLISHER_APP_ID,
+            "app_slug": "multica-workflow-publisher",
+            "installation_id": self.PUBLISHER_INSTALLATION_ID,
+            "sha256": "6" * 64,
+        }
+        message = release.protected_tag_message(request, gate, publisher)
         self.assertIn("authorization_mode=protected_environment", message)
         self.assertIn("release_workflow_run_id=123", message)
         self.assertIn("environment_approval_actor=isolated-reviewer", message)
-        self.assertIn("release_operator=github-actions[bot]", message)
+        self.assertIn("release_operator_type=github_app", message)
+        self.assertIn("dispatcher_app_slug=multica-workflow-dispatcher", message)
+        self.assertIn(
+            "dispatcher_actor_login=multica-workflow-dispatcher[bot]", message
+        )
+        self.assertIn(
+            f"dispatcher_installation_id={self.DISPATCHER_INSTALLATION_ID}",
+            message,
+        )
+        self.assertIn("publisher_app_slug=multica-workflow-publisher", message)
+        self.assertIn("publish_gate_digest=" + "5" * 64, message)
         self.assertIn("repository_visibility=public", message)
         self.assertIn("release_environment_sha256=" + "2" * 64, message)
         self.assertIn("release_ruleset_id=99", message)
@@ -1240,6 +1709,8 @@ class ReleaseTests(unittest.TestCase):
         request = self.release_request_fixture()
         args = SimpleNamespace(
             request="request.json",
+            gate="gate.json",
+            approve="5" * 64,
             workflow_run_id="123",
             environment="workflow-release",
             recover_existing_tag=False,
@@ -1268,12 +1739,12 @@ class ReleaseTests(unittest.TestCase):
                 ),
                 patch.object(
                     release,
-                    "verify_release_environment",
-                    return_value=self.release_boundary_fixture(),
+                    "load_publish_gate",
+                    return_value={"publish_gate_digest": "5" * 64},
                 ),
                 patch.object(
                     release,
-                    "verify_environment_approval",
+                    "verify_publish_gate",
                     side_effect=release.ReleaseError("approval missing"),
                 ),
                 patch.object(release, "run") as run_mock,
@@ -1282,6 +1753,104 @@ class ReleaseTests(unittest.TestCase):
                 release.command_publish(args, root)
         self.assertFalse(any(call.args[0][:2] == ["git", "tag"] for call in run_mock.call_args_list))
         self.assertFalse(any(call.args[0][:2] == ["git", "push"] for call in run_mock.call_args_list))
+
+    def test_release_recovery_accepts_new_gate_for_existing_request_bound_tag(self):
+        request = self.release_request_fixture()
+        gate = {"publish_gate_digest": "5" * 64}
+        annotation = (
+            f"release_request_digest={request['release_request_digest']}\n"
+            f"publish_gate_digest={'4' * 64}\n"
+        )
+        args = SimpleNamespace(
+            request="request.json",
+            gate="gate.json",
+            approve="5" * 64,
+            workflow_run_id="123",
+            environment="workflow-release",
+            directory="assets",
+            recover_existing_tag=True,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            request_path = root / "request.json"
+            request_path.write_text(json.dumps(request), encoding="utf-8")
+            args.request = str(request_path)
+            args.directory = str(root / "assets")
+            Path(args.directory).mkdir()
+            with (
+                patch.dict(
+                    release.os.environ,
+                    {
+                        "GITHUB_ACTIONS": "true",
+                        "GITHUB_RUN_ID": "123",
+                        "GITHUB_REPOSITORY": "rberyou/multica-dev-workflow",
+                        "GITHUB_ACTOR": "multica-workflow-dispatcher[bot]",
+                    },
+                    clear=True,
+                ),
+                patch.object(release, "git_head", return_value=request["source_commit"]),
+                patch.object(release, "verify_release_request"),
+                patch.object(
+                    release,
+                    "release_control",
+                    return_value=request["release_control"],
+                ),
+                patch.object(release, "load_publish_gate", return_value=gate),
+                patch.object(release, "verify_publish_gate"),
+                patch.object(
+                    release,
+                    "verify_publisher_installation",
+                    return_value={"app_id": self.PUBLISHER_APP_ID},
+                ),
+                patch.object(release, "annotated_tag_contents", return_value=annotation),
+                patch.object(release, "verify_asset_directory", return_value=["asset.zip"]),
+                patch.object(
+                    release,
+                    "run",
+                    side_effect=[
+                        SimpleNamespace(stdout="", stderr="not found", returncode=1),
+                        SimpleNamespace(stdout="", stderr="", returncode=0),
+                    ],
+                ),
+                patch("builtins.print"),
+            ):
+                self.assertEqual(release.command_publish_release(args, root), 0)
+
+        args.recover_existing_tag = False
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            request_path = root / "request.json"
+            request_path.write_text(json.dumps(request), encoding="utf-8")
+            args.request = str(request_path)
+            args.directory = str(root)
+            with (
+                patch.dict(
+                    release.os.environ,
+                    {
+                        "GITHUB_ACTIONS": "true",
+                        "GITHUB_RUN_ID": "123",
+                        "GITHUB_REPOSITORY": "rberyou/multica-dev-workflow",
+                    },
+                    clear=True,
+                ),
+                patch.object(release, "git_head", return_value=request["source_commit"]),
+                patch.object(release, "verify_release_request"),
+                patch.object(
+                    release,
+                    "release_control",
+                    return_value=request["release_control"],
+                ),
+                patch.object(release, "load_publish_gate", return_value=gate),
+                patch.object(release, "verify_publish_gate"),
+                patch.object(
+                    release,
+                    "verify_publisher_installation",
+                    return_value={"app_id": self.PUBLISHER_APP_ID},
+                ),
+                patch.object(release, "annotated_tag_contents", return_value=annotation),
+                self.assertRaisesRegex(release.ReleaseError, "approved publish gate"),
+            ):
+                release.command_publish_release(args, root)
 
     def test_exact_validation_run_is_reverified(self):
         validation = {
@@ -1313,6 +1882,57 @@ class ReleaseTests(unittest.TestCase):
             self.assertRaisesRegex(release.ReleaseError, "changed after release planning"),
         ):
             release.verify_validation_record(ROOT, planned, "merge-sha")
+
+    def test_dispatcher_preflight_defers_pr_readback_but_rechecks_ci(self):
+        plan = {
+            "source_commit": "merge-sha",
+            "source_hash": "source-hash",
+            "origin_main_sha": "merge-sha",
+            "version": "1.1.0-rc.4",
+            "merged_pr": {
+                "number": 10,
+                "head_sha": "head-sha",
+                "merged_at": "2026-07-19T00:00:00Z",
+            },
+            "validation": {"databaseId": 123},
+        }
+        with (
+            patch.object(release, "git_dirty", return_value=False),
+            patch.object(release, "git_head", return_value="merge-sha"),
+            patch.object(release, "tracked_source_hash", return_value="source-hash"),
+            patch.object(
+                release,
+                "verify_origin_main_reachability",
+                return_value="merge-sha",
+            ),
+            patch.object(release, "verify_versions"),
+            patch.object(release, "merged_pr_for_commit") as pr_mock,
+            patch.object(release, "verify_validation_record") as validation_mock,
+        ):
+            release.verify_current_state(ROOT, plan, verify_merged_pr=False)
+        pr_mock.assert_not_called()
+        validation_mock.assert_called_once_with(ROOT, plan["validation"], "merge-sha")
+
+    def test_release_preflight_rejects_source_behind_origin_main(self):
+        plan = {
+            "source_commit": "merge-sha",
+            "source_hash": "source-hash",
+            "origin_main_sha": "new-main-sha",
+            "version": "1.1.0-rc.4",
+            "validation": {"databaseId": 123},
+        }
+        with (
+            patch.object(release, "git_dirty", return_value=False),
+            patch.object(release, "git_head", return_value="merge-sha"),
+            patch.object(release, "tracked_source_hash", return_value="source-hash"),
+            patch.object(
+                release,
+                "verify_origin_main_reachability",
+                return_value="new-main-sha",
+            ),
+            self.assertRaisesRegex(release.ReleaseError, "origin/main tip"),
+        ):
+            release.verify_current_state(ROOT, plan, verify_merged_pr=False)
 
     def test_release_commit_must_be_reachable_from_origin_main(self):
         def fake_run(args, root, check=True):

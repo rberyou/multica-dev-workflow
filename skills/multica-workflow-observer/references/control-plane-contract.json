@@ -98,40 +98,40 @@
     "workflow-observer": {
       "name": "工作流观察员",
       "description": "接收工作流异常上报、运行确定性巡检、去重分诊并验证修复结果",
-      "runtime_binding": "opencode-review",
+      "runtime_binding": "codex-secure-review",
       "max_concurrent_tasks": 1,
       "permission_mode": "public_to_workspace",
-      "instructions_sha256": "01b28814d06c5f4bc56b4c7f4dcbc91e622497529f249a1c672830253f96982a",
+      "instructions_sha256": "85d3b51d20f5c40fead85ebe827d68444f9b8dc3587509afe8eabef695f442a9",
       "spec_hashes": {
-        "codex-only": "a4ec1c06c9f0263569bf9e905cb93d01d3ef430d53ce04b1a6ee65d8acf86a62",
-        "opencode-only": "766eb4a0727f79325339a8cb42d70260d0a35650e879f36787579b4f9f90d18b",
-        "quality": "766eb4a0727f79325339a8cb42d70260d0a35650e879f36787579b4f9f90d18b"
+        "codex-only": "b8d98ebb4ecef4eab1c16ab003fb967c73e3c566c47a703199b819ce458359df",
+        "opencode-only": "b8d98ebb4ecef4eab1c16ab003fb967c73e3c566c47a703199b819ce458359df",
+        "quality": "b8d98ebb4ecef4eab1c16ab003fb967c73e3c566c47a703199b819ce458359df"
       }
     },
     "workflow-maintainer": {
       "name": "工作流维护员",
       "description": "根据已确认 Incident 维护工作流源码、测试、RC、发布和回滚",
-      "runtime_binding": "codex-orchestrator",
+      "runtime_binding": "codex-secure-maintainer",
       "max_concurrent_tasks": 1,
       "permission_mode": "public_to_workspace",
-      "instructions_sha256": "927df937b358ed7a3a1302aeb3228b46b721b4a721e44eca641990b042b936c3",
+      "instructions_sha256": "5e3c5622cc104a7bec9bae0cf035c60cde0754ed942f87cf2e66f5626286bdb0",
       "spec_hashes": {
-        "codex-only": "dee79ff276df06b0d10620c1613f1989428c913ec7afbb2eb7178b5c20588a2b",
-        "opencode-only": "6bfec24f2c4654be9be8826879a1836ba1de6f3d0b17c7b3779d541f029cad6f",
-        "quality": "dee79ff276df06b0d10620c1613f1989428c913ec7afbb2eb7178b5c20588a2b"
+        "codex-only": "ba601bfe27ca67610e9f5df5d73158bb5fdd70498bd4e7262f5d721cba8bf296",
+        "opencode-only": "ba601bfe27ca67610e9f5df5d73158bb5fdd70498bd4e7262f5d721cba8bf296",
+        "quality": "ba601bfe27ca67610e9f5df5d73158bb5fdd70498bd4e7262f5d721cba8bf296"
       }
     },
     "workflow-maintenance-reviewer": {
       "name": "工作流维护审查员",
       "description": "独立审查工作流变更 Plan、代码、发布和回滚，不修改被审查内容",
-      "runtime_binding": "opencode-review",
+      "runtime_binding": "codex-secure-review",
       "max_concurrent_tasks": 1,
       "permission_mode": "public_to_workspace",
-      "instructions_sha256": "91de3e2062f4fa7173fa6b06bbfb8462fa72c4f3ecc52ef9069f761b521466b6",
+      "instructions_sha256": "1c3fd6866fb37dc1d54b6a946e679c8fa9fd514f9cb9546ecd11bb51fe15776f",
       "spec_hashes": {
-        "codex-only": "1e498e3297abdf24f03dfead52dce5e4d5e5a35722664d7aa3947d5026e8bb7f",
-        "opencode-only": "3850dfbfd7c8950991f59e64e1062f8e7d40c0ba02e455e75608848c93d59104",
-        "quality": "3850dfbfd7c8950991f59e64e1062f8e7d40c0ba02e455e75608848c93d59104"
+        "codex-only": "683d199c846be689840eaa1778ad371434f74c93263742acc834ae995bba035b",
+        "opencode-only": "683d199c846be689840eaa1778ad371434f74c93263742acc834ae995bba035b",
+        "quality": "683d199c846be689840eaa1778ad371434f74c93263742acc834ae995bba035b"
       }
     }
   },
@@ -150,6 +150,18 @@
         "required_status": "online"
       },
       "opencode-review": {
+        "provider": "codex",
+        "model": "gpt-5.5",
+        "thinking_level": "high",
+        "required_status": "online"
+      },
+      "codex-secure-maintainer": {
+        "provider": "codex",
+        "model": "gpt-5.5",
+        "thinking_level": "xhigh",
+        "required_status": "online"
+      },
+      "codex-secure-review": {
         "provider": "codex",
         "model": "gpt-5.5",
         "thinking_level": "high",
@@ -174,6 +186,18 @@
         "model": "team-litellm/gpt-5.5",
         "thinking_level": "",
         "required_status": "online"
+      },
+      "codex-secure-maintainer": {
+        "provider": "codex",
+        "model": "gpt-5.5",
+        "thinking_level": "xhigh",
+        "required_status": "online"
+      },
+      "codex-secure-review": {
+        "provider": "codex",
+        "model": "gpt-5.5",
+        "thinking_level": "high",
+        "required_status": "online"
       }
     },
     "quality": {
@@ -193,6 +217,18 @@
         "provider": "opencode",
         "model": "team-litellm/gpt-5.5",
         "thinking_level": "",
+        "required_status": "online"
+      },
+      "codex-secure-maintainer": {
+        "provider": "codex",
+        "model": "gpt-5.5",
+        "thinking_level": "xhigh",
+        "required_status": "online"
+      },
+      "codex-secure-review": {
+        "provider": "codex",
+        "model": "gpt-5.5",
+        "thinking_level": "high",
         "required_status": "online"
       }
     }
@@ -223,7 +259,7 @@
         "workflow-maintainer",
         "workflow-maintenance-reviewer"
       ],
-      "package_hash": "794b6f58e88d8d2068758537e4e781529b1e7b8db44ce3042b42b6afc6a401d3"
+      "package_hash": "3f603ad408bd69d5fcd13db4619022f4224ddb12e60292bb2dc6c1a7b960639e"
     }
   },
   "squad": {
@@ -287,7 +323,7 @@
       "agent": "workflow-observer",
       "mode": "run_only",
       "project": "workflow-operations",
-      "status": "active",
+      "status": "paused",
       "issue_title_template": "",
       "subscribers": [
         "human_approver"
@@ -297,7 +333,7 @@
           "key": "hourly",
           "kind": "schedule",
           "label": "multica-workflow:workflow-health-hourly",
-          "enabled": true,
+          "enabled": false,
           "cron": "0 * * * *",
           "timezone": "Asia/Shanghai"
         }
@@ -323,7 +359,7 @@
     "observer_skill_name": "multica-workflow-observer",
     "modes": {
       "enabled": {
-        "autopilot_status": "active",
+        "autopilot_status": "paused",
         "observer_skill_attach_to": [
           "leader",
           "planner",

@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rberyou/multica-dev-workflow/secure-runtime/policy/security-profile.schema.json",
+  "title": "Multica Workflow Secure Runtime Local Configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "repository",
+    "service_root",
+    "workspaces_root",
+    "workflow_bundle_root",
+    "workflow_bundle_manifest",
+    "multica_executable",
+    "codex_executable",
+    "git_executable",
+    "launcher_executable",
+    "broker_executable",
+    "console_executable",
+    "codex_credential_path",
+    "agent_bindings_path",
+    "broker_pipe_name",
+    "proxy_port",
+    "multica_server_url",
+    "multica_profile",
+    "multica_daemon_id",
+    "multica_runtime_name",
+    "capability_key_path",
+    "audit_log_path",
+    "github",
+    "profiles",
+    "denied_roots",
+    "network_domains"
+  ],
+  "properties": {
+    "$schema": {"type": "string"},
+    "schema_version": {"const": 1},
+    "repository": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
+    "service_root": {"type": "string", "minLength": 3},
+    "workspaces_root": {"type": "string", "minLength": 3},
+    "workflow_bundle_root": {"type": "string", "minLength": 3},
+    "workflow_bundle_manifest": {"type": "string", "minLength": 3},
+    "multica_executable": {"$ref": "#/$defs/executable"},
+    "codex_executable": {"$ref": "#/$defs/executable"},
+    "git_executable": {"$ref": "#/$defs/executable"},
+    "launcher_executable": {"$ref": "#/$defs/executable"},
+    "broker_executable": {"$ref": "#/$defs/executable"},
+    "console_executable": {"$ref": "#/$defs/executable"},
+    "codex_credential_path": {"type": "string", "minLength": 3},
+    "agent_bindings_path": {"type": "string", "minLength": 3},
+    "broker_pipe_name": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+$"},
+    "proxy_port": {"type": "integer", "minimum": 1024, "maximum": 65535},
+    "multica_server_url": {"type": "string", "format": "uri", "pattern": "^https://"},
+    "multica_profile": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+$"},
+    "multica_daemon_id": {"type": "string", "minLength": 1},
+    "multica_runtime_name": {"type": "string", "minLength": 1},
+    "capability_key_path": {"type": "string", "minLength": 3},
+    "audit_log_path": {"type": "string", "minLength": 3},
+    "github": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["api_url", "app_id", "installation_id", "private_key_path"],
+      "properties": {
+        "api_url": {"type": "string", "format": "uri", "pattern": "^https://"},
+        "app_id": {"type": "integer", "minimum": 1},
+        "installation_id": {"type": "integer", "minimum": 1},
+        "private_key_path": {"type": "string", "minLength": 3}
+      }
+    },
+    "profiles": {
+      "type": "object",
+      "required": ["workflow_maintainer", "workflow_reviewer"],
+      "additionalProperties": {"$ref": "#/$defs/profile"}
+    },
+    "denied_roots": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 3}},
+    "network_domains": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "pattern": "^(?:\\*\\*\\.|\\*\\.)?[A-Za-z0-9.-]+$"}}
+  },
+  "$defs": {
+    "executable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"type": "string", "minLength": 3},
+        "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      }
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["permission_profile", "github_mode", "allowed_branch_prefixes", "allowed_base_branches", "required_skills"],
+      "properties": {
+        "permission_profile": {"type": "string", "minLength": 1},
+        "github_mode": {"enum": ["none", "maintainer_broker"]},
+        "allowed_branch_prefixes": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "allowed_base_branches": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "required_skills": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+$"}}
+      }
+    }
+  }
+}
