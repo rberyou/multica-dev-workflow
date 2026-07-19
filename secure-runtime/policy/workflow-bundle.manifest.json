@@ -24,7 +24,6 @@
     "skills/multica-workflow-observer/references/control-plane-contract.json": "4ab1bba75ce5b6d1ffc62083b06ff089cc1255be4ef1a9df5d72931f02cb221d",
     "skills/multica-workflow-observer/references/incident-contract.md": "f4bdbf289187eb5e39010002ee712ff2e9654e48bff29d9dff418dc9963f1660",
     "skills/multica-workflow-observer/references/triage-runbook.md": "de29acb47d5060b96a8055a7c0ba83fc7428d4022be4dda77312b121f47bc3d7",
-    "skills/multica-workflow-observer/scripts/__pycache__/observer.cpython-313.pyc": "1b6a6d9d49cb84a044b69444638bb1aaa78e3855b7ebf540f25f1ccffbe3d2dc",
     "skills/multica-workflow-observer/scripts/observer.py": "76042d1a1b2d40a0393d5d07cf101dc8b2b54c27095859b83be584227b18f3e8"
   }
 }
