@@ -45,8 +45,13 @@ RELEASE_CONTROL_KEYS = [
     "required_visibility",
     "environment",
     "deployment_branch",
-    "operator_login",
+    "operator_type",
+    "dispatcher_app_slug",
+    "publisher_app_slug",
+    "publisher_app_id_variable",
+    "publisher_private_key_secret",
     "tag_ruleset",
+    "administrator_evidence_path",
 ]
 RC2_RECOVERY_DECISION = (
     "DECISION: 允许将 WOR-1 中的 durable pending Incident 作为本次部分部署恢复的临时 Intake；"
@@ -398,6 +403,198 @@ def maintenance_evidence(
     return evidence
 
 
+def merged_pr_by_number(root: Path, number: int) -> dict[str, Any]:
+    value = gh_json(
+        root,
+        [
+            "pr",
+            "view",
+            str(number),
+            "--json",
+            "number,url,title,state,mergeCommit,headRefOid,baseRefName,mergedAt",
+        ],
+    )
+    if (
+        not isinstance(value, dict)
+        or value.get("state") != "MERGED"
+        or value.get("baseRefName") != "main"
+        or not value.get("mergedAt")
+    ):
+        raise ReleaseError(f"implementation provenance PR #{number} is not merged to main")
+    return value
+
+
+def maintenance_implementation_evidence(
+    root: Path,
+    cli: MulticaCLI,
+    issue_id: str,
+    planned: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    issue = cli.json(["issue", "get", issue_id, "--output", "json"])
+    if not isinstance(issue, dict):
+        raise ReleaseError(f"Maintenance Implementation is unreadable: {issue_id}")
+    metadata = metadata_map(
+        cli.json(["issue", "metadata", "list", issue_id, "--output", "json"])
+    )
+    if str(metadata.get("workflow_id") or "") != "development-delivery":
+        raise ReleaseError("implementation provenance workflow_id is not development-delivery")
+    if str(metadata.get("workflow_object_type") or "") != "maintenance_implementation":
+        raise ReleaseError("implementation provenance Issue is not a maintenance_implementation")
+    if str(issue.get("status") or "") != "done":
+        raise ReleaseError("implementation provenance Issue must be done")
+    reviewer_id = control_agent_identities(cli)["maintenance_reviewer_id"]
+    if str(metadata.get("maintenance_reviewer_id") or reviewer_id) != reviewer_id:
+        raise ReleaseError("implementation provenance reviewer identity differs from the managed Reviewer")
+    required = {
+        key: str(metadata.get(key) or "")
+        for key in [
+            "maintenance_change_id",
+            "plan_revision",
+            "reviewed_commit_sha",
+            "review_comment_id",
+            "github_pr_number",
+            "github_merge_commit_sha",
+        ]
+    }
+    missing = [key for key, value in required.items() if not value]
+    if missing:
+        raise ReleaseError(f"implementation provenance is missing fields: {missing}")
+    try:
+        pr_number = int(required["github_pr_number"])
+    except ValueError as exc:
+        raise ReleaseError("implementation provenance github_pr_number is invalid") from exc
+    if planned is not None:
+        issue_refs = {
+            str(issue_id),
+            str(issue.get("id") or ""),
+            str(issue.get("identifier") or ""),
+        }
+        if str(planned.get("issue_id") or "") not in issue_refs:
+            raise ReleaseError(
+                "planned implementation provenance does not match its Multica Issue"
+            )
+        if int(planned.get("github_pr_number") or 0) != pr_number:
+            raise ReleaseError(
+                "planned implementation provenance PR differs from Multica metadata"
+            )
+        pr = {
+            "number": pr_number,
+            "state": "MERGED",
+            "baseRefName": "main",
+            "headRefOid": str(planned.get("reviewed_commit_sha") or ""),
+            "mergeCommit": {
+                "oid": str(planned.get("github_merge_commit_sha") or "")
+            },
+            "mergedAt": str(planned.get("github_merged_at") or ""),
+        }
+    else:
+        pr = merged_pr_by_number(root, pr_number)
+    merge_sha = str((pr.get("mergeCommit") or {}).get("oid") or "")
+    if required["reviewed_commit_sha"] != str(pr.get("headRefOid") or ""):
+        raise ReleaseError("implementation provenance Review is stale for its merged PR")
+    if required["github_merge_commit_sha"] != merge_sha:
+        raise ReleaseError("implementation provenance merge commit differs from its merged PR")
+    comments = as_list(
+        cli.json(
+            ["issue", "comment", "list", issue_id, "--full", "--output", "json"]
+        ),
+        "comments",
+    )
+    matches = [
+        item
+        for item in comments
+        if str(item.get("id") or "") == required["review_comment_id"]
+    ]
+    if len(matches) != 1:
+        raise ReleaseError("implementation provenance Review comment is missing or ambiguous")
+    comment = matches[0]
+    content = str(comment.get("content") or "")
+    first_verdict = next(
+        (line.strip() for line in content.splitlines() if line.strip()), ""
+    )
+    if (
+        comment.get("author_type") != "agent"
+        or str(comment.get("author_id") or "") != reviewer_id
+        or first_verdict != "APPROVED"
+    ):
+        raise ReleaseError("implementation provenance Review was not approved by the managed Reviewer")
+    if re.findall(r"(?m)^\s*plan_revision=([^\s]+)\s*$", content) != [
+        required["plan_revision"]
+    ]:
+        raise ReleaseError("implementation provenance Review does not bind its Plan revision")
+    if re.findall(r"(?m)^\s*reviewed_commit_sha=([^\s]+)\s*$", content) != [
+        required["reviewed_commit_sha"]
+    ]:
+        raise ReleaseError("implementation provenance Review does not bind its commit SHA")
+    review_created_at = str(comment.get("created_at") or comment.get("createdAt") or "")
+    if parse_iso_datetime(review_created_at, "Implementation Review comment") >= parse_iso_datetime(
+        str(pr.get("mergedAt") or ""), "Implementation merged PR"
+    ):
+        raise ReleaseError("implementation provenance Review must predate its PR merge")
+    return {
+        "issue_id": str(issue.get("identifier") or issue_id),
+        "maintenance_change_id": required["maintenance_change_id"],
+        "plan_revision": required["plan_revision"],
+        "review_comment_id": required["review_comment_id"],
+        "reviewed_commit_sha": required["reviewed_commit_sha"],
+        "github_pr_number": pr_number,
+        "github_merge_commit_sha": merge_sha,
+        "github_merged_at": str(pr.get("mergedAt") or ""),
+    }
+
+
+def implementation_provenance(
+    root: Path,
+    cli: MulticaCLI,
+    issue_ids: list[str],
+    source_commit: str,
+    version: str,
+    planned: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    normalized_ids = [str(item) for item in issue_ids if str(item)]
+    if len(normalized_ids) != len(set(normalized_ids)):
+        raise ReleaseError("implementation provenance Issue IDs contain duplicates")
+    planned_by_issue = {
+        str(item.get("issue_id") or ""): item for item in planned or []
+    }
+    if planned is not None and set(planned_by_issue) != set(normalized_ids):
+        raise ReleaseError(
+            "planned implementation provenance Issue IDs differ from the release Plan"
+        )
+    evidence = sorted(
+        [
+            maintenance_implementation_evidence(
+                root, cli, item, planned_by_issue.get(item)
+            )
+            for item in normalized_ids
+        ],
+        key=lambda item: (item["github_pr_number"], item["issue_id"]),
+    )
+    if version == "1.1.0-rc.4":
+        if len(evidence) != 2:
+            raise ReleaseError("v1.1.0-rc.4 requires exactly two Implementation provenance Issues")
+        source_matches = [
+            item for item in evidence if item["github_merge_commit_sha"] == source_commit
+        ]
+        if len(source_matches) != 1:
+            raise ReleaseError("v1.1.0-rc.4 provenance must bind the final release PR")
+        prior = next(item for item in evidence if item not in source_matches)
+        reachable = run(
+            [
+                "git",
+                "merge-base",
+                "--is-ancestor",
+                prior["github_merge_commit_sha"],
+                source_commit,
+            ],
+            root,
+            check=False,
+        )
+        if reachable.returncode != 0:
+            raise ReleaseError("v1.1.0-rc.4 prior Implementation PR is not in release history")
+    return evidence
+
+
 def bootstrap_evidence(
     root: Path, version: str, bootstrap_plan: str, pr: dict[str, Any]
 ) -> dict[str, Any]:
@@ -702,6 +899,30 @@ def gh_json(root: Path, args: list[str]) -> Any:
         raise ReleaseError(f"gh returned invalid JSON for {' '.join(args[:3])}") from exc
 
 
+def gh_api_json(
+    root: Path, method: str, endpoint: str, payload: dict[str, Any]
+) -> Any:
+    result = subprocess.run(
+        ["gh", "api", "--method", method, endpoint, "--input", "-"],
+        cwd=root,
+        input=canonical(payload),
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise ReleaseError(
+            result.stderr.strip()
+            or result.stdout.strip()
+            or f"GitHub API {method} {endpoint} failed"
+        )
+    try:
+        return json.loads(result.stdout) if result.stdout.strip() else {}
+    except json.JSONDecodeError as exc:
+        raise ReleaseError(f"GitHub API returned invalid JSON for {method} {endpoint}") from exc
+
+
 def release_control(root: Path) -> dict[str, Any]:
     path = root / RELEASE_CONTROL_PATH
     try:
@@ -709,29 +930,156 @@ def release_control(root: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError) as exc:
         raise ReleaseError(f"release control is unreadable: {path}") from exc
     required = {
-        "schema_version": 1,
+        "schema_version": 2,
         "repository": None,
         "required_visibility": "public",
         "environment": None,
         "deployment_branch": None,
-        "operator_login": "github-actions[bot]",
+        "operator_type": "github_app",
+        "dispatcher_app_slug": None,
+        "publisher_app_slug": None,
+        "publisher_app_id_variable": None,
+        "publisher_private_key_secret": None,
         "tag_ruleset": None,
+        "administrator_evidence_path": None,
     }
     missing = [key for key, value in required.items() if key not in control or not control.get(key)]
     if missing:
         raise ReleaseError(f"release control is missing fields: {missing}")
-    if control.get("schema_version") != 1:
+    if control.get("schema_version") != 2:
         raise ReleaseError("unsupported release control schema_version")
-    if control.get("operator_login") != required["operator_login"]:
-        raise ReleaseError("release operator must be github-actions[bot]")
+    if control.get("operator_type") != required["operator_type"]:
+        raise ReleaseError("release operator must be a dedicated GitHub App")
     if control.get("required_visibility") != required["required_visibility"]:
         raise ReleaseError("release repository visibility must be public")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", str(control["repository"])):
         raise ReleaseError("release control repository is invalid")
-    for key in ["environment", "deployment_branch", "tag_ruleset"]:
+    for key in [
+        "environment",
+        "deployment_branch",
+        "tag_ruleset",
+        "dispatcher_app_slug",
+        "publisher_app_slug",
+        "publisher_app_id_variable",
+        "publisher_private_key_secret",
+    ]:
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", str(control[key])):
             raise ReleaseError(f"release control {key} is invalid")
+    evidence_path = Path(str(control["administrator_evidence_path"]))
+    if evidence_path.is_absolute() or ".." in evidence_path.parts:
+        raise ReleaseError("release control administrator evidence path must be repository-relative")
     return control
+
+
+def reviewed_app_installation(
+    control: dict[str, Any],
+    evidence: dict[str, Any],
+    *,
+    evidence_key: str,
+    control_slug_key: str,
+    expected_permissions: dict[str, str],
+    label: str,
+) -> dict[str, Any]:
+    app = evidence.get(evidence_key) or {}
+    if str(app.get("slug") or "") != str(control[control_slug_key]):
+        raise ReleaseError(
+            f"release-control administrator evidence {label} App slug differs"
+        )
+    if int(app.get("id") or 0) <= 0:
+        raise ReleaseError(
+            f"release-control administrator evidence {label} App ID is invalid"
+        )
+    if int(app.get("installation_id") or 0) <= 0:
+        raise ReleaseError(
+            f"release-control administrator evidence {label} installation ID is invalid"
+        )
+    expected_owner = str(control["repository"]).split("/", 1)[0].lower()
+    if str(app.get("account_login") or "").lower() != expected_owner:
+        raise ReleaseError(
+            f"release-control administrator evidence {label} account differs"
+        )
+    if app.get("repository_selection") != "selected":
+        raise ReleaseError(f"{label} App installation must use selected repositories")
+    repositories = sorted(str(item) for item in app.get("repositories") or [])
+    if repositories != [str(control["repository"])]:
+        raise ReleaseError(
+            f"{label} App installation must be limited to the workflow repository"
+        )
+    permissions = dict(sorted((app.get("permissions") or {}).items()))
+    if permissions != dict(sorted(expected_permissions.items())):
+        raise ReleaseError(
+            f"{label} App permissions differ from the least-privilege contract"
+        )
+    return app
+
+
+def app_installation_snapshot(app: dict[str, Any]) -> dict[str, Any]:
+    snapshot = {
+        "app_id": int(app.get("id") or app.get("app_id") or 0),
+        "app_slug": str(app.get("slug") or app.get("app_slug") or ""),
+        "installation_id": int(app.get("installation_id") or 0),
+        "account_login": str(app.get("account_login") or ""),
+        "repository_selection": str(app.get("repository_selection") or ""),
+        "repositories": sorted(str(item) for item in app.get("repositories") or []),
+        "permissions": dict(sorted((app.get("permissions") or {}).items())),
+    }
+    snapshot["sha256"] = digest(snapshot)
+    return snapshot
+
+
+def github_app_actor_login(slug: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9-]+", slug):
+        raise ReleaseError("GitHub App slug is invalid for actor binding")
+    return f"{slug.lower()}[bot]"
+
+
+def load_release_control_evidence(root: Path, control: dict[str, Any]) -> dict[str, Any]:
+    path = root / str(control["administrator_evidence_path"])
+    try:
+        evidence = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ReleaseError("reviewed release-control administrator evidence is unreadable") from exc
+    if not isinstance(evidence, dict) or evidence.get("schema_version") != 1:
+        raise ReleaseError("release-control administrator evidence schema is invalid")
+    if evidence.get("status") != "reviewed":
+        raise ReleaseError("release-control administrator evidence is still pending human administration")
+    if str(evidence.get("repository") or "") != str(control["repository"]):
+        raise ReleaseError("release-control administrator evidence repository differs from control")
+    if not str(evidence.get("multica_evidence_id") or ""):
+        raise ReleaseError("release-control administrator evidence has no Multica evidence ID")
+    reviewed_app_installation(
+        control,
+        evidence,
+        evidence_key="dispatcher_app",
+        control_slug_key="dispatcher_app_slug",
+        expected_permissions={
+            "actions": "write",
+            "contents": "read",
+            "metadata": "read",
+        },
+        label="Dispatcher",
+    )
+    publisher = reviewed_app_installation(
+        control,
+        evidence,
+        evidence_key="publisher_app",
+        control_slug_key="publisher_app_slug",
+        expected_permissions={"contents": "write", "metadata": "read"},
+        label="Publisher",
+    )
+    ruleset = evidence.get("tag_ruleset") or {}
+    bypass = ruleset.get("bypass_actors") or []
+    expected_bypass = [
+        {
+            "actor_type": "Integration",
+            "actor_id": int(publisher["id"]),
+            "bypass_mode": "always",
+        }
+    ]
+    if bypass != expected_bypass:
+        raise ReleaseError("release-control administrator evidence must bind the Publisher App as sole bypass")
+    evidence["sha256"] = digest({key: value for key, value in evidence.items() if key != "sha256"})
+    return evidence
 
 
 def repository_control_state(root: Path, control: dict[str, Any]) -> dict[str, Any]:
@@ -769,8 +1117,11 @@ def repository_control_state(root: Path, control: dict[str, Any]) -> dict[str, A
     }
 
 
-def verify_release_tag_ruleset(root: Path, control: dict[str, Any]) -> dict[str, Any]:
+def verify_release_tag_ruleset(
+    root: Path, control: dict[str, Any], evidence: dict[str, Any]
+) -> dict[str, Any]:
     repository = str(control["repository"])
+    expected = evidence.get("tag_ruleset") or {}
     try:
         rulesets = gh_json(root, ["api", f"repos/{repository}/rulesets"])
     except ReleaseError as exc:
@@ -786,6 +1137,8 @@ def verify_release_tag_ruleset(root: Path, control: dict[str, Any]) -> dict[str,
             f"expected one GitHub tag ruleset {control['tag_ruleset']}, found {len(matches)}"
         )
     ruleset_id = str(matches[0].get("id") or "")
+    if ruleset_id != str(expected.get("id") or ""):
+        raise ReleaseError("GitHub release tag Ruleset ID differs from administrator evidence")
     detail = gh_json(root, ["api", f"repos/{repository}/rulesets/{ruleset_id}"])
     if not isinstance(detail, dict):
         raise ReleaseError("GitHub release tag ruleset response is invalid")
@@ -807,24 +1160,17 @@ def verify_release_tag_ruleset(root: Path, control: dict[str, Any]) -> dict[str,
         raise ReleaseError(
             f"GitHub release tag ruleset is missing restrictions: {sorted(required_rules - rule_types)}"
         )
-    app = gh_json(root, ["api", "apps/github-actions"])
-    app_id = int((app or {}).get("id") or 0) if isinstance(app, dict) else 0
-    bypass = [
-        item
-        for item in detail.get("bypass_actors") or []
-        if isinstance(item, dict)
-    ]
-    allowed = [
-        item
-        for item in bypass
-        if item.get("actor_type") == "Integration"
-        and int(item.get("actor_id") or 0) == app_id
-        and item.get("bypass_mode") == "always"
-    ]
-    if not app_id or len(allowed) != 1 or len(bypass) != 1:
-        raise ReleaseError(
-            "GitHub release tag ruleset must grant the sole always-bypass to the GitHub Actions App"
-        )
+    publisher = evidence.get("publisher_app") or {}
+    app = gh_json(root, ["api", f"apps/{publisher['slug']}"])
+    if (
+        not isinstance(app, dict)
+        or int(app.get("id") or 0) != int(publisher["id"])
+        or str(app.get("slug") or "") != str(publisher["slug"])
+    ):
+        raise ReleaseError("GitHub Publisher App public identity differs from administrator evidence")
+    observed_bypass = [item for item in detail.get("bypass_actors") or [] if isinstance(item, dict)]
+    if observed_bypass and observed_bypass != expected.get("bypass_actors"):
+        raise ReleaseError("GitHub release tag Ruleset bypass actors differ from administrator evidence")
     normalized_rules = []
     for item in detail.get("rules") or []:
         if not isinstance(item, dict):
@@ -836,162 +1182,89 @@ def verify_release_tag_ruleset(root: Path, control: dict[str, Any]) -> dict[str,
     snapshot = {
         "name": str(control["tag_ruleset"]),
         "id": ruleset_id,
+        "source": str(detail.get("source") or expected.get("source") or ""),
         "target": str(detail.get("target") or ""),
         "enforcement": str(detail.get("enforcement") or ""),
-        "github_actions_app_id": app_id,
+        "updated_at": str(detail.get("updated_at") or ""),
+        "publisher_app_id": int(publisher["id"]),
+        "publisher_app_slug": str(publisher["slug"]),
         "rules": sorted(normalized_rules, key=canonical),
         "include": sorted(ref_name.get("include") or []),
         "exclude": sorted(ref_name.get("exclude") or []),
-        "bypass": [
-            {
-                "actor_type": "Integration",
-                "actor_id": app_id,
-                "bypass_mode": "always",
-            }
-        ],
+        "bypass": expected.get("bypass_actors"),
+        "administrator_evidence_sha256": evidence["sha256"],
+        "administrator_evidence_id": str(evidence["multica_evidence_id"]),
     }
+    expected_public = {
+        "id": str(expected.get("id") or ""),
+        "name": str(expected.get("name") or ""),
+        "source": str(expected.get("source") or ""),
+        "target": str(expected.get("target") or ""),
+        "enforcement": str(expected.get("enforcement") or ""),
+        "updated_at": str(expected.get("updated_at") or ""),
+        "rules": sorted(
+            [
+                {
+                    **{"type": str(item.get("type") or "")},
+                    **({"parameters": item["parameters"]} if "parameters" in item else {}),
+                }
+                for item in expected.get("rules") or []
+                if isinstance(item, dict)
+            ],
+            key=canonical,
+        ),
+        "include": sorted(((expected.get("conditions") or {}).get("ref_name") or {}).get("include") or []),
+        "exclude": sorted(((expected.get("conditions") or {}).get("ref_name") or {}).get("exclude") or []),
+    }
+    observed_public = {key: snapshot[key] for key in expected_public}
+    if observed_public != expected_public:
+        raise ReleaseError("GitHub release tag Ruleset public readback differs from administrator evidence")
     snapshot["sha256"] = digest(snapshot)
     return snapshot
 
 
-def visible_github_logins(root: Path) -> set[str]:
-    value = gh_json(
-        root,
-        ["auth", "status", "--hostname", "github.com", "--json", "hosts"],
-    )
-    hosts = value.get("hosts") if isinstance(value, dict) else None
-    accounts = hosts.get("github.com") if isinstance(hosts, dict) else None
-    if not isinstance(accounts, list):
-        raise ReleaseError("gh auth status did not return known github.com accounts")
-    return {
-        str(item.get("login") or "").lower()
-        for item in accounts
-        if isinstance(item, dict) and item.get("login")
-    }
-
-
-def current_github_login(root: Path) -> str:
-    try:
-        value = gh_json(root, ["api", "user"])
-    except ReleaseError:
-        return ""
-    return str((value or {}).get("login") or "").lower() if isinstance(value, dict) else ""
-
-
-def github_ssh_login(root: Path) -> str:
-    result = run(
-        [
-            "ssh",
-            "-T",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=5",
-            "git@github.com",
-        ],
-        root,
-        check=False,
-    )
-    output = "\n".join([result.stdout or "", result.stderr or ""])
-    match = re.search(r"Hi ([^!\s]+)! You've successfully authenticated", output)
-    return match.group(1).lower() if match else ""
-
-
-def github_https_credential_login(root: Path) -> str:
-    environment = os.environ.copy()
-    environment["GIT_TERMINAL_PROMPT"] = "0"
-    environment["GCM_INTERACTIVE"] = "Never"
-    try:
-        result = subprocess.run(
-            ["git", "-c", "credential.interactive=never", "credential", "fill"],
-            cwd=root,
-            input="protocol=https\nhost=github.com\n\n",
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            capture_output=True,
-            env=environment,
-            timeout=5,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise ReleaseError(
-            "unable to verify the GitHub HTTPS credential-helper boundary"
-        ) from exc
-    if result.returncode != 0:
-        return ""
-    fields = {}
-    for line in result.stdout.splitlines():
-        key, separator, value = line.partition("=")
-        if separator:
-            fields[key] = value
-    if fields.get("host", "").lower() != "github.com" or not fields.get("password"):
-        return ""
-    return str(fields.get("username") or "<unknown>").lower()
-
-
-def runtime_credential_environment() -> list[str]:
-    return sorted(
-        name
-        for name in [
-            "GH_TOKEN",
-            "GITHUB_TOKEN",
-            "GH_ENTERPRISE_TOKEN",
-            "GITHUB_ENTERPRISE_TOKEN",
-            "GH_CONFIG_DIR",
-            "GIT_SSH_COMMAND",
-        ]
-        if os.environ.get(name)
-    )
-
-
-def verify_runtime_credential_boundary(
+def verify_app_installation(
     root: Path,
-    repository: dict[str, Any],
-    reviewers: set[str],
+    *,
+    expected: dict[str, Any],
+    label: str,
 ) -> dict[str, Any]:
-    owner = str(repository["owner_login"])
-    configured_logins = visible_github_logins(root)
-    active_login = current_github_login(root)
-    forbidden = {owner, *reviewers}
-    exposed = sorted((configured_logins | ({active_login} if active_login else set())) & forbidden)
-    if exposed:
+    if not os.environ.get("GH_TOKEN"):
         raise ReleaseError(
-            f"GitHub owner/admin or Environment reviewer credentials are visible to this runtime: {exposed}"
+            f"{label} App token is missing; provide it explicitly through GH_TOKEN"
         )
-    switchable_logins = sorted(configured_logins - ({active_login} if active_login else set()))
-    if switchable_logins:
-        raise ReleaseError(
-            "inactive GitHub accounts are available to gh auth switch and cannot be "
-            f"proven bounded without activation: {switchable_logins}"
-        )
-    permissions = repository.get("permissions") or {}
-    privileged = sorted(
-        key for key in ["admin", "maintain", "push"] if permissions.get(key)
+    installation = gh_json(root, ["api", "installation"])
+    repositories_value = gh_json(
+        root, ["api", "installation/repositories?per_page=100"]
     )
-    if privileged:
-        raise ReleaseError(
-            "GitHub runtime principal is not Contents-read-only; privileged repository "
-            f"permissions are present: {privileged}"
-        )
-    ssh_login = github_ssh_login(root)
-    if ssh_login:
-        raise ReleaseError(
-            f"GitHub SSH credentials are available to this runtime as {ssh_login}; use a bounded HTTPS/App credential"
-        )
-    https_login = github_https_credential_login(root)
-    if https_login:
-        raise ReleaseError(
-            "GitHub HTTPS credentials are available through a Git credential helper "
-            f"as {https_login}; remove reusable Git credentials from the release runtime"
-        )
-    return {
-        "configured_logins": sorted(configured_logins),
-        "active_login": active_login,
-        "repository_permissions": permissions,
-        "credential_environment": runtime_credential_environment(),
-        "github_ssh_login": "",
-        "github_https_credential_login": "",
+    if not isinstance(installation, dict) or not isinstance(repositories_value, dict):
+        raise ReleaseError(f"{label} App installation readback is invalid")
+    repositories = sorted(
+        str(item.get("full_name") or "")
+        for item in repositories_value.get("repositories") or []
+        if isinstance(item, dict) and item.get("full_name")
+    )
+    observed = {
+        "app_id": int(installation.get("app_id") or 0),
+        "app_slug": str(installation.get("app_slug") or ""),
+        "installation_id": int(installation.get("id") or 0),
+        "account_login": str(((installation.get("account") or {}).get("login")) or ""),
+        "repository_selection": str(installation.get("repository_selection") or ""),
+        "repositories": repositories,
+        "permissions": dict(sorted((installation.get("permissions") or {}).items())),
     }
+    required = app_installation_snapshot(expected)
+    required.pop("sha256")
+    if observed != required:
+        raise ReleaseError(
+            f"{label} App token does not match reviewed installation evidence"
+        )
+    if int(repositories_value.get("total_count") or len(repositories)) != len(
+        repositories
+    ):
+        raise ReleaseError(f"{label} App repository readback is incomplete")
+    observed["sha256"] = digest(observed)
+    return observed
 
 
 def environment_protection_snapshot(
@@ -1064,9 +1337,25 @@ def environment_admin_bypass_evidence(detail: dict[str, Any]) -> dict[str, Any]:
 
 
 def verify_release_environment(
-    root: Path, *, reject_runtime_credentials: bool = True
+    root: Path,
+    *,
+    verify_dispatcher_token: bool = True,
+    dispatcher_installation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     control = release_control(root)
+    evidence = load_release_control_evidence(root, control)
+    dispatcher_evidence = evidence.get("dispatcher_app") or {}
+    expected_dispatcher = app_installation_snapshot(dispatcher_evidence)
+    if dispatcher_installation is not None:
+        if dispatcher_installation != expected_dispatcher:
+            raise ReleaseError(
+                "Dispatcher installation differs from reviewed release-control evidence"
+            )
+        dispatcher = dispatcher_installation
+    elif verify_dispatcher_token:
+        dispatcher = verify_dispatcher_installation(root, control, evidence)
+    else:
+        dispatcher = expected_dispatcher
     repository = str(control["repository"])
     repository_state = repository_control_state(root, control)
     environment = str(control["environment"])
@@ -1124,12 +1413,15 @@ def verify_release_environment(
     if not environment_snapshot["id"]:
         raise ReleaseError("GitHub release Environment identity is incomplete")
     environment_snapshot["sha256"] = digest(environment_snapshot)
-    tag_ruleset = verify_release_tag_ruleset(root, control)
-    runtime_boundary = (
-        verify_runtime_credential_boundary(root, repository_state, reviewers)
-        if reject_runtime_credentials
-        else {"checked": False}
-    )
+    evidence_environment = evidence.get("environment") or {}
+    if (
+        int(evidence_environment.get("id") or 0) != environment_snapshot["id"]
+        or str(evidence_environment.get("name") or "") != environment
+        or str(evidence_environment.get("sha256") or "") != environment_snapshot["sha256"]
+    ):
+        raise ReleaseError("GitHub release Environment differs from administrator evidence")
+    tag_ruleset = verify_release_tag_ruleset(root, control, evidence)
+    publisher = evidence.get("publisher_app") or {}
     return {
         "repository": repository,
         "repository_owner": repository_state["owner_login"],
@@ -1137,13 +1429,33 @@ def verify_release_environment(
         "repository_default_branch": repository_state["default_branch"],
         "environment": environment,
         "deployment_branch": expected_branch,
-        "operator_login": str(control["operator_login"]),
+        "operator_type": str(control["operator_type"]),
+        "dispatcher_app_id": int(dispatcher["app_id"]),
+        "dispatcher_app_slug": str(dispatcher["app_slug"]),
+        "dispatcher_actor_login": github_app_actor_login(
+            str(dispatcher["app_slug"])
+        ),
+        "dispatcher_installation_id": int(dispatcher["installation_id"]),
+        "dispatcher_account_login": str(dispatcher["account_login"]),
+        "dispatcher_repository_selection": str(dispatcher["repository_selection"]),
+        "dispatcher_repositories": sorted(str(item) for item in dispatcher["repositories"]),
+        "dispatcher_permissions": dict(sorted(dispatcher["permissions"].items())),
+        "dispatcher_installation_sha256": str(dispatcher["sha256"]),
+        "publisher_app_id": int(publisher.get("id") or 0),
+        "publisher_app_slug": str(publisher.get("slug") or ""),
+        "publisher_installation_id": int(publisher.get("installation_id") or 0),
+        "publisher_account_login": str(publisher.get("account_login") or ""),
+        "publisher_repository_selection": str(publisher.get("repository_selection") or ""),
+        "publisher_repositories": sorted(str(item) for item in publisher.get("repositories") or []),
+        "publisher_permissions": dict(sorted((publisher.get("permissions") or {}).items())),
+        "administrator_evidence_sha256": str(evidence["sha256"]),
+        "administrator_evidence_id": str(evidence["multica_evidence_id"]),
         "reviewers": sorted(reviewers),
         "prevent_self_review": prevent_self_review,
         "admin_bypass": admin_bypass,
         "environment_sha256": environment_snapshot["sha256"],
         "tag_ruleset": tag_ruleset,
-        "runtime_boundary": runtime_boundary,
+        "dispatcher_token_verified": verify_dispatcher_token,
     }
 
 
@@ -1158,12 +1470,58 @@ def release_boundary_snapshot(boundary: dict[str, Any]) -> dict[str, Any]:
         "environment_sha256": str(boundary["environment_sha256"]),
         "environment_admin_bypass": boundary["admin_bypass"],
         "deployment_branch": str(boundary["deployment_branch"]),
-        "operator_login": str(boundary["operator_login"]),
+        "operator_type": str(boundary["operator_type"]),
+        "dispatcher_app_id": int(boundary["dispatcher_app_id"]),
+        "dispatcher_app_slug": str(boundary["dispatcher_app_slug"]),
+        "dispatcher_actor_login": str(boundary["dispatcher_actor_login"]),
+        "dispatcher_installation_id": int(boundary["dispatcher_installation_id"]),
+        "dispatcher_account_login": str(boundary["dispatcher_account_login"]),
+        "dispatcher_repository_selection": str(boundary["dispatcher_repository_selection"]),
+        "dispatcher_repositories": sorted(str(item) for item in boundary["dispatcher_repositories"]),
+        "dispatcher_permissions": dict(sorted(boundary["dispatcher_permissions"].items())),
+        "dispatcher_installation_sha256": str(boundary["dispatcher_installation_sha256"]),
+        "publisher_app_id": int(boundary["publisher_app_id"]),
+        "publisher_app_slug": str(boundary["publisher_app_slug"]),
+        "publisher_installation_id": int(boundary["publisher_installation_id"]),
+        "publisher_account_login": str(boundary["publisher_account_login"]),
+        "publisher_repository_selection": str(boundary["publisher_repository_selection"]),
+        "publisher_repositories": sorted(str(item) for item in boundary["publisher_repositories"]),
+        "publisher_permissions": dict(sorted(boundary["publisher_permissions"].items())),
+        "administrator_evidence_sha256": str(boundary["administrator_evidence_sha256"]),
+        "administrator_evidence_id": str(boundary["administrator_evidence_id"]),
         "tag_ruleset_name": str(ruleset.get("name") or ""),
         "tag_ruleset_id": str(ruleset.get("id") or ""),
         "tag_ruleset_sha256": str(ruleset.get("sha256") or ""),
-        "github_actions_app_id": int(ruleset.get("github_actions_app_id") or 0),
+        "tag_ruleset_updated_at": str(ruleset.get("updated_at") or ""),
     }
+
+
+def verify_dispatcher_installation(
+    root: Path,
+    control: dict[str, Any] | None = None,
+    evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    control = control or release_control(root)
+    evidence = evidence or load_release_control_evidence(root, control)
+    return verify_app_installation(
+        root,
+        expected=evidence.get("dispatcher_app") or {},
+        label="Dispatcher",
+    )
+
+
+def verify_publisher_installation(
+    root: Path,
+    control: dict[str, Any] | None = None,
+    evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    control = control or release_control(root)
+    evidence = evidence or load_release_control_evidence(root, control)
+    return verify_app_installation(
+        root,
+        expected=evidence.get("publisher_app") or {},
+        label="Publisher",
+    )
 
 
 def approval_environment_names(value: dict[str, Any]) -> set[str]:
@@ -1180,11 +1538,11 @@ def verify_environment_approval(
     *,
     expected_actor: str | None = None,
     verify_configuration: bool = True,
-    reject_runtime_credentials: bool = False,
+    verify_dispatcher_token: bool = False,
 ) -> dict[str, str]:
     if verify_configuration:
         boundary = verify_release_environment(
-            root, reject_runtime_credentials=reject_runtime_credentials
+            root, verify_dispatcher_token=verify_dispatcher_token
         )
         reviewers = set(boundary["reviewers"])
     else:
@@ -1192,7 +1550,6 @@ def verify_environment_approval(
         boundary = {
             "repository": str(control["repository"]),
             "environment": str(control["environment"]),
-            "operator_login": str(control["operator_login"]),
         }
         reviewers = set()
     value = gh_json(
@@ -1210,7 +1567,7 @@ def verify_environment_approval(
         if boundary["environment"] not in approval_environment_names(item):
             continue
         actor = str(((item.get("user") or {}).get("login")) or "").lower()
-        if not actor or actor == str(boundary["operator_login"]).lower():
+        if not actor:
             continue
         if reviewers and actor not in reviewers:
             continue
@@ -1236,9 +1593,110 @@ def verify_environment_approval(
         "run_id": str(run_id),
         "environment": str(boundary["environment"]),
         "actor_login": actor,
-        "operator_login": str(boundary["operator_login"]),
         "approval_sha256": digest(approval_evidence),
     }
+
+
+def publish_gate_record(
+    request: dict[str, Any],
+    boundary: dict[str, Any],
+    approval: dict[str, str],
+) -> dict[str, Any]:
+    snapshot = release_boundary_snapshot(boundary)
+    if snapshot != request.get("release_boundary"):
+        raise ReleaseError("protected release control changed after request dispatch")
+    record = {
+        "schema_version": 1,
+        "created_at": utc_now(),
+        "repository": snapshot["repository"],
+        "workflow_run_id": str(approval["run_id"]),
+        "environment": str(approval["environment"]),
+        "release_request_digest": str(request["release_request_digest"]),
+        "release_plan_digest": str(request["release_plan_digest"]),
+        "source_commit": str(request["source_commit"]),
+        "tag": str(request["tag"]),
+        "release_boundary_sha256": digest(snapshot),
+        "environment_approval": approval,
+        "dispatcher": {
+            "app_id": int(snapshot["dispatcher_app_id"]),
+            "app_slug": str(snapshot["dispatcher_app_slug"]),
+            "actor_login": str(snapshot["dispatcher_actor_login"]),
+            "installation_id": int(snapshot["dispatcher_installation_id"]),
+            "installation_sha256": str(snapshot["dispatcher_installation_sha256"]),
+        },
+        "publisher": {
+            "app_id": int(snapshot["publisher_app_id"]),
+            "app_slug": str(snapshot["publisher_app_slug"]),
+            "installation_id": int(snapshot["publisher_installation_id"]),
+        },
+    }
+    record["publish_gate_digest"] = digest(record)
+    return record
+
+
+def load_publish_gate(path: str | Path) -> dict[str, Any]:
+    try:
+        value = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ReleaseError("publish gate record is unreadable") from exc
+    if not isinstance(value, dict):
+        raise ReleaseError("publish gate record must be an object")
+    return value
+
+
+def verify_publish_gate(
+    gate: dict[str, Any],
+    request: dict[str, Any],
+    approval: str,
+    *,
+    workflow_run_id: str,
+    environment: str,
+) -> str:
+    expected = str(gate.get("publish_gate_digest") or "")
+    payload = {key: value for key, value in gate.items() if key != "publish_gate_digest"}
+    if not expected or digest(payload) != expected:
+        raise ReleaseError("publish gate digest is invalid or the gate was modified")
+    if approval not in {expected, expected[:12]}:
+        raise ReleaseError("publish gate approval digest does not match")
+    if gate.get("schema_version") != 1:
+        raise ReleaseError("unsupported publish gate schema_version")
+    expected_values = {
+        "repository": str((request.get("release_boundary") or {}).get("repository") or ""),
+        "workflow_run_id": str(workflow_run_id),
+        "environment": str(environment),
+        "release_request_digest": str(request.get("release_request_digest") or ""),
+        "release_plan_digest": str(request.get("release_plan_digest") or ""),
+        "source_commit": str(request.get("source_commit") or ""),
+        "tag": str(request.get("tag") or ""),
+        "release_boundary_sha256": digest(request.get("release_boundary") or {}),
+    }
+    changed = {
+        key: {"expected": value, "observed": gate.get(key)}
+        for key, value in expected_values.items()
+        if str(gate.get(key) or "") != value
+    }
+    if changed:
+        raise ReleaseError(f"publish gate does not match the release Request: {changed}")
+    boundary = request.get("release_boundary") or {}
+    expected_dispatcher = {
+        "app_id": int(boundary.get("dispatcher_app_id") or 0),
+        "app_slug": str(boundary.get("dispatcher_app_slug") or ""),
+        "actor_login": str(boundary.get("dispatcher_actor_login") or ""),
+        "installation_id": int(boundary.get("dispatcher_installation_id") or 0),
+        "installation_sha256": str(
+            boundary.get("dispatcher_installation_sha256") or ""
+        ),
+    }
+    if gate.get("dispatcher") != expected_dispatcher:
+        raise ReleaseError("publish gate Dispatcher identity differs from the release Request")
+    expected_publisher = {
+        "app_id": int(boundary.get("publisher_app_id") or 0),
+        "app_slug": str(boundary.get("publisher_app_slug") or ""),
+        "installation_id": int(boundary.get("publisher_installation_id") or 0),
+    }
+    if gate.get("publisher") != expected_publisher:
+        raise ReleaseError("publish gate Publisher identity differs from the release Request")
+    return expected
 
 
 def release_request(
@@ -1267,6 +1725,10 @@ def release_request(
         "expected_assets": plan["expected_assets"],
         "release_plan_digest": plan["release_plan_digest"],
         "maintenance_provenance": provenance,
+        "implementation_provenance": plan.get("implementation_provenance") or [],
+        "implementation_provenance_sha256": digest(
+            plan.get("implementation_provenance") or []
+        ),
         "release_control": {
             key: control[key] for key in RELEASE_CONTROL_KEYS
         },
@@ -1281,6 +1743,7 @@ def verify_release_request(
     request: dict[str, Any],
     *,
     expected_source: str | None = None,
+    verify_state: bool = True,
 ) -> str:
     expected = str(request.get("release_request_digest") or "")
     payload = {key: value for key, value in request.items() if key != "release_request_digest"}
@@ -1305,17 +1768,48 @@ def verify_release_request(
         "environment_sha256",
         "environment_admin_bypass",
         "deployment_branch",
-        "operator_login",
+        "operator_type",
+        "dispatcher_app_id",
+        "dispatcher_app_slug",
+        "dispatcher_actor_login",
+        "dispatcher_installation_id",
+        "dispatcher_account_login",
+        "dispatcher_repository_selection",
+        "dispatcher_repositories",
+        "dispatcher_permissions",
+        "dispatcher_installation_sha256",
+        "publisher_app_id",
+        "publisher_app_slug",
+        "publisher_installation_id",
+        "publisher_account_login",
+        "publisher_repository_selection",
+        "publisher_repositories",
+        "publisher_permissions",
+        "administrator_evidence_sha256",
+        "administrator_evidence_id",
         "tag_ruleset_name",
         "tag_ruleset_id",
         "tag_ruleset_sha256",
-        "github_actions_app_id",
+        "tag_ruleset_updated_at",
     ]
     missing_boundary = [key for key in required_boundary if not boundary.get(key)]
     if missing_boundary:
         raise ReleaseError(
             f"release Request is missing protected boundary evidence: {missing_boundary}"
         )
+    trusted_dispatcher_actor = github_app_actor_login(
+        str(control["dispatcher_app_slug"])
+    )
+    if str(boundary["dispatcher_actor_login"]).lower() != trusted_dispatcher_actor:
+        raise ReleaseError(
+            "release Request Dispatcher actor differs from trusted release control"
+        )
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        observed_actor = str(os.environ.get("GITHUB_ACTOR") or "").lower()
+        if observed_actor != trusted_dispatcher_actor:
+            raise ReleaseError(
+                "release workflow was not dispatched by the reviewed Dispatcher App"
+            )
     provenance = request.get("maintenance_provenance") or {}
     required = [
         "maintenance_issue",
@@ -1327,7 +1821,17 @@ def verify_release_request(
     missing = [key for key in required if not provenance.get(key)]
     if missing:
         raise ReleaseError(f"release Request is missing Maintenance provenance: {missing}")
-    verify_current_state(root, request)
+    implementations = request.get("implementation_provenance") or []
+    if not isinstance(implementations, list):
+        raise ReleaseError("release Request implementation_provenance must be a list")
+    if str(request.get("implementation_provenance_sha256") or "") != digest(
+        implementations
+    ):
+        raise ReleaseError("release Request Implementation provenance digest is invalid")
+    if request.get("version") == "1.1.0-rc.4" and len(implementations) != 2:
+        raise ReleaseError("v1.1.0-rc.4 release Request must bind two Implementation Issues")
+    if verify_state:
+        verify_current_state(root, request)
     return expected
 
 
@@ -1553,10 +2057,15 @@ def build_plan(
     bootstrap_plan: str | None,
     maintenance_issue: str | None,
     multica: MulticaCLI | None = None,
+    implementation_issues: list[str] | None = None,
 ) -> dict[str, Any]:
     commit = git_head(root)
     dirty = git_dirty(root)
     origin_main_sha = verify_origin_main_reachability(root, commit)
+    if origin_main_sha != commit:
+        raise ReleaseError(
+            "release source commit must equal the current origin/main tip"
+        )
     checked_versions = verify_versions(root, version)
     changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
     if f"## {version}" not in changelog:
@@ -1572,6 +2081,15 @@ def build_plan(
             raise ReleaseError("Maintenance release planning requires a resolved Multica context")
         authorization = maintenance_evidence(
             root, multica, str(maintenance_issue), pr, version
+        )
+    implementation_records = []
+    if maintenance_issue:
+        implementation_records = implementation_provenance(
+            root,
+            multica,
+            implementation_issues or [],
+            commit,
+            version,
         )
     plan = {
         "schema_version": 1,
@@ -1601,11 +2119,14 @@ def build_plan(
                 f"multica-workflow-manager-v{version}.zip",
                 f"multica-workflow-observer-v{version}.zip",
                 f"multica-workflow-maintainer-v{version}.zip",
+                f"multica-workflow-console-v{version}.zip",
+                f"multica-workflow-secure-runtime-win-x64-v{version}.zip",
             ]
         ),
         "bootstrap_plan": bootstrap_plan,
         "maintenance_issue": maintenance_issue,
         "release_authorization": authorization,
+        "implementation_provenance": implementation_records,
     }
     plan["release_plan_digest"] = digest(plan)
     return plan
@@ -1631,24 +2152,31 @@ def verify_plan_file(plan: dict[str, Any], approval: str) -> str:
     return expected
 
 
-def verify_current_state(root: Path, plan: dict[str, Any]) -> None:
+def verify_current_state(
+    root: Path, plan: dict[str, Any], *, verify_merged_pr: bool = True
+) -> None:
     if git_dirty(root):
         raise ReleaseError("working tree is dirty")
     if git_head(root) != plan["source_commit"]:
         raise ReleaseError("Git HEAD changed after release planning")
     if tracked_source_hash(root) != plan["source_hash"]:
         raise ReleaseError("tracked source changed after release planning")
-    verify_origin_main_reachability(
+    origin_main_sha = verify_origin_main_reachability(
         root, plan["source_commit"], str(plan.get("origin_main_sha") or "")
     )
+    if origin_main_sha != plan["source_commit"]:
+        raise ReleaseError(
+            "release source commit is no longer the current origin/main tip"
+        )
     verify_versions(root, plan["version"])
-    pr = merged_pr_for_commit(root, plan["source_commit"])
-    if (
-        pr["number"] != plan["merged_pr"]["number"]
-        or pr["headRefOid"] != plan["merged_pr"]["head_sha"]
-        or pr.get("mergedAt") != plan["merged_pr"].get("merged_at")
-    ):
-        raise ReleaseError("merged PR provenance changed after release planning")
+    if verify_merged_pr:
+        pr = merged_pr_for_commit(root, plan["source_commit"])
+        if (
+            pr["number"] != plan["merged_pr"]["number"]
+            or pr["headRefOid"] != plan["merged_pr"]["head_sha"]
+            or pr.get("mergedAt") != plan["merged_pr"].get("merged_at")
+        ):
+            raise ReleaseError("merged PR provenance changed after release planning")
     verify_validation_record(root, plan["validation"], plan["source_commit"])
 
 
@@ -1692,6 +2220,18 @@ def verify_release_approval(
     )
     if current != authorization:
         raise ReleaseError("Maintenance Review evidence changed after release planning")
+    planned_implementations = plan.get("implementation_provenance") or []
+    if planned_implementations:
+        current_implementations = implementation_provenance(
+            root,
+            cli,
+            [str(item.get("issue_id") or "") for item in planned_implementations],
+            str(plan["source_commit"]),
+            str(plan.get("version") or ""),
+            planned_implementations,
+        )
+        if current_implementations != planned_implementations:
+            raise ReleaseError("Implementation provenance changed after release planning")
     comments = as_list(
         cli.json(
             ["issue", "comment", "list", str(authorization["issue_id"]), "--full", "--output", "json"]
@@ -1823,7 +2363,14 @@ def command_plan(args: argparse.Namespace, root: Path) -> int:
     cli = None
     if args.maintenance_issue:
         cli, _ = release_cli(args.multica_bin, args.profile, args.workspace)
-    plan = build_plan(root, args.version, args.bootstrap_plan, args.maintenance_issue, cli)
+    plan = build_plan(
+        root,
+        args.version,
+        args.bootstrap_plan,
+        args.maintenance_issue,
+        cli,
+        args.implementation_provenance,
+    )
     path = save_plan(root, plan)
     print(json.dumps(plan, ensure_ascii=False, indent=2))
     print(f"Release Plan file: {path}")
@@ -1838,7 +2385,8 @@ def command_approval_block(args: argparse.Namespace, root: Path) -> int:
     plan = json.loads(Path(args.plan).read_text(encoding="utf-8"))
     expected = str(plan.get("release_plan_digest") or "")
     verify_plan_file(plan, expected)
-    verify_current_state(root, plan)
+    dispatcher = verify_dispatcher_installation(root)
+    verify_current_state(root, plan, verify_merged_pr=False)
     authorization = plan.get("release_authorization") or {}
     if authorization.get("mode") == "maintenance":
         cli, _ = release_cli(
@@ -1849,7 +2397,9 @@ def command_approval_block(args: argparse.Namespace, root: Path) -> int:
         if cli.workspace_id != str(authorization.get("workspace_id") or ""):
             raise ReleaseError("Multica Workspace differs from the release Plan")
         release_approval = verify_release_approval(root, cli, plan)
-        boundary = verify_release_environment(root)
+        boundary = verify_release_environment(
+            root, dispatcher_installation=dispatcher
+        )
         request = release_request(root, plan, release_approval, boundary)
     elif authorization.get("mode") != "bootstrap":
         raise ReleaseError("release Plan has no recognized authorization mode")
@@ -1878,7 +2428,8 @@ def command_approval_block(args: argparse.Namespace, root: Path) -> int:
 def command_apply(args: argparse.Namespace, root: Path) -> int:
     plan = json.loads(Path(args.plan).read_text(encoding="utf-8"))
     expected = verify_plan_file(plan, args.approve)
-    verify_current_state(root, plan)
+    dispatcher = verify_dispatcher_installation(root)
+    verify_current_state(root, plan, verify_merged_pr=False)
     authorization = plan.get("release_authorization") or {}
     if authorization.get("mode") != "maintenance":
         raise ReleaseError("new releases require Maintenance authorization")
@@ -1890,7 +2441,9 @@ def command_apply(args: argparse.Namespace, root: Path) -> int:
     if cli.workspace_id != str(authorization.get("workspace_id") or ""):
         raise ReleaseError("Multica Workspace differs from the release Plan")
     release_approval = verify_release_approval(root, cli, plan)
-    boundary = verify_release_environment(root)
+    boundary = verify_release_environment(
+        root, dispatcher_installation=dispatcher
+    )
     request = release_request(root, plan, release_approval, boundary)
     request_path = save_release_request(root, request)
     encoded = base64.urlsafe_b64encode(canonical(request).encode("utf-8")).decode("ascii")
@@ -1957,12 +2510,55 @@ def command_verify_request(args: argparse.Namespace, root: Path) -> int:
     return 0
 
 
+def command_verify_publish_gate(args: argparse.Namespace, root: Path) -> int:
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        raise ReleaseError("publish gate verification may run only inside GitHub Actions")
+    if str(os.environ.get("GITHUB_RUN_ID") or "") != str(args.workflow_run_id):
+        raise ReleaseError("GitHub workflow run ID differs from the publish gate request")
+    request = load_release_request(args.request)
+    verify_release_request(root, request, expected_source=git_head(root))
+    control = release_control(root)
+    if str(args.environment) != str(control["environment"]):
+        raise ReleaseError("publish gate Environment differs from release control")
+    if str(os.environ.get("GITHUB_REPOSITORY") or "") != str(control["repository"]):
+        raise ReleaseError("GitHub Actions repository differs from release control")
+    boundary = verify_release_environment(root, verify_dispatcher_token=False)
+    approval = verify_environment_approval(
+        root,
+        str(args.workflow_run_id),
+        verify_configuration=True,
+        verify_dispatcher_token=False,
+    )
+    gate = publish_gate_record(request, boundary, approval)
+    output_path = Path(args.output).resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        json.dumps(gate, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    output = {
+        "publish_gate_digest": gate["publish_gate_digest"],
+        "dispatcher_app_id": gate["dispatcher"]["app_id"],
+        "dispatcher_app_slug": gate["dispatcher"]["app_slug"],
+        "dispatcher_installation_id": gate["dispatcher"]["installation_id"],
+        "publisher_app_id": gate["publisher"]["app_id"],
+        "publisher_app_slug": gate["publisher"]["app_slug"],
+        "publisher_installation_id": gate["publisher"]["installation_id"],
+    }
+    if args.github_output:
+        with Path(args.github_output).open("a", encoding="utf-8", newline="\n") as handle:
+            for key, value in output.items():
+                handle.write(f"{key}={value}\n")
+    print(json.dumps({**output, "gate": str(output_path)}, indent=2))
+    return 0
+
+
 def protected_tag_message(
-    request: dict[str, Any], approval: dict[str, str]
+    request: dict[str, Any], gate: dict[str, Any], publisher: dict[str, Any]
 ) -> str:
     expected_assets = normalized_expected_assets(request.get("expected_assets"))
     provenance = request.get("maintenance_provenance") or {}
     boundary = request.get("release_boundary") or {}
+    approval = gate.get("environment_approval") or {}
     lines = [
         f"Multica Workflow {request['tag']}",
         "",
@@ -1976,18 +2572,82 @@ def protected_tag_message(
         f"release_environment={approval['environment']}",
         f"environment_approval_actor={approval['actor_login']}",
         f"environment_approval_sha256={approval['approval_sha256']}",
-        f"release_operator={approval['operator_login']}",
+        f"publish_gate_digest={gate['publish_gate_digest']}",
+        f"release_operator_type={boundary['operator_type']}",
+        f"dispatcher_app_id={boundary['dispatcher_app_id']}",
+        f"dispatcher_app_slug={boundary['dispatcher_app_slug']}",
+        f"dispatcher_actor_login={boundary['dispatcher_actor_login']}",
+        f"dispatcher_installation_id={boundary['dispatcher_installation_id']}",
+        f"dispatcher_installation_sha256={boundary['dispatcher_installation_sha256']}",
+        f"publisher_app_id={publisher['app_id']}",
+        f"publisher_app_slug={publisher['app_slug']}",
+        f"publisher_installation_id={publisher['installation_id']}",
+        f"publisher_installation_sha256={publisher['sha256']}",
         f"release_boundary_sha256={digest(boundary)}",
         f"repository_visibility={boundary['repository_visibility']}",
         f"release_environment_sha256={boundary['environment_sha256']}",
         f"release_ruleset_id={boundary['tag_ruleset_id']}",
         f"release_ruleset_sha256={boundary['tag_ruleset_sha256']}",
+        f"implementation_provenance_sha256={request['implementation_provenance_sha256']}",
         f"expected_assets_sha256={expected_assets_sha256(expected_assets)}",
         *(f"expected_asset={name}" for name in expected_assets),
         *(f"{key}={value}" for key, value in provenance.items()),
         "",
     ]
     return "\n".join(lines)
+
+
+def create_protected_tag(
+    root: Path,
+    request: dict[str, Any],
+    gate: dict[str, Any],
+    publisher: dict[str, Any],
+) -> dict[str, str]:
+    repository = str((request.get("release_boundary") or {})["repository"])
+    tag = str(request["tag"])
+    if run(["git", "tag", "--list", tag], root).stdout.strip():
+        raise ReleaseError(f"tag already exists locally: {tag}")
+    if run(
+        ["git", "ls-remote", "--tags", "origin", f"refs/tags/{tag}"], root
+    ).stdout.strip():
+        raise ReleaseError(f"tag already exists on origin: {tag}")
+    tag_object = gh_api_json(
+        root,
+        "POST",
+        f"repos/{repository}/git/tags",
+        {
+            "tag": tag,
+            "message": protected_tag_message(request, gate, publisher),
+            "object": str(request["source_commit"]),
+            "type": "commit",
+        },
+    )
+    tag_sha = str((tag_object or {}).get("sha") or "")
+    if not re.fullmatch(r"[a-f0-9]{40,64}", tag_sha):
+        raise ReleaseError("GitHub did not return the annotated tag object SHA")
+    ref = gh_api_json(
+        root,
+        "POST",
+        f"repos/{repository}/git/refs",
+        {"ref": f"refs/tags/{tag}", "sha": tag_sha},
+    )
+    if str((ref or {}).get("ref") or "") != f"refs/tags/{tag}":
+        raise ReleaseError("GitHub did not create the expected protected tag ref")
+    run(
+        [
+            "git",
+            "fetch",
+            "--no-tags",
+            "origin",
+            f"refs/tags/{tag}:refs/tags/{tag}",
+        ],
+        root,
+    )
+    return {
+        "tag": tag,
+        "source_commit": str(request["source_commit"]),
+        "tag_object_sha": tag_sha,
+    }
 
 
 def verify_existing_recovery_tag(
@@ -2028,48 +2688,30 @@ def command_publish(args: argparse.Namespace, root: Path) -> int:
     if str(os.environ.get("GITHUB_RUN_ID") or "") != str(args.workflow_run_id):
         raise ReleaseError("GitHub workflow run ID differs from the publish request")
     request = load_release_request(args.request)
-    verify_release_request(root, request, expected_source=git_head(root))
+    verify_release_request(
+        root, request, expected_source=git_head(root), verify_state=False
+    )
     control = release_control(root)
     if str(args.environment) != str(control["environment"]):
         raise ReleaseError("publish Environment differs from release control")
     if str(os.environ.get("GITHUB_REPOSITORY") or "") != str(control["repository"]):
         raise ReleaseError("GitHub Actions repository differs from release control")
-    current_boundary = verify_release_environment(
-        root, reject_runtime_credentials=False
+    gate = load_publish_gate(args.gate)
+    verify_publish_gate(
+        gate,
+        request,
+        args.approve,
+        workflow_run_id=str(args.workflow_run_id),
+        environment=str(args.environment),
     )
-    if release_boundary_snapshot(current_boundary) != request.get("release_boundary"):
-        raise ReleaseError("protected release control changed after request dispatch")
-    approval = verify_environment_approval(
-        root,
-        str(args.workflow_run_id),
-        verify_configuration=True,
-        reject_runtime_credentials=False,
-    )
-    if approval["operator_login"] != str(control["operator_login"]):
-        raise ReleaseError("protected release operator differs from release control")
+    publisher = verify_publisher_installation(root, control)
 
     tag = str(request["tag"])
     if args.recover_existing_tag:
         recovery = verify_existing_recovery_tag(root, request)
         action = "existing_tag_recovery_approved"
     else:
-        if run(["git", "tag", "--list", tag], root).stdout.strip():
-            raise ReleaseError(f"tag already exists locally: {tag}")
-        if run(
-            ["git", "ls-remote", "--tags", "origin", f"refs/tags/{tag}"], root
-        ).stdout.strip():
-            raise ReleaseError(f"tag already exists on origin: {tag}")
-        message = protected_tag_message(request, approval)
-        run(["git", "tag", "-a", tag, "-m", message], root)
-        pushed = run(["git", "push", "origin", tag], root, check=False)
-        if pushed.returncode != 0:
-            run(["git", "tag", "-d", tag], root, check=False)
-            raise ReleaseError(
-                pushed.stderr.strip()
-                or pushed.stdout.strip()
-                or f"failed to push {tag}"
-            )
-        recovery = {"tag": tag, "source_commit": request["source_commit"]}
+        recovery = create_protected_tag(root, request, gate, publisher)
         action = "protected_tag_created"
     print(
         json.dumps(
@@ -2077,7 +2719,83 @@ def command_publish(args: argparse.Namespace, root: Path) -> int:
                 "action": action,
                 **recovery,
                 "release_request_digest": request["release_request_digest"],
-                "protected_environment_approval": approval,
+                "publish_gate_digest": gate["publish_gate_digest"],
+                "protected_environment_approval": gate["environment_approval"],
+                "publisher": publisher,
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def command_publish_release(args: argparse.Namespace, root: Path) -> int:
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        raise ReleaseError("release publication may run only inside GitHub Actions")
+    if str(os.environ.get("GITHUB_RUN_ID") or "") != str(args.workflow_run_id):
+        raise ReleaseError("GitHub workflow run ID differs from the release publication")
+    request = load_release_request(args.request)
+    verify_release_request(
+        root, request, expected_source=git_head(root), verify_state=False
+    )
+    control = release_control(root)
+    if str(args.environment) != str(control["environment"]):
+        raise ReleaseError("release publication Environment differs from release control")
+    if str(os.environ.get("GITHUB_REPOSITORY") or "") != str(control["repository"]):
+        raise ReleaseError("GitHub Actions repository differs from release control")
+    gate = load_publish_gate(args.gate)
+    verify_publish_gate(
+        gate,
+        request,
+        args.approve,
+        workflow_run_id=str(args.workflow_run_id),
+        environment=str(args.environment),
+    )
+    publisher = verify_publisher_installation(root, control)
+    tag = str(request["tag"])
+    annotation = annotated_tag_contents(root, tag)
+    tag_gate_digest = annotation_value(
+        annotation, "publish_gate_digest", r"[a-f0-9]{64}"
+    )
+    if args.recover_existing_tag:
+        if annotation_value(
+            annotation, "release_request_digest", r"[a-f0-9]{64}"
+        ) != str(request["release_request_digest"]):
+            raise ReleaseError(
+                "recovery tag does not bind the approved release Request"
+            )
+    elif tag_gate_digest != str(gate["publish_gate_digest"]):
+        raise ReleaseError("protected tag does not bind the approved publish gate")
+    assets = verify_asset_directory(annotation, Path(args.directory).resolve())
+    existing = run(
+        ["gh", "release", "view", tag, "--json", "id"], root, check=False
+    )
+    if existing.returncode == 0:
+        raise ReleaseError(f"GitHub Release already exists: {tag}")
+    command = [
+        "gh",
+        "release",
+        "create",
+        tag,
+        *[str(Path(args.directory).resolve() / name) for name in assets],
+        "--verify-tag",
+        "--title",
+        f"Multica Workflow {tag}",
+        "--generate-notes",
+    ]
+    if "-" in tag:
+        command.append("--prerelease")
+    run(command, root)
+    print(
+        json.dumps(
+            {
+                "action": "github_release_published",
+                "tag": tag,
+                "assets": assets,
+                "publish_gate_digest": gate["publish_gate_digest"],
+                "tag_publish_gate_digest": tag_gate_digest,
+                "recovery": bool(args.recover_existing_tag),
+                "publisher": publisher,
             },
             indent=2,
         )
@@ -2130,7 +2848,18 @@ def command_verify_tag(args: argparse.Namespace, root: Path) -> int:
             "repository_visibility",
             "environment_approval_actor",
             "environment_approval_sha256",
-            "release_operator",
+            "publish_gate_digest",
+            "release_operator_type",
+            "dispatcher_app_id",
+            "dispatcher_app_slug",
+            "dispatcher_actor_login",
+            "dispatcher_installation_id",
+            "dispatcher_installation_sha256",
+            "publisher_app_id",
+            "publisher_app_slug",
+            "publisher_installation_id",
+            "publisher_installation_sha256",
+            "implementation_provenance_sha256",
             "maintenance_issue",
             "review_comment_id",
             "multica_approval_comment_id",
@@ -2139,7 +2868,20 @@ def command_verify_tag(args: argparse.Namespace, root: Path) -> int:
         ]
         values = {}
         for key in required + ["review_issue_id", "batch_review_mappings_sha256"]:
-            pattern = r"[a-f0-9]{64}" if key.endswith("sha256") or key == "release_request_digest" else r"\S+"
+            if key.endswith("sha256") or key in {
+                "release_request_digest",
+                "publish_gate_digest",
+            }:
+                pattern = r"[a-f0-9]{64}"
+            elif key in {
+                "dispatcher_app_id",
+                "dispatcher_installation_id",
+                "publisher_app_id",
+                "publisher_installation_id",
+            }:
+                pattern = r"\d+"
+            else:
+                pattern = r"\S+"
             value_match = re.search(rf"(?m)^{key}=({pattern})$", annotation)
             if value_match:
                 values[key] = value_match.group(1)
@@ -2151,12 +2893,52 @@ def command_verify_tag(args: argparse.Namespace, root: Path) -> int:
         control = release_control(root)
         if values["release_environment"] != str(control["environment"]):
             raise ReleaseError("annotated release Environment differs from release control")
-        if values["release_operator"] != str(control["operator_login"]):
-            raise ReleaseError("annotated release operator differs from release control")
         current_boundary = verify_release_environment(
-            root, reject_runtime_credentials=False
+            root, verify_dispatcher_token=False
         )
         current_snapshot = release_boundary_snapshot(current_boundary)
+        if values["release_operator_type"] != str(current_snapshot["operator_type"]):
+            raise ReleaseError("annotated release operator type differs from release control")
+        if int(values["dispatcher_app_id"]) != int(current_snapshot["dispatcher_app_id"]):
+            raise ReleaseError("annotated Dispatcher App ID differs from release control")
+        if values["dispatcher_app_slug"] != str(current_snapshot["dispatcher_app_slug"]):
+            raise ReleaseError("annotated Dispatcher App slug differs from release control")
+        if values["dispatcher_actor_login"] != str(current_snapshot["dispatcher_actor_login"]):
+            raise ReleaseError("annotated Dispatcher actor differs from release control")
+        if int(values["dispatcher_installation_id"]) != int(
+            current_snapshot["dispatcher_installation_id"]
+        ):
+            raise ReleaseError("annotated Dispatcher installation differs from release control")
+        dispatcher_snapshot = {
+            "app_id": int(current_snapshot["dispatcher_app_id"]),
+            "app_slug": str(current_snapshot["dispatcher_app_slug"]),
+            "installation_id": int(current_snapshot["dispatcher_installation_id"]),
+            "account_login": str(current_snapshot["dispatcher_account_login"]),
+            "repository_selection": str(current_snapshot["dispatcher_repository_selection"]),
+            "repositories": sorted(current_snapshot["dispatcher_repositories"]),
+            "permissions": dict(sorted(current_snapshot["dispatcher_permissions"].items())),
+        }
+        if values["dispatcher_installation_sha256"] != digest(dispatcher_snapshot):
+            raise ReleaseError("annotated Dispatcher installation evidence changed")
+        if int(values["publisher_app_id"]) != int(current_snapshot["publisher_app_id"]):
+            raise ReleaseError("annotated Publisher App ID differs from release control")
+        if values["publisher_app_slug"] != str(current_snapshot["publisher_app_slug"]):
+            raise ReleaseError("annotated Publisher App slug differs from release control")
+        if int(values["publisher_installation_id"]) != int(
+            current_snapshot["publisher_installation_id"]
+        ):
+            raise ReleaseError("annotated Publisher installation differs from release control")
+        publisher_snapshot = {
+            "app_id": int(current_snapshot["publisher_app_id"]),
+            "app_slug": str(current_snapshot["publisher_app_slug"]),
+            "installation_id": int(current_snapshot["publisher_installation_id"]),
+            "account_login": str(current_snapshot["publisher_account_login"]),
+            "repository_selection": str(current_snapshot["publisher_repository_selection"]),
+            "repositories": sorted(current_snapshot["publisher_repositories"]),
+            "permissions": dict(sorted(current_snapshot["publisher_permissions"].items())),
+        }
+        if values["publisher_installation_sha256"] != digest(publisher_snapshot):
+            raise ReleaseError("annotated Publisher installation evidence changed")
         if values["release_boundary_sha256"] != digest(current_snapshot):
             raise ReleaseError("annotated protected release boundary changed")
         if values["repository_visibility"] != current_snapshot["repository_visibility"]:
@@ -2172,7 +2954,7 @@ def command_verify_tag(args: argparse.Namespace, root: Path) -> int:
             values["release_workflow_run_id"],
             expected_actor=values["environment_approval_actor"],
             verify_configuration=True,
-            reject_runtime_credentials=False,
+            verify_dispatcher_token=False,
         )
         if github_approval["approval_sha256"] != values["environment_approval_sha256"]:
             raise ReleaseError("annotated Environment approval evidence changed")
@@ -2282,6 +3064,7 @@ def parser() -> argparse.ArgumentParser:
     plan.add_argument("--version", required=True)
     plan.add_argument("--bootstrap-plan")
     plan.add_argument("--maintenance-issue")
+    plan.add_argument("--implementation-provenance", action="append", default=[])
     plan.add_argument("--multica-bin")
     plan.add_argument("--profile")
     plan.add_argument("--workspace")
@@ -2304,12 +3087,30 @@ def parser() -> argparse.ArgumentParser:
     verify_request.add_argument("--expected-source")
     verify_request.add_argument("--github-output")
     verify_request.set_defaults(func=command_verify_request)
+    verify_publish_gate = sub.add_parser("verify-publish-gate")
+    verify_publish_gate.add_argument("--request", required=True)
+    verify_publish_gate.add_argument("--workflow-run-id", required=True)
+    verify_publish_gate.add_argument("--environment", required=True)
+    verify_publish_gate.add_argument("--output", required=True)
+    verify_publish_gate.add_argument("--github-output")
+    verify_publish_gate.set_defaults(func=command_verify_publish_gate)
     publish = sub.add_parser("publish")
     publish.add_argument("--request", required=True)
+    publish.add_argument("--gate", required=True)
+    publish.add_argument("--approve", required=True)
     publish.add_argument("--workflow-run-id", required=True)
     publish.add_argument("--environment", required=True)
     publish.add_argument("--recover-existing-tag", action="store_true")
     publish.set_defaults(func=command_publish)
+    publish_release = sub.add_parser("publish-release")
+    publish_release.add_argument("--request", required=True)
+    publish_release.add_argument("--gate", required=True)
+    publish_release.add_argument("--approve", required=True)
+    publish_release.add_argument("--workflow-run-id", required=True)
+    publish_release.add_argument("--environment", required=True)
+    publish_release.add_argument("--directory", required=True)
+    publish_release.add_argument("--recover-existing-tag", action="store_true")
+    publish_release.set_defaults(func=command_publish_release)
     verify_tag = sub.add_parser("verify-tag")
     verify_tag.add_argument("--tag", required=True)
     verify_tag.set_defaults(func=command_verify_tag)

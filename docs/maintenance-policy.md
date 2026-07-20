@@ -34,4 +34,8 @@ While Review is active, the Maintenance Issue records both `reviewed_commit_sha`
 
 ## Residual Controls
 
-Agent role boundaries are governance, not shell RBAC. Release mutation therefore runs only inside the protected `workflow-release` GitHub Environment after approval by a human reviewer whose credential is unavailable to Agent runtimes. An active `refs/tags/v*` ruleset rejects ordinary tag creation/update/deletion and grants the sole bypass to the GitHub Actions App. The Environment-scoped `github-actions[bot]` token is the release operator. Local Maintainer runtimes may validate and dispatch a request but cannot create tags or Releases.
+Workflow maintenance roles are enforced by the Secure Agent Runtime as well as governance. Maintainer GitHub mutation is limited to Broker RPCs backed by a short-lived repository-scoped App token; Reviewer and Observer are tokenless. The host user may retain normal credentials because Agent environments are rebuilt and isolated.
+
+Release mutation runs only inside the protected `workflow-release` GitHub Environment after approval by a human reviewer whose credential is unavailable to Agent runtimes. An active `refs/tags/v*` ruleset rejects ordinary tag creation/update/deletion and grants the sole bypass to the dedicated Publisher App. The built-in workflow token stays read-only. Managed Maintainer runtimes prepare evidence and Plans but receive no Dispatcher credential. Only the human host context may validate the reviewed Dispatcher installation and dispatch a request; it still cannot create tags or Releases.
+
+See `secure-runtime.md` and `bootstrap-rc4.md` for the threat model, Bootstrap exception, acceptance matrix and rollback.

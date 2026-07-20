@@ -424,6 +424,30 @@ def validate_repository(root: Path, deployment_profile: str) -> tuple[dict[str, 
             errors.append(
                 "operations.autopilot must use operations.observer_agent and operations.project"
             )
+    secure_runtime = manifest.get("secure_runtime")
+    if not isinstance(secure_runtime, dict):
+        errors.append("secure_runtime is required")
+    else:
+        secure_agents = secure_runtime.get("agents") or {}
+        if secure_runtime.get("required") is not True or secure_runtime.get("open_code_allowed") is not False:
+            errors.append("secure_runtime must be required and disallow OpenCode")
+        if not isinstance(secure_agents, dict) or not secure_agents:
+            errors.append("secure_runtime.agents must define managed secure roles")
+        for agent_key, security_profile in secure_agents.items():
+            desired_agent = next((item for item in agents if item.get("key") == agent_key), None)
+            if not desired_agent:
+                errors.append(f"secure_runtime references missing agent {agent_key}")
+                continue
+            runtime_config = desired_agent.get("runtime_config") or {}
+            if runtime_config.get("secure_runtime_required") is not True:
+                errors.append(f"secure Agent {agent_key} must require the secure runtime")
+            if runtime_config.get("security_profile") != security_profile:
+                errors.append(f"secure Agent {agent_key} security_profile differs from secure_runtime.agents")
+            if desired_agent.get("mcp_config") != {} or desired_agent.get("custom_args") != []:
+                errors.append(f"secure Agent {agent_key} must use strict empty MCP and custom args")
+            binding = bindings.get(desired_agent.get("runtime_binding"), {})
+            if binding.get("provider") != "codex":
+                errors.append(f"secure Agent {agent_key} must use a Codex runtime binding")
     portable_files = [
         root / "workflow.json",
         *root.glob("deployment-profiles/*.json"),
@@ -526,8 +550,9 @@ def agent_spec(
     thinking: str,
     concurrency: int,
     permission: str,
+    runtime_controls: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    value = {
         "key": key,
         "name": name,
         "description": description,
@@ -538,6 +563,37 @@ def agent_spec(
         "max_concurrent_tasks": concurrency,
         "permission_mode": permission,
     }
+    if runtime_controls:
+        value["runtime_controls"] = runtime_controls
+    return value
+
+
+def normalized_json_object(value: Any) -> dict[str, Any] | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise WorkflowError("managed Agent runtime control must be valid JSON") from exc
+    if not isinstance(value, dict):
+        raise WorkflowError("managed Agent runtime control must be a JSON object")
+    return value
+
+
+def managed_agent_runtime_controls(
+    desired_agent: dict[str, Any], observed_agent: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    source = observed_agent if observed_agent is not None else desired_agent
+    result: dict[str, Any] = {}
+    if "custom_args" in desired_agent:
+        value = source.get("custom_args")
+        result["custom_args"] = list(value) if isinstance(value, list) else []
+    if "mcp_config" in desired_agent:
+        result["mcp_config"] = normalized_json_object(source.get("mcp_config")) or {}
+    if "runtime_config" in desired_agent:
+        result["runtime_config"] = normalized_json_object(source.get("runtime_config")) or {}
+    return result
 
 
 def project_spec(
@@ -767,6 +823,12 @@ def fetch_state(
     cli: MulticaCLI, include_active_v3: bool = False, workflow_id: str = ""
 ) -> dict[str, Any]:
     agents = _as_list(cli.json(["agent", "list", "--output", "json"]), "agents")
+    enriched_agents = []
+    for current in agents:
+        agent_id = str(current.get("id") or "")
+        detail = cli.json(["agent", "get", agent_id, "--output", "json"]) if agent_id else None
+        enriched_agents.append({**current, **(detail if isinstance(detail, dict) else {})})
+    agents = enriched_agents
     squads = _as_list(cli.json(["squad", "list", "--output", "json"]), "squads")
     skills = _as_list(cli.json(["skill", "list", "--output", "json"]), "skills")
     projects = _as_list(cli.json(["project", "list", "--output", "json"]), "projects")
@@ -834,6 +896,9 @@ def observed_hash(state: dict[str, Any]) -> str:
                 "max_concurrent_tasks",
                 "permission_mode",
                 "invocation_targets",
+                "custom_args",
+                "mcp_config",
+                "runtime_config",
             ]
         }
         for agent in state.get("agents", [])
@@ -1192,6 +1257,7 @@ def build_plan(
             binding.get("thinking_level", ""),
             int(agent.get("max_concurrent_tasks", 1)),
             agent.get("permission_mode", "private"),
+            managed_agent_runtime_controls(agent),
         )
         spec_hash = sha256_value(spec)
         desired = {
@@ -1219,6 +1285,7 @@ def build_plan(
             str(current.get("thinking_level") or ""),
             int(current.get("max_concurrent_tasks") or 0),
             normalize_permission(current, cli.workspace_id),
+            managed_agent_runtime_controls(agent, current),
         )
         current_hash = sha256_value(current_spec)
         runtime_changed = bool(rebind_runtimes and str(current.get("runtime_id")) != str(selected_runtime))
@@ -1745,6 +1812,12 @@ def _agent_create_args(desired: dict[str, Any]) -> list[str]:
     ]
     if desired.get("thinking_level"):
         args.extend(["--thinking-level", desired["thinking_level"]])
+    if "custom_args" in desired:
+        args.extend(["--custom-args", canonical_json(desired.get("custom_args") or [])])
+    if "mcp_config" in desired:
+        args.extend(["--mcp-config", canonical_json(desired.get("mcp_config") or {})])
+    if "runtime_config" in desired:
+        args.extend(["--runtime-config", canonical_json(desired.get("runtime_config") or {})])
     args.extend(_permission_args(desired.get("permission_mode", "private")))
     return args
 
@@ -1771,6 +1844,12 @@ def _agent_update_args(agent_id: str, desired: dict[str, Any]) -> list[str]:
     ]
     if desired.get("set_runtime"):
         args.extend(["--runtime-id", desired["runtime_id"]])
+    if "custom_args" in desired:
+        args.extend(["--custom-args", canonical_json(desired.get("custom_args") or [])])
+    if "mcp_config" in desired:
+        args.extend(["--mcp-config", canonical_json(desired.get("mcp_config") or {})])
+    if "runtime_config" in desired:
+        args.extend(["--runtime-config", canonical_json(desired.get("runtime_config") or {})])
     args.extend(_permission_args(desired.get("permission_mode", "private")))
     return args
 

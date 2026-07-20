@@ -18,6 +18,18 @@
       "model": "team-litellm/gpt-5.5",
       "thinking_level": "",
       "required_status": "online"
+    },
+    "codex-secure-maintainer": {
+      "provider": "codex",
+      "model": "gpt-5.5",
+      "thinking_level": "xhigh",
+      "required_status": "online"
+    },
+    "codex-secure-review": {
+      "provider": "codex",
+      "model": "gpt-5.5",
+      "thinking_level": "high",
+      "required_status": "online"
     }
   }
 }

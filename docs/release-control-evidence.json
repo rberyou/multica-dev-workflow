@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "status": "pending_human_admin",
+  "repository": "rberyou/multica-dev-workflow",
+  "note": "The human owner replaces this pending record with reviewed Ruleset, Environment, Dispatcher App and Publisher App readback evidence before final implementation Review and release planning."
+}

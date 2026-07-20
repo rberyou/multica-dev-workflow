@@ -1121,7 +1121,7 @@ class ObserverTests(unittest.TestCase):
     def test_control_plane_audit_still_reports_trigger_drift(self):
         cases = [
             "wrong cron_expression",
-            "disabled trigger",
+            "unexpected enabled trigger",
             "wrong timezone",
             "missing trigger",
             "duplicate label",
@@ -1133,8 +1133,8 @@ class ObserverTests(unittest.TestCase):
                 if case == "wrong cron_expression":
                     trigger.pop("cron")
                     trigger["cron_expression"] = "30 * * * *"
-                elif case == "disabled trigger":
-                    trigger["enabled"] = False
+                elif case == "unexpected enabled trigger":
+                    trigger["enabled"] = True
                 elif case == "wrong timezone":
                     trigger["timezone"] = "UTC"
                 elif case == "missing trigger":

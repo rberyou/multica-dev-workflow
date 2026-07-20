@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import uuid
 
 from workflow_lib import (
     MulticaCLI,
@@ -19,6 +20,7 @@ from workflow_lib import (
     git_dirty,
     git_head,
     install_skills,
+    match_managed,
     mutation_actions,
     plan_has_blockers,
     redact,
@@ -152,6 +154,65 @@ def command_export(args: argparse.Namespace, root: Path) -> int:
             "profile": cli.profile,
             "workspace": workspace,
             "state": state,
+        },
+    )
+    print(output)
+    return 0
+
+
+def command_secure_bindings(args: argparse.Namespace, root: Path) -> int:
+    cli, workspace = context(args, root)
+    manifest, _ = validate_repository(root, args.deployment_profile)
+    state = fetch_state(cli)
+    workflow_id = str(manifest["workflow"]["id"])
+    desired_agents = {item["key"]: item for item in manifest.get("agents") or []}
+    bindings = {}
+    runtime_ids = set()
+    for agent_key, security_profile in (manifest.get("secure_runtime", {}).get("agents") or {}).items():
+        desired = desired_agents[agent_key]
+        current, marked, errors = match_managed(
+            state.get("agents", []),
+            workflow_id,
+            f"agent.{agent_key}",
+            desired["name"],
+            "instructions",
+            desired.get("previous_names") or [],
+        )
+        if errors or not current or not marked:
+            raise WorkflowError(
+                f"secure Agent {agent_key} is missing or not managed: {errors or ['not found']}"
+            )
+        bindings[str(current["id"])] = security_profile
+        runtime_id = str(current.get("runtime_id") or "")
+        if not runtime_id:
+            raise WorkflowError(f"secure Agent {agent_key} has no Runtime binding")
+        runtime_ids.add(runtime_id)
+    bootstrap_runtime_id = str(getattr(args, "bootstrap_runtime_id", None) or "")
+    if bootstrap_runtime_id:
+        try:
+            parsed_runtime_id = uuid.UUID(bootstrap_runtime_id)
+        except ValueError as exc:
+            raise WorkflowError("--bootstrap-runtime-id must be a Runtime UUID") from exc
+        if parsed_runtime_id.int == 0:
+            raise WorkflowError("--bootstrap-runtime-id cannot be the zero UUID")
+        selected_runtime_id = str(parsed_runtime_id)
+    else:
+        if len(runtime_ids) != 1:
+            raise WorkflowError(
+                f"secure Agents must share exactly one dedicated Runtime; found {sorted(runtime_ids)}"
+            )
+        selected_runtime_id = next(iter(runtime_ids))
+    output = Path(args.output).expanduser().resolve() if args.output else (root / "agent-bindings.local.json")
+    write_json(
+        output,
+        {
+            "schema_version": 1,
+            "workspace_id": workspace["id"],
+            "workflow_id": workflow_id,
+            "workflow_version": manifest["workflow"]["version"],
+            "runtime_id": selected_runtime_id,
+            "bootstrap": bool(bootstrap_runtime_id),
+            "agents": dict(sorted(bindings.items())),
         },
     )
     print(output)
@@ -297,6 +358,12 @@ def parser() -> argparse.ArgumentParser:
     export = subparsers.add_parser("export")
     add_context_args(export)
     export.set_defaults(func=command_export)
+
+    secure_bindings = subparsers.add_parser("secure-bindings")
+    add_context_args(secure_bindings)
+    secure_bindings.add_argument("--output")
+    secure_bindings.add_argument("--bootstrap-runtime-id")
+    secure_bindings.set_defaults(func=command_secure_bindings)
 
     plan = subparsers.add_parser("plan")
     add_context_args(plan)

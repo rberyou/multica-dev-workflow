@@ -83,11 +83,14 @@ Never migrate Runtimes as an incidental effect of updating instructions.
 
 ```text
 python scripts/release.py plan --version <version> --maintenance-issue <T-ID>
+$env:GH_TOKEN = <short-lived Dispatcher App installation token>
+python scripts/release.py doctor
 python scripts/release.py approval-block --plan <release-plan>
 python scripts/release.py apply --plan <release-plan> --approve <short-digest>
+Remove-Item Env:GH_TOKEN
 ```
 
-Run `python scripts/release.py doctor` before release planning. After Plan generation, the durable human approver must comment `APPROVE WORKFLOW RELEASE <short-digest>` on the Maintenance Issue. The read-only `approval-block` prints a Release Request summary. `apply` dispatches that request but cannot mutate tags or Releases. The isolated reviewer approves the protected `workflow-release` Environment outside Agent runtimes, and `github-actions[bot]` performs publication. `verify-tag` rechecks Environment, workflow-run, PR, CI and Maintenance provenance. Bootstrap mode is historical and cannot authorize a new release.
+Generate the Plan with the normal human-host read context. After Plan generation, the durable human approver must comment `APPROVE WORKFLOW RELEASE <short-digest>` on the Maintenance Issue. Then mint a short-lived, selected-repository Dispatcher App token outside Agent runtimes and expose it only through `GH_TOKEN` for `doctor`, `approval-block` and `apply`. The read-only `approval-block` prints a Release Request summary. `apply` dispatches that request but cannot mutate tags or Releases. The isolated reviewer approves the protected `workflow-release` Environment outside Agent runtimes, and the dedicated Publisher App performs publication. `verify-tag` rechecks Environment, workflow-run, PR, CI, Dispatcher, Publisher and Maintenance provenance. Bootstrap mode is historical and cannot authorize a new release.
 
 ## Install Local Skills
 

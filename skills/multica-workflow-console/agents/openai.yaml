@@ -1,0 +1,4 @@
+interface:
+  display_name: "Multica Workflow Console"
+  short_description: "Read-only workflow status and gate inspection"
+  default_prompt: "Use the host-only workflow console to inspect current Multica workflow health and gates. Do not mutate approvals or runtime state."

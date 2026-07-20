@@ -20,6 +20,7 @@ The base architecture is recorded in [docs/design-plan-v5.md](docs/design-plan-v
 - v1.1 does not prune, destroy or archive managed objects.
 - Observer reporting may create/update Incident data only. Maintenance intake is human-gated and later stages are created lazily.
 - Local release tooling can validate and dispatch a request but cannot create tags or Releases. Publication runs only behind the protected `workflow-release` GitHub Environment.
+- Workflow Maintainer, Maintenance Reviewer, and Observer run through the dedicated Secure Agent Runtime. The host user's normal `gh`, SSH, Git, browser, and Codex state are not inherited.
 
 ## Quick Start
 
@@ -57,12 +58,16 @@ python scripts/workflow.py plan --workspace <id-or-slug> --disable-operations
 
 See `skills/multica-workflow-manager/SKILL.md` for the external Agent workflow.
 
-Tagged releases publish requirement-intake, workflow-manager, workflow-observer and workflow-maintainer Skills, the complete repository bundle and SHA256 checksums.
+Tagged releases publish requirement-intake, workflow-manager, workflow-observer, workflow-maintainer and workflow-console Skills, the self-contained Windows Secure Agent Runtime, the complete repository bundle and SHA256 checksums.
 
-Release control is configured in `docs/release-control.json`. RC4 requires the repository to be public and to provide the protected Environment plus the main-only deployment policy and a `refs/tags/v*` ruleset whose only bypass is the GitHub Actions App. Before planning a release, run:
+Secure Runtime architecture, Bootstrap, rollback, and daily operation are documented in [docs/secure-runtime.md](docs/secure-runtime.md), [docs/bootstrap-rc4.md](docs/bootstrap-rc4.md), and [docs/workflow-console.md](docs/workflow-console.md).
+
+Release control is configured in `docs/release-control.json`. RC4 requires the repository to be public and to provide the protected Environment plus the main-only deployment policy and a `refs/tags/v*` ruleset whose only bypass is the dedicated Publisher App. Before dispatching an approved release, run:
 
 ```text
+$env:GH_TOKEN = <short-lived Dispatcher App installation token>
 python scripts/release.py doctor
+Remove-Item Env:GH_TOKEN
 ```
 
-The required GitHub Environment reviewer must use a credential unavailable to Agent runtimes. Owner/admin `gh` accounts, any identity with repository `push`, owner-capable SSH access and reusable GitHub HTTPS credential-helper entries must be removed from release-capable Agent runtimes before privileged GitHub changes. The remaining dispatcher is Contents-read-only and carries only the bounded Actions permission required to start the workflow. `release.py apply` dispatches the request; `github-actions[bot]` creates the approved tag and Release after Environment approval.
+The Dispatcher App is selected-repository only with Actions write, Contents read and Metadata read. Its short-lived token is minted by the human outside Agent runtimes and verified exactly by `doctor`, `approval-block` and `apply`. The required GitHub Environment reviewer must use a credential unavailable to Agent runtimes. The host user may keep normal GitHub credentials because managed Agents run inside the isolated service. `release.py apply` dispatches the request; after Environment approval, the workflow verifies a digest-bound publish gate and mints a separate short-lived Publisher App token for tag and Release mutation.

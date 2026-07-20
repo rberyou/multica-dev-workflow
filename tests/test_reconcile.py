@@ -118,6 +118,8 @@ class MutatingCLI:
         self.commands.append(command)
         if command[:2] == ("agent", "list"):
             return self.agents
+        if command[:2] == ("agent", "get"):
+            return next(item for item in self.agents if item["id"] == args[2])
         if command[:2] == ("squad", "list"):
             return self.squads
         if command[:2] == ("skill", "list"):
@@ -202,6 +204,9 @@ class MutatingCLI:
                 "thinking_level": flag(args, "--thinking-level", ""),
                 "max_concurrent_tasks": int(flag(args, "--max-concurrent-tasks", "1")),
                 "permission_mode": permission,
+                "custom_args": json.loads(flag(args, "--custom-args", "[]")),
+                "mcp_config": json.loads(flag(args, "--mcp-config", "{}")),
+                "runtime_config": json.loads(flag(args, "--runtime-config", "{}")),
                 "invocation_targets": (
                     [{"target_type": "workspace", "target_id": self.workspace_id}]
                     if "--public-to-workspace" in args
@@ -224,6 +229,13 @@ class MutatingCLI:
             for option, key in mapping.items():
                 if option in args:
                     agent[key] = flag(args, option, "")
+            for option, key in {
+                "--custom-args": "custom_args",
+                "--mcp-config": "mcp_config",
+                "--runtime-config": "runtime_config",
+            }.items():
+                if option in args:
+                    agent[key] = json.loads(flag(args, option))
             if "--max-concurrent-tasks" in args:
                 agent["max_concurrent_tasks"] = int(flag(args, "--max-concurrent-tasks"))
             if "--permission-mode" in args:
@@ -496,6 +508,7 @@ class ReconcileTests(unittest.TestCase):
                     "multica-workflow-manager",
                     "multica-workflow-observer",
                     "multica-workflow-maintainer",
+                    "multica-workflow-console",
                 },
             )
             self.assertTrue((Path(temp) / "multica-workflow-manager/SKILL.md").is_file())
@@ -560,8 +573,12 @@ class ReconcileTests(unittest.TestCase):
             )
             self.assertEqual(
                 len([item for item in autopilot_commands if item[:2] == ("autopilot", "update")]),
-                0,
+                1,
             )
+            update = next(
+                item for item in autopilot_commands if item[:2] == ("autopilot", "update")
+            )
+            self.assertEqual(update[3:], ("--status", "paused", "--output", "json"))
             for command in autopilot_commands:
                 self.assertNotIn("--priority", command)
                 self.assertFalse(
@@ -851,9 +868,7 @@ class ReconcileTests(unittest.TestCase):
             )
             types = [item["type"] for item in disabled["actions"]]
             self.assertEqual(types.count("DETACH_SKILL"), 0)
-            self.assertEqual(types.count("UPDATE_AUTOPILOT"), 1)
-            desired = next(item["desired"] for item in disabled["actions"] if item["type"] == "UPDATE_AUTOPILOT")
-            self.assertEqual(desired["status"], "paused")
+            self.assertEqual(types.count("UPDATE_AUTOPILOT"), 0)
             disabled_path = temp_root / ".multica/plans/disabled.json"
             write_json(disabled_path, disabled)
             apply_plan(temp_root, cli, disabled_path, disabled["plan_digest"][:12])
@@ -1191,12 +1206,9 @@ class ReconcileTests(unittest.TestCase):
                 disable_operations=True,
                 write_archives=False,
             )
-            update = next(
-                item
-                for item in disabled["actions"]
-                if item["type"] == "UPDATE_AUTOPILOT"
+            self.assertFalse(
+                any(item["type"] == "UPDATE_AUTOPILOT" for item in disabled["actions"])
             )
-            self.assertEqual(update["desired"]["status"], "paused")
 
     def test_changed_autopilot_trigger_without_id_blocks_planning(self):
         with committed_temp_repo() as temp_root:
@@ -1254,7 +1266,53 @@ class ReconcileTests(unittest.TestCase):
             plan = build_plan(temp_root, cli, workspace, "quality", runtime_map, False, False, write_archives=False)
             self.assertFalse(plan_has_blockers(plan))
             create = next(item for item in plan["actions"] if item["type"] == "CREATE_AGENT" and item["key"] == "workflow-observer")
-            self.assertEqual(create["desired"]["runtime_id"], "runtime-opencode")
+            self.assertEqual(create["desired"]["runtime_id"], "runtime-codex")
+
+    def test_secure_bindings_pin_the_dedicated_runtime(self):
+        with committed_temp_repo() as temp_root:
+            cli = MutatingCLI()
+            workspace = {"id": cli.workspace_id, "name": "Test", "slug": "test"}
+            runtime_map = temp_root / ".multica/runtime-map.local.json"
+            plan = build_plan(
+                temp_root, cli, workspace, "quality", runtime_map, False, False
+            )
+            plan_path = temp_root / ".multica/plans/initial.json"
+            write_json(plan_path, plan)
+            apply_plan(temp_root, cli, plan_path, plan["plan_digest"][:12])
+            output = temp_root / "agent-bindings.local.json"
+            args = SimpleNamespace(
+                output=str(output),
+                deployment_profile="quality",
+            )
+            with patch.object(workflow_cli, "context", return_value=(cli, workspace)):
+                self.assertEqual(
+                    workflow_cli.command_secure_bindings(args, temp_root), 0
+                )
+            bindings = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(bindings["runtime_id"], "runtime-codex")
+            self.assertEqual(
+                set(bindings["agents"].values()),
+                {"workflow_maintainer", "workflow_reviewer"},
+            )
+
+            reviewer = next(
+                item
+                for item in cli.agents
+                if parse_marker(item["instructions"])["object_key"]
+                == "agent.workflow-maintenance-reviewer"
+            )
+            reviewer["runtime_id"] = "runtime-opencode"
+            bootstrap_output = temp_root / "agent-bindings.bootstrap.local.json"
+            bootstrap_id = "11111111-1111-1111-1111-111111111111"
+            args.output = str(bootstrap_output)
+            args.bootstrap_runtime_id = bootstrap_id
+            with patch.object(workflow_cli, "context", return_value=(cli, workspace)):
+                self.assertEqual(
+                    workflow_cli.command_secure_bindings(args, temp_root), 0
+                )
+            bootstrap = json.loads(bootstrap_output.read_text(encoding="utf-8"))
+            self.assertIs(bootstrap["bootstrap"], True)
+            self.assertEqual(bootstrap["runtime_id"], bootstrap_id)
 
     def test_actual_v1_reconciler_ignores_paused_v11_control_plane(self):
         with committed_temp_repo() as temp_root, tempfile.TemporaryDirectory() as old_temp:

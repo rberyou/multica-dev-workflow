@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rberyou/multica-dev-workflow/docs/release-control-evidence.schema.json",
+  "title": "Reviewed GitHub Release Control Administrator Evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "status",
+    "repository"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "status": {"enum": ["pending_human_admin", "reviewed"]},
+    "repository": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
+    "note": {"type": "string", "minLength": 1},
+    "recorded_at": {"type": "string", "format": "date-time"},
+    "recorded_by": {"type": "string", "minLength": 1},
+    "multica_evidence_id": {"type": "string", "minLength": 1},
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "sha256"],
+      "properties": {
+        "id": {"type": "integer", "minimum": 1},
+        "name": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      }
+    },
+    "dispatcher_app": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "slug",
+        "installation_id",
+        "account_login",
+        "repository_selection",
+        "repositories",
+        "permissions"
+      ],
+      "properties": {
+        "id": {"type": "integer", "minimum": 1},
+        "slug": {"type": "string", "pattern": "^[A-Za-z0-9-]+$"},
+        "installation_id": {"type": "integer", "minimum": 1},
+        "account_login": {"type": "string", "minLength": 1},
+        "repository_selection": {"const": "selected"},
+        "repositories": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"}
+        },
+        "permissions": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["actions", "contents", "metadata"],
+          "properties": {
+            "actions": {"const": "write"},
+            "contents": {"const": "read"},
+            "metadata": {"const": "read"}
+          }
+        }
+      }
+    },
+    "publisher_app": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "slug",
+        "installation_id",
+        "account_login",
+        "repository_selection",
+        "repositories",
+        "permissions"
+      ],
+      "properties": {
+        "id": {"type": "integer", "minimum": 1},
+        "slug": {"type": "string", "pattern": "^[A-Za-z0-9-]+$"},
+        "installation_id": {"type": "integer", "minimum": 1},
+        "account_login": {"type": "string", "minLength": 1},
+        "repository_selection": {"const": "selected"},
+        "repositories": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"}
+        },
+        "permissions": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["contents", "metadata"],
+          "properties": {
+            "contents": {"const": "write"},
+            "metadata": {"const": "read"}
+          }
+        }
+      }
+    },
+    "tag_ruleset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "source", "target", "enforcement", "updated_at", "conditions", "rules", "bypass_actors"],
+      "properties": {
+        "id": {"type": "integer", "minimum": 1},
+        "name": {"type": "string", "minLength": 1},
+        "source": {"type": "string", "minLength": 1},
+        "target": {"const": "tag"},
+        "enforcement": {"const": "active"},
+        "updated_at": {"type": "string", "format": "date-time"},
+        "conditions": {"type": "object"},
+        "rules": {"type": "array", "minItems": 3},
+        "bypass_actors": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["actor_type", "actor_id", "bypass_mode"],
+            "properties": {
+              "actor_type": {"const": "Integration"},
+              "actor_id": {"type": "integer", "minimum": 1},
+              "bypass_mode": {"const": "always"}
+            }
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "reviewed"}}},
+      "then": {
+        "required": [
+          "recorded_at",
+          "recorded_by",
+          "multica_evidence_id",
+          "environment",
+          "dispatcher_app",
+          "publisher_app",
+          "tag_ruleset"
+        ]
+      },
+      "else": {"required": ["note"]}
+    }
+  ]
+}

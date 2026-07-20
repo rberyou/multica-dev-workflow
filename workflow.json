@@ -45,6 +45,13 @@
       "path": "skills/multica-workflow-maintainer",
       "targets": ["local", "workspace"],
       "attach_to": ["workflow-maintainer", "workflow-maintenance-reviewer"]
+    },
+    {
+      "key": "workflow-console",
+      "name": "multica-workflow-console",
+      "path": "skills/multica-workflow-console",
+      "targets": ["local"],
+      "attach_to": []
     }
   ],
   "agents": [
@@ -115,28 +122,46 @@
       "key": "workflow-observer",
       "name": "工作流观察员",
       "description": "接收工作流异常上报、运行确定性巡检、去重分诊并验证修复结果",
-      "runtime_binding": "opencode-review",
+      "runtime_binding": "codex-secure-review",
       "instruction_files": ["instructions/roles/workflow-observer.md"],
       "max_concurrent_tasks": 1,
-      "permission_mode": "public_to_workspace"
+      "permission_mode": "public_to_workspace",
+      "custom_args": [],
+      "mcp_config": {},
+      "runtime_config": {
+        "secure_runtime_required": true,
+        "security_profile": "workflow_reviewer"
+      }
     },
     {
       "key": "workflow-maintainer",
       "name": "工作流维护员",
       "description": "根据已确认 Incident 维护工作流源码、测试、RC、发布和回滚",
-      "runtime_binding": "codex-orchestrator",
+      "runtime_binding": "codex-secure-maintainer",
       "instruction_files": ["instructions/roles/workflow-maintainer.md"],
       "max_concurrent_tasks": 1,
-      "permission_mode": "public_to_workspace"
+      "permission_mode": "public_to_workspace",
+      "custom_args": [],
+      "mcp_config": {},
+      "runtime_config": {
+        "secure_runtime_required": true,
+        "security_profile": "workflow_maintainer"
+      }
     },
     {
       "key": "workflow-maintenance-reviewer",
       "name": "工作流维护审查员",
       "description": "独立审查工作流变更 Plan、代码、发布和回滚，不修改被审查内容",
-      "runtime_binding": "opencode-review",
+      "runtime_binding": "codex-secure-review",
       "instruction_files": ["instructions/roles/workflow-maintenance-reviewer.md"],
       "max_concurrent_tasks": 1,
-      "permission_mode": "public_to_workspace"
+      "permission_mode": "public_to_workspace",
+      "custom_args": [],
+      "mcp_config": {},
+      "runtime_config": {
+        "secure_runtime_required": true,
+        "security_profile": "workflow_reviewer"
+      }
     }
   ],
   "projects": [
@@ -156,14 +181,14 @@
       "agent": "workflow-observer",
       "mode": "run_only",
       "project": "workflow-operations",
-      "status": "active",
+      "status": "paused",
       "subscribers": ["human_approver"],
       "triggers": [
         {
           "key": "hourly",
           "kind": "schedule",
           "label": "multica-workflow:workflow-health-hourly",
-          "enabled": true,
+          "enabled": false,
           "cron": "0 * * * *",
           "timezone": "Asia/Shanghai"
         }
@@ -186,6 +211,16 @@
     "autopilot": "workflow-health-audit",
     "maintenance_intake_mode": "human_gated",
     "automatic_expansion": false
+  },
+  "secure_runtime": {
+    "schema_version": 1,
+    "required": true,
+    "open_code_allowed": false,
+    "agents": {
+      "workflow-maintainer": "workflow_maintainer",
+      "workflow-maintenance-reviewer": "workflow_reviewer",
+      "workflow-observer": "workflow_reviewer"
+    }
   },
   "squad": {
     "key": "development-delivery",

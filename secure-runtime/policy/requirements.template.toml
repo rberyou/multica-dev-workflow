@@ -1,0 +1,46 @@
+default_permissions = "__PROFILE__"
+allowed_approval_policies = ["never"]
+allowed_web_search_modes = []
+allow_appshots = false
+allow_remote_control = false
+allow_managed_hooks_only = true
+
+[allowed_permission_profiles]
+__PROFILE__ = true
+
+[permissions.__PROFILE__]
+description = "Managed Multica workflow profile."
+extends = ":workspace"
+
+[permissions.__PROFILE__.filesystem]
+":minimal" = "read"
+"__SERVICE_ROOT__" = "deny"
+"__HOST_USER_ROOT__" = "deny"
+
+[permissions.__PROFILE__.network]
+enabled = true
+
+[windows]
+allowed_sandbox_implementations = ["elevated"]
+
+[features]
+apps = false
+hooks = false
+browser_use = false
+browser_use_full_cdp_access = false
+browser_use_external = false
+in_app_browser = false
+computer_use = false
+memories = false
+multi_agent = false
+plugin_sharing = false
+plugins = false
+remote_plugin = false
+workspace_dependencies = false
+
+[mcp_servers]
+
+[plugins]
+
+[marketplaces]
+restrict_to_allowed_sources = true
