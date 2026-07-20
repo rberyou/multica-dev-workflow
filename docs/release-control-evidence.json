@@ -1,6 +1,77 @@
 {
   "schema_version": 1,
-  "status": "pending_human_admin",
+  "status": "reviewed",
   "repository": "rberyou/multica-dev-workflow",
-  "note": "The human owner replaces this pending record with reviewed Ruleset, Environment, Dispatcher App and Publisher App readback evidence before final implementation Review and release planning."
+  "note": "Human-host readback SHA256 991ee87c79d0a874967cc31bf7db9b550fc4a14d21ef97289cf1bbacd39bfa9a was produced by reviewed helper EXE SHA256 55f9b744ca69b4e38238cb2d3c3940f597a9ae0df4e550832cd2195b1b2a0ec6. Publisher App identity and sole Ruleset bypass are explicit human attestations because the minimal Dispatcher identity cannot read those fields.",
+  "recorded_at": "2026-07-20T11:23:39.1750033+00:00",
+  "recorded_by": "rberyou",
+  "multica_evidence_id": "WOR-48-release-control-readback-991ee87c79d0",
+  "environment": {
+    "id": 18381529975,
+    "name": "workflow-release",
+    "sha256": "7b4b5e84693b5ec4a86fd0ff35700af9705ca9af1bc6dd4f357f363aca8960de"
+  },
+  "dispatcher_app": {
+    "id": 4342819,
+    "slug": "multica-workflow-dispatcher",
+    "installation_id": 147705362,
+    "account_login": "rberyou",
+    "repository_selection": "selected",
+    "repositories": [
+      "rberyou/multica-dev-workflow"
+    ],
+    "permissions": {
+      "actions": "write",
+      "contents": "read",
+      "metadata": "read"
+    }
+  },
+  "publisher_app": {
+    "id": 4342831,
+    "slug": "multica-workflow-publisher",
+    "installation_id": 147706349,
+    "account_login": "rberyou",
+    "repository_selection": "selected",
+    "repositories": [
+      "rberyou/multica-dev-workflow"
+    ],
+    "permissions": {
+      "contents": "write",
+      "metadata": "read"
+    }
+  },
+  "tag_ruleset": {
+    "id": 19191273,
+    "name": "workflow-release-tags",
+    "source": "rberyou/multica-dev-workflow",
+    "target": "tag",
+    "enforcement": "active",
+    "updated_at": "2026-07-20T09:32:25.137Z",
+    "conditions": {
+      "ref_name": {
+        "include": [
+          "refs/tags/v*"
+        ],
+        "exclude": []
+      }
+    },
+    "rules": [
+      {
+        "type": "creation"
+      },
+      {
+        "type": "update"
+      },
+      {
+        "type": "deletion"
+      }
+    ],
+    "bypass_actors": [
+      {
+        "actor_type": "Integration",
+        "actor_id": 4342831,
+        "bypass_mode": "always"
+      }
+    ]
+  }
 }
