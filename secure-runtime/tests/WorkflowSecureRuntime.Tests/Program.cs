@@ -1,6 +1,5 @@
 using System.Buffers.Binary;
 using System.Diagnostics;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using WorkflowSecureRuntime.Core;
@@ -78,8 +77,8 @@ static void TestEnvironmentPolicy()
 
 static void TestCapability()
 {
-    var now = DateTimeOffset.UtcNow;
-    var key = RandomNumberGenerator.GetBytes(32);
+    var now = DateTimeOffset.FromUnixTimeSeconds(1_800_000_000);
+    var key = Enumerable.Range(0, 32).Select(index => checked((byte)index)).ToArray();
     var capability = new LaunchCapability
     {
         CapabilityId = "cap",
@@ -100,7 +99,9 @@ static void TestCapability()
     };
     var signed = CapabilitySigner.Sign(capability, key);
     Equal("cap", CapabilitySigner.Verify(signed, key, now).CapabilityId);
-    Throws(() => CapabilitySigner.Verify(signed[..^1] + (signed[^1] == 'a' ? 'b' : 'a'), key, now));
+    var parts = signed.Split('.');
+    var tamperedSignature = (parts[1][0] == 'A' ? 'B' : 'A') + parts[1][1..];
+    Throws(() => CapabilitySigner.Verify(parts[0] + "." + tamperedSignature, key, now));
     Throws(() => CapabilitySigner.Verify(signed, key, now.AddMinutes(10)));
 }
 
