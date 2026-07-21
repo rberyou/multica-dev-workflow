@@ -2035,7 +2035,7 @@ def triage_incident(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
     current_status = str(
         metadata.get("logical_status") or metadata.get("incident_status") or "new"
     )
-    if current_status not in {"new", "triaging", "blocked"}:
+    if current_status not in {"new", "triaging", "blocked", "routed", "deferred"}:
         raise ObserverError(
             f"Incident cannot be triaged from logical status {current_status}"
         )
@@ -2087,7 +2087,7 @@ def triage_incident(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
         )
     return {
         "incident_id": incident_id,
-        "previous_status": metadata.get("incident_status"),
+        "previous_status": current_status,
         "status": logical_status,
         "verdict": verdict,
         "waiting_on": waiting_on,

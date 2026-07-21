@@ -2,7 +2,7 @@
   "schema_version": 1,
   "workflow_version": "1.1.0-rc.4",
   "protocol_revision": "v3",
-  "observer_source_hash": "e08ef023bb12f73be3587f93bed805eaf5c98387e2aec20817358571568a99f7",
+  "observer_source_hash": "0ea9dfcb99bb3b365196c60d965dade9dbfbd075a1b4dada1323dfd34e696948",
   "agents": {
     "leader": {
       "name": "开发队长",

@@ -2158,6 +2158,33 @@ class ObserverTests(unittest.TestCase):
         self.assertEqual(second["action"], "reused")
         self.assertEqual(first["maintenance_case_id"], second["maintenance_case_id"])
 
+    def test_routed_incident_can_be_retriaged_when_new_evidence_arrives(self):
+        cli = Phase1CLI()
+        incident = cli.add_item(
+            "WOR-INC",
+            "project-ops",
+            {
+                "workflow_object_type": "incident",
+                "incident_status": "routed",
+                "logical_status": "routed",
+                "verdict": "RUNTIME_INCIDENT",
+                "waiting_on": "runtime_incident",
+            },
+            status="in_review",
+        )
+        result = observer.triage_incident(
+            cli,
+            Namespace(
+                incident=incident["identifier"],
+                verdict="FALSE_POSITIVE",
+                reason="controlled canary fault injection",
+            ),
+        )
+        self.assertEqual(result["previous_status"], "routed")
+        self.assertEqual(result["status"], "false_positive")
+        self.assertEqual(cli.issue_details[incident["identifier"]]["status"], "done")
+        self.assertEqual(cli.metadata[incident["identifier"]]["waiting_on"], "")
+
     def test_verify_fix_closes_case_and_incident(self):
         cli = Phase1CLI()
         incident = cli.add_item(
