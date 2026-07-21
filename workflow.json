@@ -122,46 +122,28 @@
       "key": "workflow-observer",
       "name": "工作流观察员",
       "description": "接收工作流异常上报、运行确定性巡检、去重分诊并验证修复结果",
-      "runtime_binding": "codex-secure-review",
+      "runtime_binding": "opencode-review",
       "instruction_files": ["instructions/roles/workflow-observer.md"],
       "max_concurrent_tasks": 1,
-      "permission_mode": "public_to_workspace",
-      "custom_args": [],
-      "mcp_config": {},
-      "runtime_config": {
-        "secure_runtime_required": true,
-        "security_profile": "workflow_reviewer"
-      }
+      "permission_mode": "public_to_workspace"
     },
     {
       "key": "workflow-maintainer",
       "name": "工作流维护员",
       "description": "根据已确认 Incident 维护工作流源码、测试、RC、发布和回滚",
-      "runtime_binding": "codex-secure-maintainer",
+      "runtime_binding": "codex-worker",
       "instruction_files": ["instructions/roles/workflow-maintainer.md"],
       "max_concurrent_tasks": 1,
-      "permission_mode": "public_to_workspace",
-      "custom_args": [],
-      "mcp_config": {},
-      "runtime_config": {
-        "secure_runtime_required": true,
-        "security_profile": "workflow_maintainer"
-      }
+      "permission_mode": "private"
     },
     {
       "key": "workflow-maintenance-reviewer",
       "name": "工作流维护审查员",
       "description": "独立审查工作流变更 Plan、代码、发布和回滚，不修改被审查内容",
-      "runtime_binding": "codex-secure-review",
+      "runtime_binding": "opencode-review",
       "instruction_files": ["instructions/roles/workflow-maintenance-reviewer.md"],
       "max_concurrent_tasks": 1,
-      "permission_mode": "public_to_workspace",
-      "custom_args": [],
-      "mcp_config": {},
-      "runtime_config": {
-        "secure_runtime_required": true,
-        "security_profile": "workflow_reviewer"
-      }
+      "permission_mode": "private"
     }
   ],
   "projects": [
@@ -176,8 +158,8 @@
   "autopilots": [
     {
       "key": "workflow-health-audit",
-      "title": "工作流健康巡检",
-      "description": "使用 multica-workflow-observer 的 Observer Mode。定位已安装 Skill，以当前巡检任务作为 coverage_issue，运行其 scripts/observer.py audit --scope issues --report；不要在 Autopilot 内自检调度新鲜度，外部操作员或调度器必须单独运行 scripts/workflow.py health；没有 finding 时不创建 Incident，无法完整扫描或持久化 finding 时必须失败并说明原因。",
+      "title": "工作流增量巡检",
+      "description": "使用 multica-workflow-observer 的 Observer Mode，运行 scripts/observer.py scan --mode incremental。只扫描已启用 Project Registration，先恢复 pending/failed Observation，再执行确定性规则、Incident 去重和项目独立游标提交；无法完整扫描或持久化状态时必须失败。外部操作员或调度器必须单独运行 scripts/workflow.py health。",
       "agent": "workflow-observer",
       "mode": "run_only",
       "project": "workflow-operations",
@@ -190,6 +172,26 @@
           "label": "multica-workflow:workflow-health-hourly",
           "enabled": false,
           "cron": "0 * * * *",
+          "timezone": "Asia/Shanghai"
+        }
+      ]
+    },
+    {
+      "key": "workflow-full-audit",
+      "title": "工作流每日全量巡检",
+      "description": "使用 multica-workflow-observer 的 Observer Mode，运行 scripts/observer.py scan --mode full。重新校验所有已注册项目的工作流对象、pending/failed Observation 和 Git 管理的控制面状态；不得扫描未注册项目的普通业务 Issue。",
+      "agent": "workflow-observer",
+      "mode": "run_only",
+      "project": "workflow-operations",
+      "status": "paused",
+      "subscribers": ["human_approver"],
+      "triggers": [
+        {
+          "key": "daily",
+          "kind": "schedule",
+          "label": "multica-workflow:workflow-full-daily",
+          "enabled": false,
+          "cron": "15 2 * * *",
           "timezone": "Asia/Shanghai"
         }
       ]
@@ -209,13 +211,15 @@
       "code-reviewer"
     ],
     "autopilot": "workflow-health-audit",
+    "full_scan_autopilot": "workflow-full-audit",
     "maintenance_intake_mode": "human_gated",
     "automatic_expansion": false
   },
   "secure_runtime": {
     "schema_version": 1,
-    "required": true,
-    "open_code_allowed": false,
+    "phase": "planned",
+    "required": false,
+    "open_code_allowed": true,
     "agents": {
       "workflow-maintainer": "workflow_maintainer",
       "workflow-maintenance-reviewer": "workflow_reviewer",

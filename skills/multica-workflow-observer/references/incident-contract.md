@@ -11,4 +11,4 @@ Do not report ordinary code defects, failed product tests, unclear business requ
 | medium | recoverable stall, duplicate work or process violation | report; continue only if correctness is intact |
 | low | documentation, usability or efficiency gap | report and continue |
 
-Incident metadata is routing data. Put reproduction and evidence in the description/comments after redaction. Never copy tokens, cookies, credentials, private keys, raw environment values or unredacted user content.
+Reporter Mode writes a deduplicated Observation first. Only the Observer converts pending Observations or deterministic scan findings into Incidents. Observation and Incident metadata is routing data; keep evidence redacted and bounded. Never copy tokens, cookies, credentials, private keys, raw environment values or unredacted user content.

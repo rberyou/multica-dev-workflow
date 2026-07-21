@@ -2,7 +2,7 @@
   "schema_version": 1,
   "workflow_version": "1.1.0-rc.4",
   "protocol_revision": "v3",
-  "observer_source_hash": "73f7f32fd5b033e16766b869fa82cb38761afd7d20029858c55b3d6672d7b47e",
+  "observer_source_hash": "0c22df553ca74fe03de3962324871548684ab8571897507e436cf240252f4767",
   "agents": {
     "leader": {
       "name": "开发队长",
@@ -10,11 +10,11 @@
       "runtime_binding": "codex-orchestrator",
       "max_concurrent_tasks": 1,
       "permission_mode": "public_to_workspace",
-      "instructions_sha256": "56d92fc157b0ee0e4988c4c3550a567cc63adb17c9b72fd83710b741e54754a8",
+      "instructions_sha256": "db7d263ea17e87891fc915b0e4b0b9c85d1585aa6e16756e47a8632be893c52e",
       "spec_hashes": {
-        "codex-only": "e5438ea4f24c04852c1464497258742138eadd97ac1b75a5c3bbd04b33aab6cb",
-        "opencode-only": "19fc05e8911df0aee86582e0fee338de3727e6941401b0d3c2560c0f4eae2795",
-        "quality": "e5438ea4f24c04852c1464497258742138eadd97ac1b75a5c3bbd04b33aab6cb"
+        "codex-only": "6e94edeb2c780749ee72ac598a14b6d7ee316253975a2bc4136926e38424d23d",
+        "opencode-only": "34eccc5b49cdd28883491937a214b3837052f0fb4f04584e30e9744dc0ad7149",
+        "quality": "6e94edeb2c780749ee72ac598a14b6d7ee316253975a2bc4136926e38424d23d"
       }
     },
     "planner": {
@@ -23,11 +23,11 @@
       "runtime_binding": "codex-orchestrator",
       "max_concurrent_tasks": 1,
       "permission_mode": "public_to_workspace",
-      "instructions_sha256": "7c76a64590e7350c70e2dc96fc0527c7c7285637ad94fec9398de62f028dc5df",
+      "instructions_sha256": "c4089e6825a26fc07266867b1bc9069c9959fbf3495545121ab728b85b7145bb",
       "spec_hashes": {
-        "codex-only": "072f82a5facea75abd2a29c22f29a138e2f1c90b6280bf83f3c261b267146561",
-        "opencode-only": "75efd266e7de0da9006b709134241452f6f15d9f3d83d176766a705d25f698e5",
-        "quality": "072f82a5facea75abd2a29c22f29a138e2f1c90b6280bf83f3c261b267146561"
+        "codex-only": "1d635ed5ec8657d05dce846351257aaa00831abc2bff95fc98acf1845ecebd4a",
+        "opencode-only": "78aff7fe592e1fc49459cd75768bbbf59f7386f8ff5b7076850369385bd56ef1",
+        "quality": "1d635ed5ec8657d05dce846351257aaa00831abc2bff95fc98acf1845ecebd4a"
       }
     },
     "plan-reviewer": {
@@ -36,11 +36,11 @@
       "runtime_binding": "opencode-review",
       "max_concurrent_tasks": 1,
       "permission_mode": "public_to_workspace",
-      "instructions_sha256": "058f08c3f59977e1a1b0e6d7a4b8b7e6d07107010648a321c567a07fe5832e8f",
+      "instructions_sha256": "5330247433d043eb23a57f46399f4e11925ce8cc23e469899a1486ea4f13bdd6",
       "spec_hashes": {
-        "codex-only": "ab0fe19697f64cbc42bef3ecabf0ac9e03ec12d3d157a7d51941b2bf7a6afade",
-        "opencode-only": "d2429815bb79cfef09fb466b67b4190682e27802447e4efa16e7c39a43878ab2",
-        "quality": "d2429815bb79cfef09fb466b67b4190682e27802447e4efa16e7c39a43878ab2"
+        "codex-only": "31dba4dc0bbad43670d7b327c58b52f3167daab41069c53f232d3692895e52f7",
+        "opencode-only": "29e09652a1240690e9c9f6c0ff1306e32ffad881577ea6d81f73c4cceaec0c62",
+        "quality": "29e09652a1240690e9c9f6c0ff1306e32ffad881577ea6d81f73c4cceaec0c62"
       }
     },
     "integrator": {
@@ -49,11 +49,11 @@
       "runtime_binding": "codex-orchestrator",
       "max_concurrent_tasks": 1,
       "permission_mode": "public_to_workspace",
-      "instructions_sha256": "34569a5ddfb23a880abce8d094fa1001288936e02238305e14af5205e3d0df88",
+      "instructions_sha256": "7452abf69576cd23014941a501f6b3ed673755eb0a9f383ef0a4a35fbd2be456",
       "spec_hashes": {
-        "codex-only": "f544d13d429743baaf45cbd6037f422a615cda8ed29da7d003b7e853fd98966b",
-        "opencode-only": "f30161a05bff161dd25aef5a5a6e403c573f90e433676dbe723b445dfb8a281a",
-        "quality": "f544d13d429743baaf45cbd6037f422a615cda8ed29da7d003b7e853fd98966b"
+        "codex-only": "3eb86f885f5322f1ab52685ac77bdd98bfc63b1f8b90c1d6ff466815fda849f1",
+        "opencode-only": "936983023f825d46908b7b35e83c9cbde3dda6b285bd5db2b2583dd9d0db7df5",
+        "quality": "3eb86f885f5322f1ab52685ac77bdd98bfc63b1f8b90c1d6ff466815fda849f1"
       }
     },
     "developer-a": {
@@ -62,11 +62,11 @@
       "runtime_binding": "codex-worker",
       "max_concurrent_tasks": 1,
       "permission_mode": "public_to_workspace",
-      "instructions_sha256": "015484dcd413b53da4830ffaa326f62d66f807e5ad8d0ae37dd87e7322e288c2",
+      "instructions_sha256": "c176d4a840d5fa65814530a83925f82dde24acb19b279b98bfe3a9ce7c237110",
       "spec_hashes": {
-        "codex-only": "9b433e9fa3c01dbf009a3f4f63a0e14356a617d9cb165ea8c241877e657cc48e",
-        "opencode-only": "3c658c0abcbb1e3ed82b213ee228e46f080cd40ad7ba5aad57acac36dd35502b",
-        "quality": "9b433e9fa3c01dbf009a3f4f63a0e14356a617d9cb165ea8c241877e657cc48e"
+        "codex-only": "21a3b9a97596f80ad9fe2fa46eb70286d445972b2f8b6684309b4dd3571b71c8",
+        "opencode-only": "bb2557da33d7873f32fde231bd3e45eb549ef2f27a1167dc8907aeb592e74c5f",
+        "quality": "21a3b9a97596f80ad9fe2fa46eb70286d445972b2f8b6684309b4dd3571b71c8"
       }
     },
     "developer-b": {
@@ -75,11 +75,11 @@
       "runtime_binding": "codex-worker",
       "max_concurrent_tasks": 1,
       "permission_mode": "public_to_workspace",
-      "instructions_sha256": "015484dcd413b53da4830ffaa326f62d66f807e5ad8d0ae37dd87e7322e288c2",
+      "instructions_sha256": "c176d4a840d5fa65814530a83925f82dde24acb19b279b98bfe3a9ce7c237110",
       "spec_hashes": {
-        "codex-only": "2b59410cd2409e2be638fde0ef1e5cfa272f7bca03000ade26a5ca00fabe00f6",
-        "opencode-only": "3568b491e48be09b0967aa799ee32630355bd47c9c79377de2b125d66e64b498",
-        "quality": "2b59410cd2409e2be638fde0ef1e5cfa272f7bca03000ade26a5ca00fabe00f6"
+        "codex-only": "c0aecbc5944f469f0f2a31c817ca530614972b062904e9ce7036106dda065ccc",
+        "opencode-only": "5d78c18845f3821b2b91dc0a5ab62cb3eeb22586ae122eb4d6917fd789e30ab1",
+        "quality": "c0aecbc5944f469f0f2a31c817ca530614972b062904e9ce7036106dda065ccc"
       }
     },
     "code-reviewer": {
@@ -88,50 +88,50 @@
       "runtime_binding": "opencode-review",
       "max_concurrent_tasks": 1,
       "permission_mode": "public_to_workspace",
-      "instructions_sha256": "c02de780266581af834332073a662cae67fe20cf79a1e64a7647eaad124645d0",
+      "instructions_sha256": "d859fecfd020d4cb279ed8d1498db1aba332f34bfb6543d97ad03bb29d61bd3f",
       "spec_hashes": {
-        "codex-only": "b5d40241edf5e41ebcbc7b79be8df3f43c29179a76a8a0f8bd85b2070c42bc57",
-        "opencode-only": "2af0f3b947115358c8aa509b1530b2b4a5fbd7c64ee584abe64192afa77553d3",
-        "quality": "2af0f3b947115358c8aa509b1530b2b4a5fbd7c64ee584abe64192afa77553d3"
+        "codex-only": "bdb2cfd9c65a187c44131d8e56cb8528ff338bcdf0ef124819ace49f2f8f6ae1",
+        "opencode-only": "6239179c71e29f10a88f03dc4b12c0536e417199222dc1fe5a168e37a7b93d71",
+        "quality": "6239179c71e29f10a88f03dc4b12c0536e417199222dc1fe5a168e37a7b93d71"
       }
     },
     "workflow-observer": {
       "name": "工作流观察员",
       "description": "接收工作流异常上报、运行确定性巡检、去重分诊并验证修复结果",
-      "runtime_binding": "codex-secure-review",
+      "runtime_binding": "opencode-review",
       "max_concurrent_tasks": 1,
       "permission_mode": "public_to_workspace",
-      "instructions_sha256": "85d3b51d20f5c40fead85ebe827d68444f9b8dc3587509afe8eabef695f442a9",
+      "instructions_sha256": "48489559c8e596e3520dc894098b9b54eeff1a5b6a9dc96624b62e884ef52881",
       "spec_hashes": {
-        "codex-only": "b8d98ebb4ecef4eab1c16ab003fb967c73e3c566c47a703199b819ce458359df",
-        "opencode-only": "b8d98ebb4ecef4eab1c16ab003fb967c73e3c566c47a703199b819ce458359df",
-        "quality": "b8d98ebb4ecef4eab1c16ab003fb967c73e3c566c47a703199b819ce458359df"
+        "codex-only": "0aecdea35660d935fca48885ccfa8a11925e4029e19704845d453ae23ff7610c",
+        "opencode-only": "ddd3a4ff1ce32efd1ec43b0f8a2d841eef2c2f227eaf2756bb6451314d7dc786",
+        "quality": "ddd3a4ff1ce32efd1ec43b0f8a2d841eef2c2f227eaf2756bb6451314d7dc786"
       }
     },
     "workflow-maintainer": {
       "name": "工作流维护员",
       "description": "根据已确认 Incident 维护工作流源码、测试、RC、发布和回滚",
-      "runtime_binding": "codex-secure-maintainer",
+      "runtime_binding": "codex-worker",
       "max_concurrent_tasks": 1,
-      "permission_mode": "public_to_workspace",
-      "instructions_sha256": "5e3c5622cc104a7bec9bae0cf035c60cde0754ed942f87cf2e66f5626286bdb0",
+      "permission_mode": "private",
+      "instructions_sha256": "1bddc133dff67c9f48f3fe4006a842c9a361b45930ec63830ba50f675ca2370a",
       "spec_hashes": {
-        "codex-only": "ba601bfe27ca67610e9f5df5d73158bb5fdd70498bd4e7262f5d721cba8bf296",
-        "opencode-only": "ba601bfe27ca67610e9f5df5d73158bb5fdd70498bd4e7262f5d721cba8bf296",
-        "quality": "ba601bfe27ca67610e9f5df5d73158bb5fdd70498bd4e7262f5d721cba8bf296"
+        "codex-only": "0f4df556a739ab586206a0ac981a27b841b6815d72249409378b3d52fa2c895e",
+        "opencode-only": "4cc5284495c167ce4db9555d506b0b78db3386b14cbaee4dab77e24a1b4ff509",
+        "quality": "0f4df556a739ab586206a0ac981a27b841b6815d72249409378b3d52fa2c895e"
       }
     },
     "workflow-maintenance-reviewer": {
       "name": "工作流维护审查员",
       "description": "独立审查工作流变更 Plan、代码、发布和回滚，不修改被审查内容",
-      "runtime_binding": "codex-secure-review",
+      "runtime_binding": "opencode-review",
       "max_concurrent_tasks": 1,
-      "permission_mode": "public_to_workspace",
-      "instructions_sha256": "1c3fd6866fb37dc1d54b6a946e679c8fa9fd514f9cb9546ecd11bb51fe15776f",
+      "permission_mode": "private",
+      "instructions_sha256": "65d59897fb6c499c94fbac09e4ee7aa1db3dd5b4d541fde0f91f1080e0376508",
       "spec_hashes": {
-        "codex-only": "683d199c846be689840eaa1778ad371434f74c93263742acc834ae995bba035b",
-        "opencode-only": "683d199c846be689840eaa1778ad371434f74c93263742acc834ae995bba035b",
-        "quality": "683d199c846be689840eaa1778ad371434f74c93263742acc834ae995bba035b"
+        "codex-only": "5a92de119a01dcf0b69872ef7e0d9cc8cf67317f114962f8f3723830c0e54bdf",
+        "opencode-only": "a3b87ee7b3be421cf855a546ed98a3bc96dc59d68b60048dcb77a2fb4e77a22a",
+        "quality": "a3b87ee7b3be421cf855a546ed98a3bc96dc59d68b60048dcb77a2fb4e77a22a"
       }
     }
   },
@@ -237,7 +237,7 @@
     "multica-requirement-intake": {
       "key": "requirement-intake",
       "attach_to": [],
-      "package_hash": "252782914d693d13745e6d9fa0178eb45fdbd7fe9658ccf8f87d6dc759b5a354"
+      "package_hash": "83114d8f0c531112f3ae1e951850685f323818955a95368d57fa16506289fbb1"
     },
     "multica-workflow-observer": {
       "key": "workflow-observer",
@@ -318,8 +318,8 @@
   },
   "autopilots": {
     "workflow-health-audit": {
-      "title": "工作流健康巡检",
-      "description": "使用 multica-workflow-observer 的 Observer Mode。定位已安装 Skill，以当前巡检任务作为 coverage_issue，运行其 scripts/observer.py audit --scope issues --report；不要在 Autopilot 内自检调度新鲜度，外部操作员或调度器必须单独运行 scripts/workflow.py health；没有 finding 时不创建 Incident，无法完整扫描或持久化 finding 时必须失败并说明原因。",
+      "title": "工作流增量巡检",
+      "description": "使用 multica-workflow-observer 的 Observer Mode，运行 scripts/observer.py scan --mode incremental。只扫描已启用 Project Registration，先恢复 pending/failed Observation，再执行确定性规则、Incident 去重和项目独立游标提交；无法完整扫描或持久化状态时必须失败。外部操作员或调度器必须单独运行 scripts/workflow.py health。",
       "agent": "workflow-observer",
       "mode": "run_only",
       "project": "workflow-operations",
@@ -335,6 +335,28 @@
           "label": "multica-workflow:workflow-health-hourly",
           "enabled": false,
           "cron": "0 * * * *",
+          "timezone": "Asia/Shanghai"
+        }
+      ]
+    },
+    "workflow-full-audit": {
+      "title": "工作流每日全量巡检",
+      "description": "使用 multica-workflow-observer 的 Observer Mode，运行 scripts/observer.py scan --mode full。重新校验所有已注册项目的工作流对象、pending/failed Observation 和 Git 管理的控制面状态；不得扫描未注册项目的普通业务 Issue。",
+      "agent": "workflow-observer",
+      "mode": "run_only",
+      "project": "workflow-operations",
+      "status": "paused",
+      "issue_title_template": "",
+      "subscribers": [
+        "human_approver"
+      ],
+      "triggers": [
+        {
+          "key": "daily",
+          "kind": "schedule",
+          "label": "multica-workflow:workflow-full-daily",
+          "enabled": false,
+          "cron": "15 2 * * *",
           "timezone": "Asia/Shanghai"
         }
       ]
@@ -354,12 +376,17 @@
       "code-reviewer"
     ],
     "autopilot": "workflow-health-audit",
+    "full_scan_autopilot": "workflow-full-audit",
     "maintenance_intake_mode": "human_gated",
     "automatic_expansion": false,
     "observer_skill_name": "multica-workflow-observer",
     "modes": {
       "enabled": {
         "autopilot_status": "paused",
+        "autopilot_statuses": {
+          "workflow-health-audit": "paused",
+          "workflow-full-audit": "paused"
+        },
         "observer_skill_attach_to": [
           "leader",
           "planner",
@@ -373,6 +400,10 @@
       },
       "disabled": {
         "autopilot_status": "paused",
+        "autopilot_statuses": {
+          "workflow-health-audit": "paused",
+          "workflow-full-audit": "paused"
+        },
         "observer_skill_attach_to": [
           "leader",
           "planner",

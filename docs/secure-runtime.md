@@ -1,5 +1,7 @@
 # Secure Agent Runtime
 
+Status: reviewed Phase 3 target. Phase 1 keeps `secure_runtime.phase=planned` and does not claim these controls are active in the Canary workspace.
+
 RC4 isolates workflow maintenance Agents from the host user's GitHub, Git,
 Codex, browser, and operating-system credentials. The host user may keep using
 their normal `gh` and SSH setup. Managed Agents run only through the dedicated

@@ -445,8 +445,8 @@ class ReconcileTests(unittest.TestCase):
         types = [action["type"] for action in plan["actions"]]
         self.assertEqual(types.count("CREATE_AGENT"), 10)
         self.assertEqual(types.count("CREATE_PROJECT"), 1)
-        self.assertEqual(types.count("CREATE_AUTOPILOT"), 1)
-        self.assertEqual(types.count("ADD_AUTOPILOT_TRIGGER"), 1)
+        self.assertEqual(types.count("CREATE_AUTOPILOT"), 2)
+        self.assertEqual(types.count("ADD_AUTOPILOT_TRIGGER"), 2)
         self.assertEqual(types.count("CREATE_SQUAD"), 1)
         self.assertEqual(types.count("ADD_MEMBER"), 8)
         self.assertEqual(types.count("CREATE_SKILL"), 3)
@@ -569,16 +569,23 @@ class ReconcileTests(unittest.TestCase):
             ]
             self.assertEqual(
                 len([item for item in autopilot_commands if item[:2] == ("autopilot", "create")]),
-                1,
+                2,
             )
             self.assertEqual(
                 len([item for item in autopilot_commands if item[:2] == ("autopilot", "update")]),
-                1,
+                2,
             )
-            update = next(
-                item for item in autopilot_commands if item[:2] == ("autopilot", "update")
+            updates = [
+                item
+                for item in autopilot_commands
+                if item[:2] == ("autopilot", "update")
+            ]
+            self.assertTrue(
+                all(
+                    update[3:] == ("--status", "paused", "--output", "json")
+                    for update in updates
+                )
             )
-            self.assertEqual(update[3:], ("--status", "paused", "--output", "json"))
             for command in autopilot_commands:
                 self.assertNotIn("--priority", command)
                 self.assertFalse(
@@ -663,9 +670,12 @@ class ReconcileTests(unittest.TestCase):
                 for command in cli.commands
                 if command[:2] == ("autopilot", "update")
             ]
-            self.assertEqual(len(updates), 1)
-            self.assertEqual(
-                updates[0][3:], ("--status", "paused", "--output", "json")
+            self.assertEqual(len(updates), 2)
+            self.assertTrue(
+                all(
+                    update[3:] == ("--status", "paused", "--output", "json")
+                    for update in updates
+                )
             )
 
     def test_non_member_autopilot_subscriber_remains_visible_as_drift(self):
@@ -1005,9 +1015,33 @@ class ReconcileTests(unittest.TestCase):
                 )
             )
 
-    def test_repository_audit_and_health_accept_json_output(self):
+    def test_repository_observer_commands_accept_json_output(self):
         self.assertEqual(workflow_cli.parser().parse_args(["audit", "--output", "json"]).output, "json")
         self.assertEqual(workflow_cli.parser().parse_args(["health", "--output", "json"]).output, "json")
+        self.assertEqual(
+            workflow_cli.parser()
+            .parse_args(["scan", "--mode", "incremental", "--output", "json"])
+            .output,
+            "json",
+        )
+        self.assertEqual(
+            workflow_cli.parser()
+            .parse_args(
+                [
+                    "bind-workflow-issue",
+                    "--issue",
+                    "T-1",
+                    "--object-type",
+                    "requirement",
+                    "--created-by-role",
+                    "leader",
+                    "--output",
+                    "json",
+                ]
+            )
+            .output,
+            "json",
+        )
 
     def test_command_apply_reports_clean_immediate_verification(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -1266,7 +1300,7 @@ class ReconcileTests(unittest.TestCase):
             plan = build_plan(temp_root, cli, workspace, "quality", runtime_map, False, False, write_archives=False)
             self.assertFalse(plan_has_blockers(plan))
             create = next(item for item in plan["actions"] if item["type"] == "CREATE_AGENT" and item["key"] == "workflow-observer")
-            self.assertEqual(create["desired"]["runtime_id"], "runtime-codex")
+            self.assertEqual(create["desired"]["runtime_id"], "runtime-opencode")
 
     def test_secure_bindings_pin_the_dedicated_runtime(self):
         with committed_temp_repo() as temp_root:
@@ -1285,15 +1319,10 @@ class ReconcileTests(unittest.TestCase):
                 deployment_profile="quality",
             )
             with patch.object(workflow_cli, "context", return_value=(cli, workspace)):
-                self.assertEqual(
-                    workflow_cli.command_secure_bindings(args, temp_root), 0
-                )
-            bindings = json.loads(output.read_text(encoding="utf-8"))
-            self.assertEqual(bindings["runtime_id"], "runtime-codex")
-            self.assertEqual(
-                set(bindings["agents"].values()),
-                {"workflow_maintainer", "workflow_reviewer"},
-            )
+                with self.assertRaisesRegex(
+                    WorkflowError, "secure runtime is only planned"
+                ):
+                    workflow_cli.command_secure_bindings(args, temp_root)
 
             reviewer = next(
                 item
@@ -1376,8 +1405,10 @@ class ReconcileTests(unittest.TestCase):
             ]
             self.assertEqual(remaining, [])
             self.assertEqual(len(cli.projects), 1)
-            self.assertEqual(len(cli.autopilots), 1)
-            self.assertEqual(cli.autopilots[0]["status"], "paused")
+            self.assertEqual(len(cli.autopilots), 2)
+            self.assertTrue(
+                all(item["status"] == "paused" for item in cli.autopilots)
+            )
 
 
 if __name__ == "__main__":

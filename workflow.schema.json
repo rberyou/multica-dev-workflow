@@ -154,7 +154,7 @@
     "operations": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["project", "observer_agent", "observer_skill", "reporter_agents", "autopilot", "maintenance_intake_mode", "automatic_expansion"],
+      "required": ["project", "observer_agent", "observer_skill", "reporter_agents", "autopilot", "full_scan_autopilot", "maintenance_intake_mode", "automatic_expansion"],
       "properties": {
         "project": {"$ref": "#/$defs/key"},
         "observer_agent": {"$ref": "#/$defs/key"},
@@ -166,6 +166,7 @@
           "items": {"$ref": "#/$defs/key"}
         },
         "autopilot": {"$ref": "#/$defs/key"},
+        "full_scan_autopilot": {"$ref": "#/$defs/key"},
         "maintenance_intake_mode": {"const": "human_gated"},
         "automatic_expansion": {"const": false}
       }
@@ -173,11 +174,12 @@
     "secure_runtime": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema_version", "required", "open_code_allowed", "agents"],
+      "required": ["schema_version", "phase", "required", "open_code_allowed", "agents"],
       "properties": {
         "schema_version": {"const": 1},
-        "required": {"const": true},
-        "open_code_allowed": {"const": false},
+        "phase": {"enum": ["planned", "enforced"]},
+        "required": {"type": "boolean"},
+        "open_code_allowed": {"type": "boolean"},
         "agents": {
           "type": "object",
           "minProperties": 1,
@@ -185,7 +187,27 @@
             "enum": ["workflow_maintainer", "workflow_reviewer"]
           }
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"phase": {"const": "planned"}}},
+          "then": {
+            "properties": {
+              "required": {"const": false},
+              "open_code_allowed": {"const": true}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"phase": {"const": "enforced"}}},
+          "then": {
+            "properties": {
+              "required": {"const": true},
+              "open_code_allowed": {"const": false}
+            }
+          }
+        }
+      ]
     },
     "squad": {
       "type": "object",

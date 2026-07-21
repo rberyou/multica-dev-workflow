@@ -364,7 +364,14 @@ def validate_repository(root: Path, deployment_profile: str) -> tuple[dict[str, 
     if not isinstance(operations, dict):
         errors.append("operations is required for schema_version 2")
     else:
-        for field in ["project", "observer_agent", "observer_skill", "reporter_agents", "autopilot"]:
+        for field in [
+            "project",
+            "observer_agent",
+            "observer_skill",
+            "reporter_agents",
+            "autopilot",
+            "full_scan_autopilot",
+        ]:
             if field not in operations:
                 errors.append(f"operations.{field} is required")
         if operations.get("project") not in project_key_set:
@@ -378,6 +385,10 @@ def validate_repository(root: Path, deployment_profile: str) -> tuple[dict[str, 
             errors.append(f"operations.reporter_agents reference unknown agents: {sorted(unknown_reporters)}")
         if operations.get("autopilot") not in set(autopilot_keys):
             errors.append("operations.autopilot must reference a managed autopilot")
+        if operations.get("full_scan_autopilot") not in set(autopilot_keys):
+            errors.append(
+                "operations.full_scan_autopilot must reference a managed autopilot"
+            )
         if operations.get("maintenance_intake_mode") != "human_gated":
             errors.append("operations.maintenance_intake_mode must be human_gated")
         if operations.get("automatic_expansion") is not False:
@@ -409,34 +420,50 @@ def validate_repository(root: Path, deployment_profile: str) -> tuple[dict[str, 
                 errors.append(
                     "operations.observer_skill attach_to must exactly match reporters plus observer_agent"
                 )
-        managed_autopilot = next(
-            (
-                item
-                for item in autopilots
-                if item.get("key") == operations.get("autopilot")
-            ),
-            None,
-        )
-        if managed_autopilot and (
-            managed_autopilot.get("agent") != observer_agent
-            or managed_autopilot.get("project") != operations.get("project")
-        ):
-            errors.append(
-                "operations.autopilot must use operations.observer_agent and operations.project"
+        for field in ["autopilot", "full_scan_autopilot"]:
+            managed_autopilot = next(
+                (
+                    item
+                    for item in autopilots
+                    if item.get("key") == operations.get(field)
+                ),
+                None,
             )
+            if managed_autopilot and (
+                managed_autopilot.get("agent") != observer_agent
+                or managed_autopilot.get("project") != operations.get("project")
+            ):
+                errors.append(
+                    f"operations.{field} must use operations.observer_agent and operations.project"
+                )
     secure_runtime = manifest.get("secure_runtime")
     if not isinstance(secure_runtime, dict):
         errors.append("secure_runtime is required")
     else:
         secure_agents = secure_runtime.get("agents") or {}
-        if secure_runtime.get("required") is not True or secure_runtime.get("open_code_allowed") is not False:
-            errors.append("secure_runtime must be required and disallow OpenCode")
+        secure_phase = str(secure_runtime.get("phase") or "")
+        if secure_phase not in {"planned", "enforced"}:
+            errors.append("secure_runtime.phase must be planned or enforced")
+        if secure_phase == "planned" and (
+            secure_runtime.get("required") is not False
+            or secure_runtime.get("open_code_allowed") is not True
+        ):
+            errors.append(
+                "planned secure_runtime must be optional and allow ordinary runtimes"
+            )
+        if secure_phase == "enforced" and (
+            secure_runtime.get("required") is not True
+            or secure_runtime.get("open_code_allowed") is not False
+        ):
+            errors.append("enforced secure_runtime must be required and disallow OpenCode")
         if not isinstance(secure_agents, dict) or not secure_agents:
             errors.append("secure_runtime.agents must define managed secure roles")
         for agent_key, security_profile in secure_agents.items():
             desired_agent = next((item for item in agents if item.get("key") == agent_key), None)
             if not desired_agent:
                 errors.append(f"secure_runtime references missing agent {agent_key}")
+                continue
+            if secure_phase != "enforced":
                 continue
             runtime_config = desired_agent.get("runtime_config") or {}
             if runtime_config.get("secure_runtime_required") is not True:
@@ -1464,7 +1491,10 @@ def build_plan(
             continue
 
         effective_status = str(autopilot["status"])
-        if disable_operations and operations.get("autopilot") == autopilot["key"]:
+        if disable_operations and autopilot["key"] in {
+            operations.get("autopilot"),
+            operations.get("full_scan_autopilot"),
+        }:
             effective_status = "paused"
         body = str(autopilot.get("description") or "").strip() + "\n"
         spec = autopilot_spec(

@@ -4,7 +4,7 @@
     "secure-runtime/policy/requirements.template.toml": "7d6cc0a686ab5e93eaa587c0ebf51d01aa049ea7bf90bee57e81772c29bbcf64",
     "skills/multica-requirement-intake/SKILL.md": "583dce1f56cd92b37f4a720082a92e405c7c2932da6f98885bbd0ffd573d5169",
     "skills/multica-requirement-intake/agents/openai.yaml": "810631ccb15d1691e3b45f30d0ed64dfa76cf41af96de397b877efb95e7fe072",
-    "skills/multica-requirement-intake/references/operating-manual.md": "60882c59fe64f87720d9e78a4f355b4e07dd7e437f1cd2442596131488995e80",
+    "skills/multica-requirement-intake/references/operating-manual.md": "a856b5a435370b5098650917ade719f5d63abbcd6d9ea74d8171d7acd84b4df7",
     "skills/multica-requirement-intake/references/portable-setup.md": "c2c987711559979cec9d3fb22e14b883d519aec95eebd5f08d9ecc830eea55a9",
     "skills/multica-requirement-intake/references/requirement-template.md": "8868e6d0c3640fc0c5c38d9b4d2b391e08dd686c40eaee6343cc69c5cb2f4334",
     "skills/multica-workflow-console/SKILL.md": "f7be32b1b3e874b9f1ce376076b26cc23ac639be30da6f673d9bbc68f03e433c",
@@ -19,11 +19,11 @@
     "skills/multica-workflow-manager/SKILL.md": "00538fbcd16f4f557b3dfceb68dd556c4126ad1911ed8688c3d352d6afd63bc7",
     "skills/multica-workflow-manager/agents/openai.yaml": "681d9b36164f2f00778e87b98246d4643ee64d86d4f7794122520e6de83dc394",
     "skills/multica-workflow-manager/references/commands.md": "efb0acada3b81b6d80391793358458fbeafd53d4bf14828416f507a6233d2b4f",
-    "skills/multica-workflow-observer/SKILL.md": "e673dece103581a58e049b7afbd67887f4e0ec4ad9578473f44a639a83078688",
+    "skills/multica-workflow-observer/SKILL.md": "f63b2c90c325eaa6f9a531c30d31a1f95217e0de0fb9555d3ed8700f1ac2fafe",
     "skills/multica-workflow-observer/agents/openai.yaml": "178ee33cbfccf66f708769d50dbc2853fe06e9f91716b3fd36396864d5fa5fec",
-    "skills/multica-workflow-observer/references/control-plane-contract.json": "4ab1bba75ce5b6d1ffc62083b06ff089cc1255be4ef1a9df5d72931f02cb221d",
-    "skills/multica-workflow-observer/references/incident-contract.md": "f4bdbf289187eb5e39010002ee712ff2e9654e48bff29d9dff418dc9963f1660",
-    "skills/multica-workflow-observer/references/triage-runbook.md": "de29acb47d5060b96a8055a7c0ba83fc7428d4022be4dda77312b121f47bc3d7",
-    "skills/multica-workflow-observer/scripts/observer.py": "76042d1a1b2d40a0393d5d07cf101dc8b2b54c27095859b83be584227b18f3e8"
+    "skills/multica-workflow-observer/references/control-plane-contract.json": "3a83feeb2abf42a98e0ec308c8d6839b5b9b0644225c1439d4a29064f7775736",
+    "skills/multica-workflow-observer/references/incident-contract.md": "3cd607cc18c88843aaac759c9bbda7795a9f7763aa9c59d758637a6f265daa6d",
+    "skills/multica-workflow-observer/references/triage-runbook.md": "a7fb2436de8f3c8983aa2a1cd89677af68b09e8b8bd724a8c75833e327afc8ff",
+    "skills/multica-workflow-observer/scripts/observer.py": "7c5fdab7cf31e57841d39b3618efa1bb519e292a6c28e579b22bc7da6ddc9e72"
   }
 }

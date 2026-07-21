@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -16,17 +16,37 @@ import shutil
 import subprocess
 import sys
 from typing import Any
+import uuid
 
 
 MANAGED_BY = "multica-dev-workflow"
 WORKFLOW_ID = "development-delivery"
 OPERATIONS_PROJECT_KEY = "project.workflow-operations"
+OBSERVER_AUTOPILOT_KEY = "autopilot.workflow-health-audit"
 OBSERVER_AGENT_KEY = "agent.workflow-observer"
 MAINTAINER_AGENT_KEY = "agent.workflow-maintainer"
 MAINTENANCE_REVIEWER_AGENT_KEY = "agent.workflow-maintenance-reviewer"
 SQUAD_KEY = "squad.development-delivery"
 APPROVER_ROLE = "人工审批人"
 ACTIVE_STATUSES = {"backlog", "todo", "in_progress", "in_review", "blocked"}
+ALL_ISSUE_STATUSES = (*sorted(ACTIVE_STATUSES), "done", "cancelled")
+PHASE1_OPERATION_TYPES = {
+    "project_registration",
+    "observation",
+    "incident",
+    "observer_control",
+    "maintenance_case",
+}
+TRIAGE_VERDICTS = {
+    "CONFIRMED_WORKFLOW_BUG",
+    "WORKFLOW_GAP",
+    "USAGE_ERROR",
+    "PROJECT_DEFECT",
+    "RUNTIME_INCIDENT",
+    "MULTICA_PRODUCT_DEFECT",
+    "FALSE_POSITIVE",
+    "DECISION_REQUIRED",
+}
 SECRET_KEY_RE = re.compile(r"token|secret|password|cookie|authorization|private[_-]?key|custom_env", re.I)
 BEARER_RE = re.compile(r"(?i)\b(?:bearer|basic)\s+[A-Za-z0-9._~+\-/]+=*")
 PRIVATE_KEY_RE = re.compile(r"-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----", re.S)
@@ -607,6 +627,177 @@ def resolve_control_plane(cli: CLI) -> tuple[dict[str, Any], dict[str, Any], str
     return project, observer, str(approvers[0]["member_id"])
 
 
+def resolve_observer_autopilot(cli: CLI) -> dict[str, Any]:
+    autopilots = detailed_items(
+        cli,
+        as_list(cli.json(["autopilot", "list", "--output", "json"]), "autopilots"),
+        "autopilot",
+    )
+    return managed_match(autopilots, OBSERVER_AUTOPILOT_KEY, "description")
+
+
+def list_issues(
+    cli: CLI,
+    *,
+    project_id: str | None = None,
+    metadata: list[str] | None = None,
+    status: str | None = None,
+    max_issues: int = 5000,
+) -> list[dict[str, Any]]:
+    result = []
+    offset = 0
+    page_size = 100
+    while offset < max_issues:
+        limit = min(page_size, max_issues - offset)
+        command = ["issue", "list"]
+        if project_id:
+            command.extend(["--project", project_id])
+        if status:
+            command.extend(["--status", status])
+        for item in metadata or []:
+            command.extend(["--metadata", item])
+        command.extend(
+            ["--limit", str(limit), "--offset", str(offset), "--output", "json"]
+        )
+        page = as_list(cli.json(command), "issues")
+        result.extend(page)
+        if len(page) < limit:
+            return result
+        offset += len(page)
+    raise ObserverError(f"Issue scan exceeded max_issues={max_issues}")
+
+
+def operation_records(
+    cli: CLI,
+    project_id: str,
+    object_type: str,
+    *,
+    max_issues: int = 5000,
+) -> list[dict[str, Any]]:
+    return list_issues(
+        cli,
+        project_id=project_id,
+        metadata=[f"workflow_object_type={object_type}"],
+        max_issues=max_issues,
+    )
+
+
+def pending_observation_records(
+    cli: CLI, project_id: str, max_issues: int
+) -> list[dict[str, Any]]:
+    by_id = {}
+    for field in ["observation_status", "status"]:
+        for status in ["pending", "failed"]:
+            for item in list_issues(
+                cli,
+                project_id=project_id,
+                metadata=[
+                    "workflow_object_type=observation",
+                    f"{field}={status}",
+                ],
+                max_issues=max_issues,
+            ):
+                if issue_ref(item):
+                    by_id[issue_ref(item)] = item
+    return list(by_id.values())
+
+
+def set_metadata_map(cli: CLI, issue_id: str, values: dict[str, Any]) -> None:
+    for key, value in values.items():
+        set_metadata(cli, issue_id, key, value)
+
+
+def workflow_instance_id(metadata: dict[str, Any], cli: CLI) -> str:
+    return str(
+        metadata.get("workflow_instance_id")
+        or metadata.get("workflow_id")
+        or f"unregistered:{cli.workspace_id}"
+    )
+
+
+def split_entity(value: str) -> tuple[str, str]:
+    entity_type, separator, entity_id = value.partition(":")
+    if separator and entity_type and entity_id:
+        return entity_type, entity_id
+    return "issue", value
+
+
+def phase1_incident_key(
+    instance_id: str,
+    protocol_revision: str,
+    rule_id: str,
+    entity: str,
+) -> str:
+    entity_type, entity_id = split_entity(entity)
+    return hashlib.sha256(
+        (
+            f"{instance_id}\n{protocol_revision}\n{rule_id}\n"
+            f"{entity_type}\n{entity_id}"
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def observation_key(
+    instance_id: str,
+    source_issue_id: str,
+    rule_id: str,
+    entity: str,
+) -> str:
+    entity_type, entity_id = split_entity(entity)
+    return hashlib.sha256(
+        (
+            f"{instance_id}\n{source_issue_id}\n{rule_id}\n"
+            f"{entity_type}\n{entity_id}"
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def parse_json_map(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def bounded_json_log(items: list[dict[str, Any]], limit: int = 12000) -> str:
+    bounded = list(items[-20:])
+    while bounded:
+        rendered = json.dumps(bounded, ensure_ascii=False, sort_keys=True)
+        if len(rendered.encode("utf-8")) <= limit:
+            return rendered
+        bounded.pop(0)
+    return "[]"
+
+
+def cursor_time(value: Any) -> datetime:
+    if value is None or value == "":
+        return datetime.fromtimestamp(0, timezone.utc)
+    parsed = parse_json_map(value)
+    stamp = parse_time(parsed.get("updated_at"))
+    if not stamp:
+        raise ObserverError("Project Registration cursor is invalid")
+    return stamp
+
+
+def cursor_value(stamp: datetime, issue_id: str = "") -> str:
+    return json.dumps(
+        {
+            "updated_at": stamp.astimezone(timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z"),
+            "issue_id": issue_id,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
 def find_incidents(
     cli: CLI, project_id: str, dedupe_key: str, max_issues: int = 5000
 ) -> list[dict[str, Any]]:
@@ -677,6 +868,354 @@ def find_incidents(
     return list(by_id.values())
 
 
+def record_metadata(cli: CLI, issue: dict[str, Any]) -> dict[str, Any]:
+    embedded = issue.get("metadata")
+    if isinstance(embedded, dict):
+        return embedded
+    return metadata_map(cli, issue_ref(issue))
+
+
+def register_project(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
+    operations_project, observer, _ = resolve_control_plane(cli)
+    project = cli.json(["project", "get", args.project_id, "--output", "json"])
+    if not isinstance(project, dict) or not project.get("id"):
+        raise ObserverError(f"project is unreadable: {args.project_id}")
+    records = operation_records(
+        cli, str(operations_project["id"]), "project_registration"
+    )
+    matches = []
+    for item in records:
+        metadata = record_metadata(cli, item)
+        if (
+            str(metadata.get("workspace_id") or "") == cli.workspace_id
+            and str(metadata.get("project_id") or "") == str(project["id"])
+            and str(metadata.get("workflow_instance_id") or "")
+            == args.workflow_instance_id
+        ):
+            matches.append(item)
+    if len(matches) > 1:
+        raise ObserverError("multiple Project Registration records match the same instance")
+    if matches:
+        registration = matches[0]
+        action = "updated"
+    else:
+        registration = cli.json(
+            [
+                "issue",
+                "create",
+                "--title",
+                f"[Workflow Registration] {project.get('title') or project.get('name') or project['id']}",
+                "--description",
+                "Observer scan registration for one development workflow project.",
+                "--project",
+                str(operations_project["id"]),
+                "--assignee-id",
+                str(observer["id"]),
+                "--status",
+                "in_progress",
+                "--priority",
+                "low",
+                "--output",
+                "json",
+            ]
+        )
+        action = "created"
+    registration_id = issue_ref(registration)
+    if not registration_id:
+        raise ObserverError("Project Registration did not return an Issue ID")
+    managed_agent_ids = sorted(
+        set(item.strip() for item in (args.managed_agent_ids or "").split(",") if item.strip())
+    )
+    existing_metadata = metadata_map(cli, registration_id)
+    initial_cursor = existing_metadata.get("committed_cursor") or cursor_value(
+        datetime.fromtimestamp(0, timezone.utc)
+    )
+    set_metadata_map(
+        cli,
+        registration_id,
+        {
+            "workflow_object_type": "project_registration",
+            "workflow_id": WORKFLOW_ID,
+            "workflow_instance_id": args.workflow_instance_id,
+            "workspace_id": cli.workspace_id,
+            "project_id": str(project["id"]),
+            "project_name": str(project.get("title") or project.get("name") or ""),
+            "development_squad_id": args.development_squad_id or "",
+            "managed_agent_ids": json.dumps(managed_agent_ids, separators=(",", ":")),
+            "protocol_revision": args.protocol_revision,
+            "enabled": not args.disabled,
+            "registered_at": existing_metadata.get("registered_at") or utc_now(),
+            "committed_cursor": initial_cursor,
+            "checkpoint_cursor": existing_metadata.get("checkpoint_cursor")
+            or initial_cursor,
+        },
+    )
+    return {
+        "action": action,
+        "registration_id": registration_id,
+        "project_id": str(project["id"]),
+        "workflow_instance_id": args.workflow_instance_id,
+        "enabled": not args.disabled,
+    }
+
+
+def bind_workflow_issue(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
+    operations_project, _, _ = resolve_control_plane(cli)
+    issue = cli.json(["issue", "get", args.issue, "--output", "json"])
+    if not isinstance(issue, dict):
+        raise ObserverError(f"Issue is unreadable: {args.issue}")
+    issue_id = issue_ref(issue) or args.issue
+    if not re.fullmatch(r"[a-z][a-z0-9_]{1,63}", args.object_type):
+        raise ObserverError("workflow object type is invalid")
+    if args.object_type in PHASE1_OPERATION_TYPES:
+        raise ObserverError("development Issues cannot use an operations object type")
+    current = metadata_map(cli, issue_id)
+    registration = find_registration(
+        cli, str(operations_project["id"]), issue, current
+    )
+    if not registration:
+        raise ObserverError(
+            f"Issue {issue_id} does not belong to an enabled Project Registration"
+        )
+    registration_metadata = registration["metadata"]
+    existing_instance = str(current.get("workflow_instance_id") or "")
+    registered_instance = str(registration_metadata["workflow_instance_id"])
+    if existing_instance and existing_instance != registered_instance:
+        raise ObserverError(
+            "Issue workflow_instance_id conflicts with its Project Registration"
+        )
+    root_requirement_id = args.root_requirement_id or str(
+        current.get("root_requirement_id") or issue_id
+    )
+    values = {
+        "managed_by": MANAGED_BY,
+        "workflow_id": WORKFLOW_ID,
+        "workflow_version": skill_version(),
+        "workflow_instance_id": registered_instance,
+        "workflow_object_type": args.object_type,
+        "root_requirement_id": root_requirement_id,
+        "created_by_role": args.created_by_role,
+        "protocol_revision": str(
+            registration_metadata.get("protocol_revision") or "v3"
+        ),
+    }
+    set_metadata_map(cli, issue_id, values)
+    return {
+        "issue_id": issue_id,
+        "registration_id": issue_ref(registration["issue"]),
+        **values,
+    }
+
+
+def find_registration(
+    cli: CLI,
+    operations_project_id: str,
+    source: dict[str, Any],
+    source_metadata: dict[str, Any],
+) -> dict[str, Any] | None:
+    source_project_id = str(source.get("project_id") or "")
+    instance_id = str(source_metadata.get("workflow_instance_id") or "")
+    matches = []
+    for item in operation_records(
+        cli, operations_project_id, "project_registration"
+    ):
+        metadata = record_metadata(cli, item)
+        if str(metadata.get("enabled")).lower() != "true":
+            continue
+        if str(metadata.get("workspace_id") or "") != cli.workspace_id:
+            continue
+        if str(metadata.get("project_id") or "") != source_project_id:
+            continue
+        if instance_id and str(metadata.get("workflow_instance_id") or "") != instance_id:
+            continue
+        matches.append({"issue": item, "metadata": metadata})
+    if len(matches) > 1:
+        raise ObserverError("source Issue matches multiple enabled Project Registrations")
+    return matches[0] if matches else None
+
+
+def observation_description(payload: dict[str, Any]) -> str:
+    safe = redact(payload)
+    return (
+        f"# {safe['summary']}\n\n"
+        f"- Source Issue: {safe['source_issue_id']}\n"
+        f"- Rule: `{safe['rule_id']}`\n"
+        f"- Severity: `{safe['severity']}`\n"
+        f"- Entity: `{safe['entity']}`\n\n"
+        f"## Expected\n\n{safe['expected']}\n\n"
+        f"## Actual\n\n{safe['actual']}\n\n"
+        f"## Evidence\n\n{safe['evidence'] or 'See the source Issue.'}\n"
+    )
+
+
+def report_anomaly(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
+    operations_project, observer, _ = resolve_control_plane(cli)
+    source = cli.json(["issue", "get", args.source_issue, "--output", "json"])
+    if not isinstance(source, dict):
+        raise ObserverError(f"source Issue is unreadable: {args.source_issue}")
+    source_id = issue_ref(source) or args.source_issue
+    source_metadata = metadata_map(cli, source_id)
+    registration = find_registration(
+        cli, str(operations_project["id"]), source, source_metadata
+    )
+    instance_id = (
+        str(registration["metadata"]["workflow_instance_id"])
+        if registration
+        else workflow_instance_id(source_metadata, cli)
+    )
+    protocol = (
+        str(registration["metadata"].get("protocol_revision") or "v3")
+        if registration
+        else str(source_metadata.get("protocol_revision") or "v3")
+    )
+    entity = str(args.entity or f"issue:{source_id}")
+    fingerprint = observation_key(instance_id, source_id, args.rule_id, entity)
+    payload = {
+        "workflow_instance_id": instance_id,
+        "source_issue_id": source_id,
+        "reporter_agent_id": args.reporter_agent_id
+        or os.environ.get("MULTICA_AGENT_ID", "unknown"),
+        "reporter_role": args.reporter_role or "unknown",
+        "rule_id": args.rule_id,
+        "severity": args.severity,
+        "entity": entity,
+        "summary": redacted_text(args.summary, 500),
+        "expected": redacted_text(args.expected, 1000),
+        "actual": redacted_text(args.actual, 1000),
+        "evidence": redacted_text(args.evidence or "", 1000),
+        "protocol_revision": protocol,
+        "registered": bool(registration),
+        "block_source": bool(args.block_source),
+    }
+    managed_agent_ids = set(
+        metadata_string_list(
+            registration["metadata"].get("managed_agent_ids") if registration else None
+        )
+    )
+    if registration and (
+        payload["reporter_agent_id"] in {"", "unknown"}
+        or (
+            managed_agent_ids
+            and payload["reporter_agent_id"] not in managed_agent_ids
+        )
+    ):
+        raise ObserverError("Reporter identity is not registered for this project")
+    payload_digest = sha256_value(payload)
+    matches = operation_records(
+        cli, str(operations_project["id"]), "observation"
+    )
+    observations = []
+    for item in matches:
+        metadata = record_metadata(cli, item)
+        if str(metadata.get("observation_fingerprint") or "") == fingerprint:
+            observations.append((item, metadata))
+    if len(observations) > 1:
+        raise ObserverError("multiple Observations share the same fingerprint")
+    if observations:
+        observation, existing_metadata = observations[0]
+        observation_id = issue_ref(observation)
+        action = "updated"
+        same_payload = str(existing_metadata.get("payload_digest") or "") == payload_digest
+        status = str(existing_metadata.get("observation_status") or "pending")
+        next_status = status if same_payload else "pending"
+    else:
+        observation = cli.json(
+            [
+                "issue",
+                "create",
+                "--title",
+                (
+                    f"[Workflow Observation][{args.severity}]"
+                    f"[obs:{fingerprint[:12]}] {redacted_text(args.summary, 160)}"
+                ),
+                "--description-stdin",
+                "--project",
+                str(operations_project["id"]),
+                "--assignee-id",
+                str(observer["id"]),
+                "--status",
+                "todo",
+                "--priority",
+                args.severity,
+                "--output",
+                "json",
+            ],
+            input_text=observation_description(payload),
+        )
+        observation_id = issue_ref(observation)
+        action = "created"
+        next_status = "pending"
+    if not observation_id:
+        raise ObserverError("Observation did not return an Issue ID")
+    now = utc_now()
+    set_metadata_map(
+        cli,
+        observation_id,
+        {
+            "workflow_object_type": "observation",
+            "workflow_id": WORKFLOW_ID,
+            "observation_fingerprint": fingerprint,
+            "workflow_instance_id": instance_id,
+            "source_issue_id": source_id,
+            "reporter_agent_id": payload["reporter_agent_id"],
+            "reporter_role": payload["reporter_role"],
+            "rule_id": args.rule_id,
+            "severity": args.severity,
+            "affected_entity": entity,
+            "payload_digest": payload_digest,
+            "observation_payload": json.dumps(payload, ensure_ascii=False, sort_keys=True),
+            "observation_status": next_status,
+            "status": next_status,
+            "attempt_count": int(
+                (observations[0][1] if observations else {}).get("attempt_count") or 0
+            ),
+            "last_error": "",
+            "first_seen_at": (
+                (observations[0][1] if observations else {}).get("first_seen_at")
+                or now
+            ),
+            "last_seen_at": now,
+            "registration_id": issue_ref(registration["issue"]) if registration else "",
+        },
+    )
+    warnings = []
+    try:
+        set_metadata_map(
+            cli,
+            source_id,
+            {
+                "workflow_observation_pending": next_status != "processed",
+                "workflow_observation_id": observation_id,
+                "workflow_observation_fingerprint": fingerprint,
+            },
+        )
+    except ObserverError as exc:
+        warnings.append(f"source marker write failed: {redacted_text(exc, 500)}")
+        set_metadata(cli, observation_id, "source_marker_error", warnings[-1])
+    awakened = False
+    if (
+        next_status != "processed"
+        and args.severity in {"high", "urgent"}
+        and not getattr(args, "no_wake", False)
+    ):
+        try:
+            autopilot = resolve_observer_autopilot(cli)
+            cli.json(["autopilot", "trigger", str(autopilot["id"]), "--output", "json"])
+            awakened = True
+        except ObserverError as exc:
+            warnings.append(f"Observer wake failed: {redacted_text(exc, 500)}")
+            set_metadata(cli, observation_id, "wake_error", warnings[-1])
+    return {
+        "action": action,
+        "observation_id": observation_id,
+        "observation_fingerprint": fingerprint,
+        "status": next_status,
+        "registered": bool(registration),
+        "observer_awakened": awakened,
+        "warnings": warnings,
+    }
+
+
 def incident_fingerprint(dedupe_key: str) -> str:
     return hashlib.sha256(dedupe_key.encode("utf-8")).hexdigest()[:12]
 
@@ -711,9 +1250,19 @@ def report_incident(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
     source = cli.json(["issue", "get", args.source_issue, "--output", "json"])
     source_id = issue_ref(source) or args.source_issue
     source_meta = metadata_map(cli, source_id)
-    requirement, protocol, _ = resolve_requirement_context(cli, source, source_meta)
+    requirement, resolved_protocol, _ = resolve_requirement_context(
+        cli, source, source_meta
+    )
+    protocol = str(args.protocol_revision or resolved_protocol)
     entity = str(args.entity or source_id)
-    dedupe_key = args.dedupe_key or f"{WORKFLOW_ID}:{protocol}:{args.rule_id}:{entity}"
+    if args.dedupe_key:
+        dedupe_key = args.dedupe_key
+    elif getattr(args, "phase1_dedupe", False):
+        dedupe_key = phase1_incident_key(
+            workflow_instance_id(source_meta, cli), protocol, args.rule_id, entity
+        )
+    else:
+        dedupe_key = f"{WORKFLOW_ID}:{protocol}:{args.rule_id}:{entity}"
     pending_payload = {
         "dedupe_key": dedupe_key,
         "rule_id": args.rule_id,
@@ -866,6 +1415,8 @@ def report_incident(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
     if incident and notification_due:
         add_comment(cli, incident_id, f"Additional evidence from {source_id} at {utc_now()}\n\n{description}")
     all_requirements = sorted(previous_requirements | {requirement})
+    sources_truncated = len(all_requirements) > 500
+    all_requirements = all_requirements[-500:]
     seen_at = utc_now()
     evidence_log = []
     try:
@@ -874,23 +1425,39 @@ def report_incident(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
             evidence_log = [item for item in parsed_evidence if isinstance(item, dict)]
     except json.JSONDecodeError:
         evidence_log = []
-    evidence_log.append(
-        {
-            "seen_at": seen_at,
-            "source_issue_id": source_id,
-            "source_requirement_id": requirement,
-            "summary": redacted_text(args.summary, 500),
-            "actual": redacted_text(args.actual, 1000),
-            "evidence": redacted_text(args.evidence or "", 1000),
-        }
-    )
+    evidence_item = {
+        "source_issue_id": source_id,
+        "source_requirement_id": requirement,
+        "summary": redacted_text(args.summary, 500),
+        "actual": redacted_text(args.actual, 1000),
+        "evidence": redacted_text(args.evidence or "", 1000),
+    }
+    evidence_fingerprint = sha256_value(evidence_item)
+    evidence_is_new = evidence_fingerprint not in {
+        str(item.get("fingerprint") or "") for item in evidence_log
+    }
+    if evidence_is_new:
+        evidence_log.append(
+            {
+                "seen_at": seen_at,
+                "fingerprint": evidence_fingerprint,
+                **evidence_item,
+            }
+        )
     evidence_log = evidence_log[-20:]
     metadata = {
         "workflow_object_type": "incident",
         "workflow_id": WORKFLOW_ID,
         "incident_dedupe_key": dedupe_key,
         "incident_rule_id": args.rule_id,
-        "incident_status": "new" if action == "created" or reopened else current_incident_meta.get("incident_status", "new"),
+        "incident_status": "new"
+        if action == "created" or reopened
+        else current_incident_meta.get("incident_status", "new"),
+        "logical_status": "new"
+        if action == "created" or reopened
+        else current_incident_meta.get(
+            "logical_status", current_incident_meta.get("incident_status", "new")
+        ),
         "incident_severity": effective_severity,
         "source_issue_id": source_id,
         "source_requirement_id": requirement,
@@ -901,13 +1468,19 @@ def report_incident(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
         "workflow_version": version,
         "protocol_revision": protocol,
         "waiting_on": "workflow_observer",
-        "incident_evidence_count": int(current_incident_meta.get("incident_evidence_count") or 0) + 1,
+        "incident_evidence_count": int(
+            current_incident_meta.get("incident_evidence_count") or 0
+        )
+        + (1 if evidence_is_new else 0),
         "incident_last_seen_at": seen_at,
         "incident_source_requirements": json.dumps(all_requirements, ensure_ascii=False),
         "incident_deterministic_confirmed": deterministic_confirmation
         or str(current_incident_meta.get("incident_deterministic_confirmed")).lower() == "true",
         "incident_blocked_requirement_count": max(previous_blocked_count, blocked_requirement_count),
-        "incident_evidence_log": json.dumps(evidence_log, ensure_ascii=False, sort_keys=True),
+        "incident_evidence_log": bounded_json_log(evidence_log),
+        "incident_sources_truncated": sources_truncated
+        or str(current_incident_meta.get("incident_sources_truncated")).lower()
+        == "true",
     }
     if notification_due:
         metadata["incident_last_notified_at"] = seen_at
@@ -938,6 +1511,986 @@ def report_incident(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
         "incident_id": incident_id,
         "dedupe_key": dedupe_key,
         "notified": notification_due,
+    }
+
+
+def process_observation(cli: CLI, observation: dict[str, Any]) -> dict[str, Any]:
+    observation_id = issue_ref(observation)
+    metadata = metadata_map(cli, observation_id)
+    status = str(metadata.get("observation_status") or metadata.get("status") or "")
+    if status not in {"pending", "failed"}:
+        return {"observation_id": observation_id, "action": "skipped", "status": status}
+    payload = parse_json_map(metadata.get("observation_payload"))
+    required = [
+        "workflow_instance_id",
+        "source_issue_id",
+        "rule_id",
+        "severity",
+        "entity",
+        "summary",
+        "expected",
+        "actual",
+        "protocol_revision",
+    ]
+    missing = [key for key in required if payload.get(key) in {None, ""}]
+    attempts = int(metadata.get("attempt_count") or 0) + 1
+    set_metadata_map(
+        cli,
+        observation_id,
+        {
+            "observation_status": "processing",
+            "status": "processing",
+            "attempt_count": attempts,
+            "last_attempt_at": utc_now(),
+            "last_error": "",
+        },
+    )
+    try:
+        if missing:
+            raise ObserverError(f"Observation payload is missing fields: {missing}")
+        registered = bool(payload.get("registered"))
+        rule_id = str(payload["rule_id"])
+        entity = str(payload["entity"])
+        expected = str(payload["expected"])
+        actual = str(payload["actual"])
+        summary = str(payload["summary"])
+        if not registered:
+            rule_id = "WF-REGISTRATION-001"
+            entity = f"workspace:{cli.workspace_id}"
+            summary = "workflow anomaly came from an unregistered project"
+            expected = "development workflow projects are registered before Observer intake"
+            actual = f"source Issue {payload['source_issue_id']} has no enabled Project Registration"
+        dedupe_key = phase1_incident_key(
+            str(payload["workflow_instance_id"]),
+            str(payload["protocol_revision"]),
+            rule_id,
+            entity,
+        )
+        report_args = argparse.Namespace(
+            source_issue=str(payload["source_issue_id"]),
+            source_requirement=None,
+            rule_id=rule_id,
+            severity=str(payload["severity"]),
+            summary=summary,
+            expected=expected,
+            actual=actual,
+            evidence=str(payload.get("evidence") or ""),
+            entity=entity,
+            dedupe_key=dedupe_key,
+            protocol_revision=str(payload["protocol_revision"]),
+            reporter_agent_id=str(payload.get("reporter_agent_id") or "unknown"),
+            reporter_role=str(payload.get("reporter_role") or "unknown"),
+            block_source=bool(payload.get("block_source")),
+            notification_cooldown_hours=24,
+            deterministic_confirmation=True,
+            blocked_requirement_count=0,
+        )
+        incident = report_incident(cli, report_args)
+        processed_at = utc_now()
+        set_metadata_map(
+            cli,
+            observation_id,
+            {
+                "observation_status": "processed",
+                "status": "processed",
+                "incident_id": incident["incident_id"],
+                "processed_at": processed_at,
+                "last_error": "",
+            },
+        )
+        try:
+            set_metadata_map(
+                cli,
+                str(payload["source_issue_id"]),
+                {
+                    "workflow_observation_pending": False,
+                    "workflow_observation_id": observation_id,
+                },
+            )
+        except ObserverError as exc:
+            set_metadata(
+                cli,
+                observation_id,
+                "source_marker_error",
+                redacted_text(exc, 500),
+            )
+        return {
+            "observation_id": observation_id,
+            "action": "processed",
+            "incident_id": incident["incident_id"],
+        }
+    except ObserverError as exc:
+        set_metadata_map(
+            cli,
+            observation_id,
+            {
+                "observation_status": "failed",
+                "status": "failed",
+                "last_error": redacted_text(exc, 1000),
+            },
+        )
+        raise
+
+
+def observer_control(
+    cli: CLI,
+    operations_project: dict[str, Any],
+    observer: dict[str, Any],
+    instance_id: str,
+    *,
+    create: bool = True,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    controls = []
+    for item in operation_records(
+        cli, str(operations_project["id"]), "observer_control"
+    ):
+        metadata = record_metadata(cli, item)
+        if str(metadata.get("workflow_instance_id") or "") == instance_id:
+            controls.append(item)
+    if len(controls) > 1:
+        raise ObserverError(
+            f"multiple Observer Control records exist for instance {instance_id}"
+        )
+    if controls:
+        control = controls[0]
+    else:
+        if not create:
+            raise ObserverError("Observer Control record is missing")
+        control = cli.json(
+            [
+                "issue",
+                "create",
+                "--title",
+                f"[Observer Control] {instance_id[:24]}",
+                "--description",
+                "Lease, cursor, checkpoint, and health state for Phase 1 Observer scans.",
+                "--project",
+                str(operations_project["id"]),
+                "--assignee-id",
+                str(observer["id"]),
+                "--status",
+                "in_progress",
+                "--priority",
+                "low",
+                "--output",
+                "json",
+            ]
+        )
+        control_id = issue_ref(control)
+        if not control_id:
+            raise ObserverError("Observer Control did not return an Issue ID")
+        set_metadata_map(
+            cli,
+            control_id,
+            {
+                "workflow_object_type": "observer_control",
+                "workflow_id": WORKFLOW_ID,
+                "workflow_instance_id": instance_id,
+                "status": "idle",
+                "lease_owner": "",
+                "lease_expires_at": "",
+                "last_success_at": "",
+                "last_full_scan_at": "",
+                "scanned_count": 0,
+                "finding_count": 0,
+                "error": "",
+            },
+        )
+    return control, metadata_map(cli, issue_ref(control))
+
+
+def acquire_scan_lease(
+    cli: CLI,
+    control_id: str,
+    control_metadata: dict[str, Any],
+    mode: str,
+    lease_minutes: int,
+) -> str | None:
+    now = datetime.now(timezone.utc)
+    existing_owner = str(control_metadata.get("lease_owner") or "")
+    expires_at = parse_time(control_metadata.get("lease_expires_at"))
+    if existing_owner and not expires_at:
+        raise ObserverError("Observer scan lease has no valid expiry")
+    if existing_owner and expires_at and expires_at > now:
+        return None
+    owner = str(uuid.uuid4())
+    upper_bound = now.replace(microsecond=0)
+    set_metadata_map(
+        cli,
+        control_id,
+        {
+            "scan_mode": mode,
+            "scan_started_at": utc_now(),
+            "scan_upper_bound": upper_bound.isoformat().replace("+00:00", "Z"),
+            "lease_owner": owner,
+            "lease_expires_at": (now + timedelta(minutes=lease_minutes))
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z"),
+            "status": "running",
+            "error": "",
+        },
+    )
+    confirmed = metadata_map(cli, control_id)
+    if str(confirmed.get("lease_owner") or "") != owner:
+        raise ObserverError("Observer scan lease was lost during acquisition")
+    return owner
+
+
+def renew_scan_lease(
+    cli: CLI, control_id: str, owner: str, lease_minutes: int
+) -> None:
+    current = metadata_map(cli, control_id)
+    if str(current.get("lease_owner") or "") != owner:
+        raise ObserverError("Observer scan lease was lost")
+    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=lease_minutes))
+    set_metadata(
+        cli,
+        control_id,
+        "lease_expires_at",
+        expires_at.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+    )
+    confirmed = metadata_map(cli, control_id)
+    if str(confirmed.get("lease_owner") or "") != owner:
+        raise ObserverError("Observer scan lease was lost during renewal")
+
+
+def registration_candidates(
+    cli: CLI,
+    registration: dict[str, Any],
+    mode: str,
+    upper_bound: datetime,
+    max_issues: int,
+) -> list[dict[str, Any]]:
+    metadata = record_metadata(cli, registration)
+    project_id = str(metadata.get("project_id") or "")
+    if not project_id:
+        raise ObserverError(f"Project Registration {issue_ref(registration)} has no project_id")
+    issues = list_issues(cli, project_id=project_id, max_issues=max_issues)
+    committed = cursor_time(metadata.get("committed_cursor"))
+    lower_bound = committed - timedelta(minutes=10)
+    instance_id = str(metadata.get("workflow_instance_id") or "")
+    managed_agents = set(metadata_string_list(metadata.get("managed_agent_ids")))
+    result = []
+    for issue in issues:
+        issue_metadata = record_metadata(cli, issue)
+        if str(issue_metadata.get("workflow_object_type") or "") in PHASE1_OPERATION_TYPES:
+            continue
+        updated = parse_time(issue.get("updated_at"))
+        if not updated:
+            raise ObserverError(
+                f"Issue {issue_ref(issue)} has no parseable updated_at cursor"
+            )
+        if updated and updated > upper_bound:
+            continue
+        if mode == "incremental" and updated and updated < lower_bound:
+            continue
+        belongs = bool(
+            str(issue_metadata.get("workflow_instance_id") or "") == instance_id
+            or str(issue_metadata.get("workflow_incident_pending")).lower() == "true"
+            or str(issue_metadata.get("workflow_observation_pending")).lower() == "true"
+            or (
+                str(issue.get("assignee_id") or "") in managed_agents
+            )
+        )
+        if belongs:
+            result.append(issue)
+    return sorted(
+        result,
+        key=lambda item: (str(item.get("updated_at") or ""), issue_ref(item)),
+    )
+
+
+def finding_report_args(item: dict[str, Any]) -> argparse.Namespace:
+    return argparse.Namespace(
+        source_issue=item["source_issue"],
+        source_requirement=None,
+        rule_id=item["rule_id"],
+        severity=item["severity"],
+        summary=item["actual"],
+        expected=item["expected"],
+        actual=item["actual"],
+        evidence="Deterministic workflow scan finding.",
+        entity=item.get("entity"),
+        dedupe_key=None,
+        protocol_revision=None,
+        reporter_agent_id=os.environ.get("MULTICA_AGENT_ID"),
+        reporter_role="workflow_observer",
+        block_source=item["severity"] in {"urgent", "high"},
+        notification_cooldown_hours=24,
+        deterministic_confirmation=True,
+        blocked_requirement_count=0,
+        phase1_dedupe=True,
+    )
+
+
+def scan(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
+    if args.max_issues <= 0:
+        raise ObserverError("max_issues must be positive")
+    if args.lease_minutes <= 0 or args.lease_minutes > 1440:
+        raise ObserverError("lease_minutes must be between 1 and 1440")
+    operations_project, observer, _ = resolve_control_plane(cli)
+    enabled_registrations = []
+    for registration in operation_records(
+        cli,
+        str(operations_project["id"]),
+        "project_registration",
+        max_issues=args.max_issues,
+    ):
+        registration_metadata = record_metadata(cli, registration)
+        if str(registration_metadata.get("enabled")).lower() == "true":
+            enabled_registrations.append(registration)
+    requested_instance = str(getattr(args, "workflow_instance_id", None) or "")
+    available_instances = sorted(
+        {
+            str(record_metadata(cli, item).get("workflow_instance_id") or "")
+            for item in enabled_registrations
+        }
+        - {""}
+    )
+    if requested_instance:
+        instance_id = requested_instance
+        registrations_for_instance = [
+            item
+            for item in enabled_registrations
+            if str(record_metadata(cli, item).get("workflow_instance_id") or "")
+            == instance_id
+        ]
+        if not registrations_for_instance:
+            raise ObserverError(
+                f"no enabled Project Registration for instance {instance_id}"
+            )
+    elif len(available_instances) == 1:
+        instance_id = available_instances[0]
+        registrations_for_instance = enabled_registrations
+    elif not available_instances:
+        instance_id = WORKFLOW_ID
+        registrations_for_instance = []
+    else:
+        raise ObserverError(
+            "multiple workflow instances are registered; pass --workflow-instance-id"
+        )
+    unregistered_observation_owner = (
+        available_instances[0] if available_instances else WORKFLOW_ID
+    )
+    control, control_metadata = observer_control(
+        cli, operations_project, observer, instance_id
+    )
+    control_id = issue_ref(control)
+    lease_owner = acquire_scan_lease(
+        cli, control_id, control_metadata, args.mode, args.lease_minutes
+    )
+    if lease_owner is None:
+        return {
+            "status": "skipped",
+            "reason": "active_lease",
+            "workflow_instance_id": instance_id,
+            "lease_owner": control_metadata.get("lease_owner"),
+        }
+    upper_bound = parse_time(metadata_map(cli, control_id).get("scan_upper_bound"))
+    if not upper_bound:
+        raise ObserverError("Observer Control scan_upper_bound is invalid")
+    scanned_count = 0
+    findings = []
+    reported = []
+    processed_observations = []
+    registrations = []
+    try:
+        observations = pending_observation_records(
+            cli, str(operations_project["id"]), args.max_issues
+        )
+        for observation in observations:
+            renew_scan_lease(cli, control_id, lease_owner, args.lease_minutes)
+            observation_metadata = record_metadata(cli, observation)
+            observation_instance = str(
+                observation_metadata.get("workflow_instance_id") or ""
+            )
+            is_unregistered = observation_instance.startswith("unregistered:")
+            if is_unregistered and instance_id != unregistered_observation_owner:
+                continue
+            if not is_unregistered and observation_instance not in {instance_id, ""}:
+                continue
+            status = str(
+                observation_metadata.get("observation_status")
+                or observation_metadata.get("status")
+                or ""
+            )
+            if status in {"pending", "failed"}:
+                processed_observations.append(process_observation(cli, observation))
+        renew_scan_lease(cli, control_id, lease_owner, args.lease_minutes)
+        for registration in registrations_for_instance:
+            renew_scan_lease(cli, control_id, lease_owner, args.lease_minutes)
+            candidates = registration_candidates(
+                cli, registration, args.mode, upper_bound, args.max_issues
+            )
+            for issue in candidates:
+                scanned_count += 1
+                issue_metadata = record_metadata(cli, issue)
+                if not issue_metadata.get("workflow_instance_id"):
+                    findings.append(
+                        finding(
+                            "WF-SOURCE-001",
+                            "high",
+                            issue,
+                            "workflow-created Issues carry workflow_instance_id",
+                            (
+                                "managed Agent owns an Issue in a registered project "
+                                "without workflow_instance_id"
+                            ),
+                        )
+                    )
+                findings.extend(audit_issue(cli, issue, args.backlog_hours))
+                findings.extend(parent_findings(cli, issue))
+            renew_scan_lease(cli, control_id, lease_owner, args.lease_minutes)
+            checkpoint = cursor_value(upper_bound)
+            registration_update = {"checkpoint_cursor": checkpoint}
+            if candidates:
+                registration_update["last_observed_change_at"] = max(
+                    str(item.get("updated_at") or "") for item in candidates
+                )
+            set_metadata_map(cli, issue_ref(registration), registration_update)
+            registrations.append(registration)
+        findings.extend(audit_control_plane(cli, control_id))
+        for item in findings:
+            renew_scan_lease(cli, control_id, lease_owner, args.lease_minutes)
+            if not item.get("source_issue"):
+                raise ObserverError(
+                    f"cannot persist finding without source Issue: {item['rule_id']}"
+                )
+            reported.append(report_incident(cli, finding_report_args(item)))
+        renew_scan_lease(cli, control_id, lease_owner, args.lease_minutes)
+        committed = cursor_value(upper_bound)
+        for registration in registrations:
+            set_metadata_map(
+                cli,
+                issue_ref(registration),
+                {
+                    "committed_cursor": committed,
+                    "checkpoint_cursor": committed,
+                    "last_cursor_advanced_at": utc_now(),
+                },
+            )
+        renew_scan_lease(cli, control_id, lease_owner, args.lease_minutes)
+        completed_at = utc_now()
+        control_update = {
+            "last_success_at": completed_at,
+            "scanned_count": scanned_count,
+            "finding_count": len(findings),
+            "status": "success",
+            "error": "",
+            "lease_owner": "",
+            "lease_expires_at": "",
+        }
+        if args.mode == "full":
+            control_update["last_full_scan_at"] = completed_at
+        set_metadata_map(cli, control_id, control_update)
+        return {
+            "status": "success",
+            "mode": args.mode,
+            "workflow_instance_id": instance_id,
+            "scanned": scanned_count,
+            "findings": findings,
+            "reported": reported,
+            "processed_observations": processed_observations,
+            "registrations": len(registrations),
+            "scan_upper_bound": upper_bound.isoformat().replace("+00:00", "Z"),
+        }
+    except ObserverError as exc:
+        current = metadata_map(cli, control_id)
+        if str(current.get("lease_owner") or "") == lease_owner:
+            set_metadata_map(
+                cli,
+                control_id,
+                {
+                    "status": "failed",
+                    "error": redacted_text(exc, 1000),
+                    "lease_owner": "",
+                    "lease_expires_at": "",
+                },
+            )
+        raise
+
+
+def load_incident(cli: CLI, incident_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    issue = cli.json(["issue", "get", incident_id, "--output", "json"])
+    if not isinstance(issue, dict):
+        raise ObserverError(f"Incident is unreadable: {incident_id}")
+    metadata = metadata_map(cli, issue_ref(issue) or incident_id)
+    if str(metadata.get("workflow_object_type") or "") != "incident":
+        raise ObserverError(f"Issue is not a workflow Incident: {incident_id}")
+    return issue, metadata
+
+
+def triage_incident(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
+    issue, metadata = load_incident(cli, args.incident)
+    verdict = args.verdict
+    if verdict not in TRIAGE_VERDICTS:
+        raise ObserverError(f"unsupported triage verdict: {verdict}")
+    incident_id = issue_ref(issue) or args.incident
+    current_status = str(
+        metadata.get("logical_status") or metadata.get("incident_status") or "new"
+    )
+    if current_status not in {"new", "triaging", "blocked"}:
+        raise ObserverError(
+            f"Incident cannot be triaged from logical status {current_status}"
+        )
+    if verdict in {"CONFIRMED_WORKFLOW_BUG", "WORKFLOW_GAP"}:
+        logical_status = "awaiting_maintenance_decision"
+        waiting_on = "maintenance_decision"
+        issue_status = "in_review"
+    elif verdict == "FALSE_POSITIVE":
+        logical_status = "false_positive"
+        waiting_on = ""
+        issue_status = "done"
+    elif verdict == "DECISION_REQUIRED":
+        logical_status = "blocked"
+        waiting_on = "human_decision"
+        issue_status = "blocked"
+    else:
+        logical_status = "routed"
+        waiting_on = verdict.lower()
+        issue_status = "in_review"
+    set_metadata_map(
+        cli,
+        incident_id,
+        {
+            "incident_status": logical_status,
+            "logical_status": logical_status,
+            "verdict": verdict,
+            "triage_reason": redacted_text(args.reason or "", 1000),
+            "triaged_at": utc_now(),
+            "waiting_on": waiting_on,
+        },
+    )
+    if str(issue.get("status") or "") != issue_status:
+        cli.json(
+            [
+                "issue",
+                "update",
+                incident_id,
+                "--status",
+                issue_status,
+                "--output",
+                "json",
+            ]
+        )
+    if args.reason:
+        add_comment(
+            cli,
+            incident_id,
+            f"Observer triage: `{verdict}`\n\n{redacted_text(args.reason, 2000)}",
+        )
+    return {
+        "incident_id": incident_id,
+        "previous_status": metadata.get("incident_status"),
+        "status": logical_status,
+        "verdict": verdict,
+        "waiting_on": waiting_on,
+    }
+
+
+def maintenance_intake(incident_id: str, metadata: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "incident_id": incident_id,
+        "dedupe_key": str(metadata.get("incident_dedupe_key") or ""),
+        "severity": str(metadata.get("incident_severity") or "medium"),
+        "affected_scope": metadata_string_list(
+            metadata.get("incident_source_requirements")
+        ),
+        "source_issue_set": sorted(
+            set(
+                [str(metadata.get("source_issue_id") or "")]
+                + metadata_string_list(metadata.get("incident_source_requirements"))
+            )
+            - {""}
+        ),
+        "workflow_version": str(metadata.get("workflow_version") or ""),
+        "evidence_digest": sha256_value(
+            parse_json_map_list(metadata.get("incident_evidence_log"))
+        ),
+    }
+
+
+def parse_json_map_list(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    if isinstance(value, str) and value:
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+        if isinstance(parsed, list):
+            return [item for item in parsed if isinstance(item, dict)]
+    return []
+
+
+def prepare_maintenance_decision(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
+    issue, metadata = load_incident(cli, args.incident)
+    incident_id = issue_ref(issue) or args.incident
+    if str(metadata.get("verdict") or "") not in {
+        "CONFIRMED_WORKFLOW_BUG",
+        "WORKFLOW_GAP",
+    }:
+        raise ObserverError("only confirmed workflow defects can request maintenance")
+    intake = maintenance_intake(incident_id, metadata)
+    digest = sha256_value(intake)
+    short_digest = digest[:16]
+    action = (
+        "reused"
+        if str(metadata.get("maintenance_intake_digest") or "") == digest
+        and str(
+            metadata.get("logical_status") or metadata.get("incident_status") or ""
+        )
+        == "awaiting_maintenance_decision"
+        else "prepared"
+    )
+    set_metadata_map(
+        cli,
+        incident_id,
+        {
+            "maintenance_intake_digest": digest,
+            "maintenance_intake_summary": json.dumps(
+                intake, ensure_ascii=False, sort_keys=True
+            ),
+            "incident_status": "awaiting_maintenance_decision",
+            "logical_status": "awaiting_maintenance_decision",
+            "waiting_on": "maintenance_decision",
+            "maintenance_decision_requested_at": utc_now(),
+        },
+    )
+    if action == "prepared":
+        add_comment(
+            cli,
+            incident_id,
+            (
+                "Maintenance decision required. Use exactly one command:\n\n"
+                f"`APPROVE WORKFLOW MAINTENANCE {short_digest}`\n\n"
+                f"`DEFER WORKFLOW MAINTENANCE {short_digest}` with `reason=` and "
+                "`next_review_at=` lines."
+            ),
+        )
+    return {
+        "action": action,
+        "incident_id": incident_id,
+        "maintenance_intake": intake,
+        "digest": digest,
+        "short_digest": short_digest,
+        "approve": f"APPROVE WORKFLOW MAINTENANCE {short_digest}",
+        "defer": f"DEFER WORKFLOW MAINTENANCE {short_digest}",
+    }
+
+
+def comment_author(comment: dict[str, Any]) -> tuple[str, str]:
+    author = comment.get("author") if isinstance(comment.get("author"), dict) else {}
+    return (
+        str(
+            comment.get("author_id")
+            or comment.get("creator_id")
+            or comment.get("user_id")
+            or author.get("id")
+            or ""
+        ),
+        str(
+            comment.get("author_type")
+            or comment.get("creator_type")
+            or comment.get("user_type")
+            or author.get("type")
+            or ""
+        ).lower(),
+    )
+
+
+def decision_comment(
+    cli: CLI,
+    incident_id: str,
+    approver_id: str,
+    short_digest: str,
+    comment_id: str | None,
+) -> tuple[dict[str, Any], str, dict[str, str]]:
+    comments = as_list(
+        cli.json(
+            ["issue", "comment", "list", incident_id, "--full", "--output", "json"]
+        ),
+        "comments",
+    )
+    if comment_id:
+        comments = [item for item in comments if str(item.get("id") or "") == comment_id]
+    matches = []
+    for comment in comments:
+        lines = [
+            line.strip()
+            for line in str(comment.get("content") or "").splitlines()
+            if line.strip()
+        ]
+        if not lines:
+            continue
+        if lines[0] not in {
+            f"APPROVE WORKFLOW MAINTENANCE {short_digest}",
+            f"DEFER WORKFLOW MAINTENANCE {short_digest}",
+        }:
+            continue
+        author_id, author_type = comment_author(comment)
+        if author_id != approver_id or author_type not in {"member", "user"}:
+            raise ObserverError("maintenance decision was not authored by the human approver")
+        fields = {}
+        for line in lines[1:]:
+            if "=" not in line:
+                raise ObserverError("maintenance decision comment has an invalid line")
+            key, value = line.split("=", 1)
+            fields[key.strip()] = value.strip()
+        if lines[0].startswith("APPROVE ") and fields:
+            raise ObserverError("approval comment must contain only the exact approval line")
+        if lines[0].startswith("DEFER ") and set(fields) != {
+            "reason",
+            "next_review_at",
+        }:
+            raise ObserverError(
+                "defer comment must contain exactly reason and next_review_at"
+            )
+        matches.append((comment, lines[0].split()[0], fields))
+    if len(matches) != 1:
+        raise ObserverError(
+            f"expected one matching maintenance decision comment, found {len(matches)}"
+        )
+    return matches[0]
+
+
+def find_maintenance_case(
+    cli: CLI, operations_project_id: str, incident_id: str
+) -> list[dict[str, Any]]:
+    result = []
+    for item in operation_records(cli, operations_project_id, "maintenance_case"):
+        if str(record_metadata(cli, item).get("incident_id") or "") == incident_id:
+            result.append(item)
+    return result
+
+
+def record_maintenance_decision(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
+    operations_project, _, _ = resolve_control_plane(cli)
+    issue, metadata = load_incident(cli, args.incident)
+    incident_id = issue_ref(issue) or args.incident
+    digest = str(metadata.get("maintenance_intake_digest") or "")
+    if not digest:
+        raise ObserverError("maintenance decision digest is missing")
+    current_digest = sha256_value(maintenance_intake(incident_id, metadata))
+    if current_digest != digest:
+        raise ObserverError(
+            "Incident evidence changed after maintenance decision preparation"
+        )
+    comment, decision, fields = decision_comment(
+        cli,
+        incident_id,
+        str(metadata.get("human_approver_id") or ""),
+        digest[:16],
+        args.comment_id,
+    )
+    comment_id = str(comment.get("id") or "")
+    if decision == "DEFER":
+        reason = fields.get("reason", "")
+        next_review_at = fields.get("next_review_at", "")
+        review_time = parse_time(next_review_at)
+        if not reason or not review_time:
+            raise ObserverError("deferred maintenance requires reason and next_review_at")
+        if review_time <= datetime.now(timezone.utc):
+            raise ObserverError("deferred maintenance next_review_at must be in the future")
+        set_metadata_map(
+            cli,
+            incident_id,
+            {
+                "incident_status": "deferred",
+                "logical_status": "deferred",
+                "waiting_on": "maintenance_review_date",
+                "maintenance_decision": "deferred",
+                "maintenance_decision_comment_id": comment_id,
+                "defer_reason": redacted_text(reason, 1000),
+                "next_review_at": next_review_at,
+            },
+        )
+        return {
+            "incident_id": incident_id,
+            "decision": "deferred",
+            "next_review_at": next_review_at,
+        }
+    cases = find_maintenance_case(cli, str(operations_project["id"]), incident_id)
+    if len(cases) > 1:
+        raise ObserverError("multiple Maintenance Cases exist for one Incident")
+    if cases:
+        case = cases[0]
+        action = "reused"
+    else:
+        case = cli.json(
+            [
+                "issue",
+                "create",
+                "--title",
+                f"[Maintenance Case] {incident_id}",
+                "--description",
+                "Phase 1 handoff to the ordinary development workflow.",
+                "--project",
+                str(operations_project["id"]),
+                "--status",
+                "todo",
+                "--priority",
+                str(metadata.get("incident_severity") or "medium"),
+                "--output",
+                "json",
+            ]
+        )
+        action = "created"
+    case_id = issue_ref(case)
+    if not case_id:
+        raise ObserverError("Maintenance Case did not return an Issue ID")
+    set_metadata_map(
+        cli,
+        case_id,
+        {
+            "workflow_object_type": "maintenance_case",
+            "workflow_id": WORKFLOW_ID,
+            "incident_id": incident_id,
+            "maintenance_intake_digest": digest,
+            "approval_comment_id": comment_id,
+            "executor": args.executor or "ordinary_development_workflow",
+            "maintenance_case_status": "approved",
+            "logical_status": "approved",
+            "implementation_issue_ids": "[]",
+            "pr_number": "",
+            "merge_commit_sha": "",
+            "release_version": "",
+            "deployment_target": "",
+            "observer_verification_id": "",
+        },
+    )
+    set_metadata_map(
+        cli,
+        incident_id,
+        {
+            "incident_status": "maintenance_approved",
+            "logical_status": "maintenance_approved",
+            "waiting_on": "ordinary_development_workflow",
+            "maintenance_decision": "approved",
+            "maintenance_decision_comment_id": comment_id,
+            "maintenance_case_id": case_id,
+        },
+    )
+    return {
+        "incident_id": incident_id,
+        "decision": "approved",
+        "maintenance_case_id": case_id,
+        "action": action,
+    }
+
+
+def verify_fix(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
+    issue, metadata = load_incident(cli, args.incident)
+    incident_id = issue_ref(issue) or args.incident
+    case_id = str(metadata.get("maintenance_case_id") or "")
+    if not case_id:
+        raise ObserverError("Incident has no approved Maintenance Case")
+    case = cli.json(["issue", "get", case_id, "--output", "json"])
+    case_metadata = metadata_map(cli, issue_ref(case) or case_id)
+    if str(case_metadata.get("workflow_object_type") or "") != "maintenance_case":
+        raise ObserverError("Maintenance Case is unreadable or invalid")
+    if str(case_metadata.get("incident_id") or "") != incident_id:
+        raise ObserverError("Maintenance Case is not bound to this Incident")
+    approved_digest = str(metadata.get("maintenance_intake_digest") or "")
+    if not approved_digest or str(
+        case_metadata.get("maintenance_intake_digest") or ""
+    ) != approved_digest:
+        raise ObserverError("Maintenance Case approval scope differs from the Incident")
+    if str(
+        case_metadata.get("logical_status")
+        or case_metadata.get("maintenance_case_status")
+        or ""
+    ) not in {
+        "fix_ready",
+        "awaiting_deployment",
+        "awaiting_observer_verification",
+    }:
+        raise ObserverError("Maintenance Case is not ready for Observer verification")
+    caller_id = os.environ.get("MULTICA_AGENT_ID")
+    if caller_id and metadata.get("observer_id") and caller_id != metadata.get("observer_id"):
+        raise ObserverError("fix verification must be performed by the assigned Observer")
+    evidence = redacted_text(args.evidence, 2000)
+    verified_at = utc_now()
+    if args.result == "failed":
+        set_metadata_map(
+            cli,
+            case_id,
+            {
+                "maintenance_case_status": "in_development",
+                "logical_status": "in_development",
+                "verification_result": "failed",
+                "verification_evidence": evidence,
+                "observer_verification_id": str(uuid.uuid4()),
+            },
+        )
+        set_metadata_map(
+            cli,
+            incident_id,
+            {
+                "incident_status": "in_fix",
+                "logical_status": "in_fix",
+                "waiting_on": "ordinary_development_workflow",
+            },
+        )
+        add_comment(cli, incident_id, f"Observer verification failed.\n\n{evidence}")
+        return {"incident_id": incident_id, "result": "failed"}
+    if not args.deployed_version or not args.deployment_target:
+        raise ObserverError(
+            "successful verification requires deployed version and deployment target"
+        )
+    incident_status = str(
+        metadata.get("logical_status") or metadata.get("incident_status") or ""
+    )
+    if incident_status != "awaiting_verification":
+        raise ObserverError(
+            f"Incident cannot be verified from logical status {incident_status}"
+        )
+    recorded_version = str(case_metadata.get("release_version") or "")
+    recorded_target = str(case_metadata.get("deployment_target") or "")
+    if recorded_version and recorded_version != args.deployed_version:
+        raise ObserverError("deployed version differs from Maintenance Case evidence")
+    if recorded_target and recorded_target != args.deployment_target:
+        raise ObserverError("deployment target differs from Maintenance Case evidence")
+    verification_id = str(uuid.uuid4())
+    set_metadata_map(
+        cli,
+        case_id,
+        {
+            "maintenance_case_status": "completed",
+            "logical_status": "completed",
+            "verification_result": "passed",
+            "verification_evidence": evidence,
+            "observer_verification_id": verification_id,
+            "release_version": args.deployed_version,
+            "deployment_target": args.deployment_target or "",
+            "verified_at": verified_at,
+        },
+    )
+    set_metadata_map(
+        cli,
+        incident_id,
+        {
+            "incident_status": "resolved",
+            "logical_status": "resolved",
+            "waiting_on": "",
+            "incident_fixed_release": args.deployed_version,
+            "observer_verification_id": verification_id,
+            "resolved_at": verified_at,
+        },
+    )
+    cli.json(["issue", "update", case_id, "--status", "done", "--output", "json"])
+    cli.json(["issue", "update", incident_id, "--status", "done", "--output", "json"])
+    add_comment(
+        cli,
+        incident_id,
+        f"Observer verification passed for `{args.deployed_version}`.\n\n{evidence}",
+    )
+    return {
+        "incident_id": incident_id,
+        "maintenance_case_id": case_id,
+        "result": "passed",
+        "verification_id": verification_id,
     }
 
 
@@ -1774,7 +3327,10 @@ def audit_control_plane(cli: CLI, coverage_issue: str | None) -> list[dict[str, 
 
     for key, desired_value in contract["autopilots"].items():
         desired = dict(desired_value)
-        if key == operation_autopilot_key and operations_mode_spec.get("autopilot_status"):
+        status_overrides = operations_mode_spec.get("autopilot_statuses") or {}
+        if key in status_overrides:
+            desired["status"] = status_overrides[key]
+        elif key == operation_autopilot_key and operations_mode_spec.get("autopilot_status"):
             desired["status"] = operations_mode_spec["autopilot_status"]
         matches = [
             item
@@ -1907,7 +3463,7 @@ def audit_issue(cli: CLI, issue: dict[str, Any], backlog_hours: int) -> list[dic
     issue_id = issue_ref(issue)
     meta = metadata_map(cli, issue_id)
     object_type = meta.get("workflow_object_type")
-    if object_type in {"incident", "canary_fixture"}:
+    if object_type in PHASE1_OPERATION_TYPES | {"canary_fixture"}:
         return []
     status = str(issue.get("status") or "")
     findings = []
@@ -2152,6 +3708,116 @@ def health(cli: CLI, max_age_minutes: int) -> dict[str, Any]:
     return {"autopilot_id": autopilot["id"], "latest_run": latest, "age_minutes": round(age, 1)}
 
 
+def external_health(
+    cli: CLI, max_age_minutes: int, full_max_age_minutes: int
+) -> dict[str, Any]:
+    scheduler = health(cli, max_age_minutes)
+    operations_project, _, _ = resolve_control_plane(cli)
+    now = datetime.now(timezone.utc)
+    registrations = operation_records(
+        cli, str(operations_project["id"]), "project_registration"
+    )
+    enabled = []
+    enabled_instances = set()
+    for registration in registrations:
+        registration_metadata = record_metadata(cli, registration)
+        if str(registration_metadata.get("enabled")).lower() != "true":
+            continue
+        enabled.append(issue_ref(registration))
+        enabled_instances.add(
+            str(registration_metadata.get("workflow_instance_id") or "")
+        )
+        if (
+            registration_metadata.get("checkpoint_cursor")
+            and registration_metadata.get("committed_cursor")
+            != registration_metadata.get("checkpoint_cursor")
+        ):
+            raise ObserverError(
+                f"Project Registration {issue_ref(registration)} has an uncommitted checkpoint"
+            )
+        observed_change = parse_time(
+            registration_metadata.get("last_observed_change_at")
+        )
+        committed_time = cursor_time(registration_metadata.get("committed_cursor"))
+        if observed_change and observed_change > committed_time:
+            raise ObserverError(
+                f"Project Registration {issue_ref(registration)} cursor is stalled"
+            )
+    enabled_instances.discard("")
+    controls_by_instance = {}
+    for control in operation_records(
+        cli, str(operations_project["id"]), "observer_control"
+    ):
+        metadata = record_metadata(cli, control)
+        instance_id = str(metadata.get("workflow_instance_id") or "")
+        if not instance_id:
+            raise ObserverError(
+                f"Observer Control {issue_ref(control)} has no workflow_instance_id"
+            )
+        if instance_id in controls_by_instance:
+            raise ObserverError(
+                f"multiple Observer Control records exist for instance {instance_id}"
+            )
+        controls_by_instance[instance_id] = (control, metadata)
+    missing_controls = enabled_instances - set(controls_by_instance)
+    if missing_controls:
+        raise ObserverError(
+            f"Observer Control is missing for instances: {sorted(missing_controls)}"
+        )
+    checked_controls = []
+    for instance_id in sorted(enabled_instances or set(controls_by_instance)):
+        control, metadata = controls_by_instance[instance_id]
+        last_success = parse_time(metadata.get("last_success_at"))
+        last_full = parse_time(metadata.get("last_full_scan_at"))
+        if not last_success:
+            raise ObserverError(
+                f"Observer instance {instance_id} has no successful Phase 1 scan"
+            )
+        success_age = (now - last_success).total_seconds() / 60
+        if success_age > max_age_minutes:
+            raise ObserverError(
+                f"Observer instance {instance_id} latest scan is stale: "
+                f"{success_age:.0f} minutes"
+            )
+        if not last_full:
+            raise ObserverError(
+                f"Observer instance {instance_id} has no successful full scan"
+            )
+        full_age = (now - last_full).total_seconds() / 60
+        if full_age > full_max_age_minutes:
+            raise ObserverError(
+                f"Observer instance {instance_id} latest full scan is stale: "
+                f"{full_age:.0f} minutes"
+            )
+        lease_owner = str(metadata.get("lease_owner") or "")
+        lease_expires = parse_time(metadata.get("lease_expires_at"))
+        if lease_owner and lease_expires and lease_expires < now:
+            raise ObserverError(
+                f"Observer instance {instance_id} has an expired unreleased lease"
+            )
+        if str(metadata.get("status") or "") == "failed" or metadata.get("error"):
+            raise ObserverError(
+                f"Observer instance {instance_id} latest scan failed: "
+                f"{redacted_text(metadata.get('error') or 'unknown', 500)}"
+            )
+        checked_controls.append(
+            {
+                "workflow_instance_id": instance_id,
+                "observer_control_id": issue_ref(control),
+                "last_success_age_minutes": round(success_age, 1),
+                "last_full_scan_age_minutes": round(full_age, 1),
+            }
+        )
+    if not checked_controls:
+        raise ObserverError("Observer Control record is missing")
+    return {
+        "status": "healthy",
+        "scheduler": scheduler,
+        "controls": checked_controls,
+        "enabled_registrations": enabled,
+    }
+
+
 def pending_namespace(issue: dict[str, Any], payload: dict[str, Any]) -> argparse.Namespace | None:
     required_payload = ["dedupe_key", "rule_id", "severity", "summary", "expected", "actual"]
     if not all(payload.get(key) not in {None, ""} for key in required_payload):
@@ -2355,24 +4021,84 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--workspace")
     sub = root.add_subparsers(dest="command", required=True)
 
+    def add_report_arguments(command: argparse.ArgumentParser) -> None:
+        command.add_argument("--source-issue", required=True)
+        command.add_argument("--source-requirement")
+        command.add_argument("--rule-id", default="WF-SELF-REPORT-001")
+        command.add_argument(
+            "--severity",
+            choices=["low", "medium", "high", "urgent"],
+            default="medium",
+        )
+        command.add_argument("--summary", required=True)
+        command.add_argument("--expected", required=True)
+        command.add_argument("--actual", required=True)
+        command.add_argument("--evidence")
+        command.add_argument("--entity")
+        command.add_argument("--dedupe-key")
+        command.add_argument("--protocol-revision")
+        command.add_argument("--reporter-agent-id")
+        command.add_argument("--reporter-role")
+        command.add_argument("--block-source", action="store_true")
+        command.add_argument("--notification-cooldown-hours", type=int, default=24)
+        command.add_argument("--deterministic-confirmation", action="store_true")
+        command.add_argument("--blocked-requirement-count", type=int, default=0)
+        command.add_argument("--output", choices=["json"], default="json")
+
+    report_anomaly_parser = sub.add_parser("report-anomaly")
+    add_report_arguments(report_anomaly_parser)
+    report_anomaly_parser.add_argument("--no-wake", action="store_true")
+
     report = sub.add_parser("report-incident")
-    report.add_argument("--source-issue", required=True)
-    report.add_argument("--source-requirement")
-    report.add_argument("--rule-id", default="WF-SELF-REPORT-001")
-    report.add_argument("--severity", choices=["low", "medium", "high", "urgent"], default="medium")
-    report.add_argument("--summary", required=True)
-    report.add_argument("--expected", required=True)
-    report.add_argument("--actual", required=True)
-    report.add_argument("--evidence")
-    report.add_argument("--entity")
-    report.add_argument("--dedupe-key")
-    report.add_argument("--protocol-revision")
-    report.add_argument("--reporter-agent-id")
-    report.add_argument("--reporter-role")
-    report.add_argument("--block-source", action="store_true")
-    report.add_argument("--notification-cooldown-hours", type=int, default=24)
-    report.add_argument("--deterministic-confirmation", action="store_true")
-    report.add_argument("--blocked-requirement-count", type=int, default=0)
+    add_report_arguments(report)
+
+    register = sub.add_parser("register-project")
+    register.add_argument("--project-id", required=True)
+    register.add_argument("--workflow-instance-id", required=True)
+    register.add_argument("--development-squad-id")
+    register.add_argument("--managed-agent-ids")
+    register.add_argument("--protocol-revision", default="v3")
+    register.add_argument("--disabled", action="store_true")
+    register.add_argument("--output", choices=["json"], default="json")
+
+    bind = sub.add_parser("bind-workflow-issue")
+    bind.add_argument("--issue", required=True)
+    bind.add_argument("--object-type", required=True)
+    bind.add_argument("--root-requirement-id")
+    bind.add_argument("--created-by-role", required=True)
+    bind.add_argument("--output", choices=["json"], default="json")
+
+    scan_parser = sub.add_parser("scan")
+    scan_parser.add_argument("--mode", choices=["incremental", "full"], required=True)
+    scan_parser.add_argument("--workflow-instance-id")
+    scan_parser.add_argument("--max-issues", type=int, default=5000)
+    scan_parser.add_argument("--backlog-hours", type=int, default=24)
+    scan_parser.add_argument("--lease-minutes", type=int, default=30)
+    scan_parser.add_argument("--output", choices=["json"], default="json")
+
+    triage_parser = sub.add_parser("triage")
+    triage_parser.add_argument("--incident", required=True)
+    triage_parser.add_argument("--verdict", choices=sorted(TRIAGE_VERDICTS), required=True)
+    triage_parser.add_argument("--reason")
+    triage_parser.add_argument("--output", choices=["json"], default="json")
+
+    decision_parser = sub.add_parser("prepare-maintenance-decision")
+    decision_parser.add_argument("--incident", required=True)
+    decision_parser.add_argument("--output", choices=["json"], default="json")
+
+    record_parser = sub.add_parser("record-maintenance-decision")
+    record_parser.add_argument("--incident", required=True)
+    record_parser.add_argument("--comment-id")
+    record_parser.add_argument("--executor")
+    record_parser.add_argument("--output", choices=["json"], default="json")
+
+    verify_parser = sub.add_parser("verify-fix")
+    verify_parser.add_argument("--incident", required=True)
+    verify_parser.add_argument("--result", choices=["passed", "failed"], required=True)
+    verify_parser.add_argument("--evidence", required=True)
+    verify_parser.add_argument("--deployed-version")
+    verify_parser.add_argument("--deployment-target")
+    verify_parser.add_argument("--output", choices=["json"], default="json")
 
     audit_parser = sub.add_parser("audit")
     audit_parser.add_argument("--scope", choices=["issues", "health", "all"], default="all")
@@ -2385,6 +4111,7 @@ def parser() -> argparse.ArgumentParser:
 
     health_parser = sub.add_parser("health")
     health_parser.add_argument("--max-age-minutes", type=int, default=135)
+    health_parser.add_argument("--full-max-age-minutes", type=int, default=1560)
     health_parser.add_argument("--output", choices=["json"], default="json")
     return root
 
@@ -2393,16 +4120,47 @@ def main() -> int:
     args = parser().parse_args()
     try:
         cli = build_cli(args)
-        if args.command == "report-incident":
-            result = report_incident(cli, args)
+        if args.command in {"report-anomaly", "report-incident"}:
+            result = report_anomaly(cli, args)
+        elif args.command == "register-project":
+            result = register_project(cli, args)
+        elif args.command == "bind-workflow-issue":
+            result = bind_workflow_issue(cli, args)
+        elif args.command == "scan":
+            result = scan(cli, args)
+        elif args.command == "triage":
+            result = triage_incident(cli, args)
+        elif args.command == "prepare-maintenance-decision":
+            result = prepare_maintenance_decision(cli, args)
+        elif args.command == "record-maintenance-decision":
+            result = record_maintenance_decision(cli, args)
+        elif args.command == "verify-fix":
+            result = verify_fix(cli, args)
         elif args.command == "audit":
-            result = audit(cli, args)
-            if audit_failed(result):
-                print(json.dumps(result, ensure_ascii=False, indent=2))
-                return 2
+            if args.scope == "health":
+                result = external_health(
+                    cli, args.health_max_age_minutes, 1560
+                )
+            else:
+                result = scan(
+                    cli,
+                    argparse.Namespace(
+                        mode="incremental",
+                        workflow_instance_id=None,
+                        max_issues=args.max_issues,
+                        backlog_hours=args.backlog_hours,
+                        lease_minutes=30,
+                    ),
+                )
         else:
-            result = health(cli, args.max_age_minutes)
+            result = external_health(
+                cli, args.max_age_minutes, args.full_max_age_minutes
+            )
         print(json.dumps(result, ensure_ascii=False, indent=2))
+        if args.command in {"report-anomaly", "report-incident"} and result.get(
+            "warnings"
+        ):
+            return 2
         return 0
     except ObserverError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

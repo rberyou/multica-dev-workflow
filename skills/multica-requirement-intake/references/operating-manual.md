@@ -192,7 +192,7 @@ Agent 应读取：
 
 ## 工作流异常
 
-当 Agent 发现审批、Review、依赖、状态、角色、Runtime、Skill 或平台能力与工作流合同不一致时，会通过 `multica-workflow-observer` 创建独立 Incident，并在来源 issue 写入 `workflow_incident_id`。Incident 位于“工作流运维”项目，不是业务需求子 issue。
+当 Agent 发现审批、Review、依赖、状态、角色、Runtime、Skill 或平台能力与工作流合同不一致时，会通过 `multica-workflow-observer` 创建或复用 Observation。Observer 再将有效 Observation 分类并汇聚为独立 Incident。Observation 与 Incident 位于“工作流运维”项目，不是业务需求子 issue。
 
 - urgent/high Incident 可能使来源 issue blocked，`waiting_on=workflow_fix`。
 - medium/low Incident 在不影响正确性时可以继续执行。

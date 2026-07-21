@@ -165,16 +165,28 @@ def build_contract(root: Path) -> dict:
     managed_autopilot = next(
         item for item in manifest["autopilots"] if item["key"] == operations["autopilot"]
     )
+    managed_autopilots = {
+        item["key"]: item
+        for item in manifest["autopilots"]
+        if item["key"]
+        in {operations["autopilot"], operations["full_scan_autopilot"]}
+    }
     contract["operations"] = {
         **operations,
         "observer_skill_name": observer_skill["name"],
         "modes": {
             "enabled": {
                 "autopilot_status": managed_autopilot["status"],
+                "autopilot_statuses": {
+                    key: item["status"] for key, item in managed_autopilots.items()
+                },
                 "observer_skill_attach_to": observer_skill.get("attach_to", []),
             },
             "disabled": {
                 "autopilot_status": "paused",
+                "autopilot_statuses": {
+                    key: "paused" for key in managed_autopilots
+                },
                 "observer_skill_attach_to": observer_skill.get("attach_to", []),
             },
         },
