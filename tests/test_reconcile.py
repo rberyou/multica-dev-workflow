@@ -571,21 +571,18 @@ class ReconcileTests(unittest.TestCase):
                 len([item for item in autopilot_commands if item[:2] == ("autopilot", "create")]),
                 2,
             )
-            self.assertEqual(
-                len([item for item in autopilot_commands if item[:2] == ("autopilot", "update")]),
-                2,
-            )
             updates = [
                 item
                 for item in autopilot_commands
                 if item[:2] == ("autopilot", "update")
             ]
-            self.assertTrue(
-                all(
-                    update[3:] == ("--status", "paused", "--output", "json")
-                    for update in updates
-                )
+            manifest = json.loads(
+                (temp_root / "workflow.json").read_text(encoding="utf-8")
             )
+            expected_status_updates = sum(
+                item["status"] != "active" for item in manifest["autopilots"]
+            )
+            self.assertEqual(len(updates), expected_status_updates)
             for command in autopilot_commands:
                 self.assertNotIn("--priority", command)
                 self.assertFalse(
@@ -877,13 +874,15 @@ class ReconcileTests(unittest.TestCase):
                 write_archives=False,
             )
             types = [item["type"] for item in disabled["actions"]]
+            manifest = json.loads((temp_root / "workflow.json").read_text(encoding="utf-8"))
             self.assertEqual(types.count("DETACH_SKILL"), 0)
-            self.assertEqual(types.count("UPDATE_AUTOPILOT"), 0)
+            self.assertEqual(
+                types.count("UPDATE_AUTOPILOT"), len(manifest["autopilots"])
+            )
             disabled_path = temp_root / ".multica/plans/disabled.json"
             write_json(disabled_path, disabled)
             apply_plan(temp_root, cli, disabled_path, disabled["plan_digest"][:12])
 
-            manifest = json.loads((temp_root / "workflow.json").read_text(encoding="utf-8"))
             observer_skill_id = next(
                 item["id"] for item in cli.skills if item["name"] == "multica-workflow-observer"
             )
@@ -904,7 +903,9 @@ class ReconcileTests(unittest.TestCase):
                 observer_skill_id,
                 {item["id"] for item in cli.agent_skills[observer_agent["id"]]},
             )
-            self.assertEqual(cli.autopilots[0]["status"], "paused")
+            self.assertTrue(
+                all(item["status"] == "paused" for item in cli.autopilots)
+            )
             self.assertIn(
                 local_skill["id"],
                 {item["id"] for item in cli.agent_skills[leader["id"]]},
@@ -1240,8 +1241,12 @@ class ReconcileTests(unittest.TestCase):
                 disable_operations=True,
                 write_archives=False,
             )
-            self.assertFalse(
-                any(item["type"] == "UPDATE_AUTOPILOT" for item in disabled["actions"])
+            self.assertEqual(
+                sum(
+                    item["type"] == "UPDATE_AUTOPILOT"
+                    for item in disabled["actions"]
+                ),
+                2,
             )
 
     def test_changed_autopilot_trigger_without_id_blocks_planning(self):

@@ -40,7 +40,7 @@ The command creates or reuses a durable Observation Inbox record. It does not cr
 
 Observer Mode is authorized only by the managed Workflow Observer instructions or its Autopilot.
 
-- Run `scripts/observer.py scan --mode incremental` hourly and `scan --mode full` daily. Scans process pending/failed Observations, inspect only enabled Project Registrations, maintain per-project cursors, and serialize each run with an expiring lease. `audit --scope issues --report` remains an incremental-scan compatibility alias.
+- Run `scripts/observer.py scan --mode incremental` hourly and `scan --mode full` daily. Scans process pending/processing/failed Observations, inspect only enabled Project Registrations, maintain per-project cursors, and serialize each run with an expiring lease. `audit --scope issues --report` remains an incremental-scan compatibility alias.
 - Use `scripts/observer.py health` from an external operator context to check Autopilot freshness.
 - Triage Incidents into only the verdicts in [triage-runbook.md](references/triage-runbook.md), prepare a digest-bound maintenance decision, and record only an exact human approval or defer comment.
 - After ordinary development deploys a fix, use `verify-fix` to record independent Observer evidence and close the Maintenance Case and Incident.

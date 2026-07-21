@@ -159,18 +159,18 @@
     {
       "key": "workflow-health-audit",
       "title": "工作流增量巡检",
-      "description": "使用 multica-workflow-observer 的 Observer Mode，运行 scripts/observer.py scan --mode incremental。只扫描已启用 Project Registration，先恢复 pending/failed Observation，再执行确定性规则、Incident 去重和项目独立游标提交；无法完整扫描或持久化状态时必须失败。外部操作员或调度器必须单独运行 scripts/workflow.py health。",
+      "description": "使用 multica-workflow-observer 的 Observer Mode，运行 scripts/observer.py scan --mode incremental。只扫描已启用 Project Registration，先恢复 pending/processing/failed Observation，再执行确定性规则、Incident 去重和项目独立游标提交；无法完整扫描或持久化状态时必须失败。外部操作员或调度器必须单独运行 scripts/workflow.py health。",
       "agent": "workflow-observer",
       "mode": "run_only",
       "project": "workflow-operations",
-      "status": "paused",
+      "status": "active",
       "subscribers": ["human_approver"],
       "triggers": [
         {
           "key": "hourly",
           "kind": "schedule",
           "label": "multica-workflow:workflow-health-hourly",
-          "enabled": false,
+          "enabled": true,
           "cron": "0 * * * *",
           "timezone": "Asia/Shanghai"
         }
@@ -179,18 +179,18 @@
     {
       "key": "workflow-full-audit",
       "title": "工作流每日全量巡检",
-      "description": "使用 multica-workflow-observer 的 Observer Mode，运行 scripts/observer.py scan --mode full。重新校验所有已注册项目的工作流对象、pending/failed Observation 和 Git 管理的控制面状态；不得扫描未注册项目的普通业务 Issue。",
+      "description": "使用 multica-workflow-observer 的 Observer Mode，运行 scripts/observer.py scan --mode full。重新校验所有已注册项目的工作流对象、pending/processing/failed Observation 和 Git 管理的控制面状态；不得扫描未注册项目的普通业务 Issue。",
       "agent": "workflow-observer",
       "mode": "run_only",
       "project": "workflow-operations",
-      "status": "paused",
+      "status": "active",
       "subscribers": ["human_approver"],
       "triggers": [
         {
           "key": "daily",
           "kind": "schedule",
           "label": "multica-workflow:workflow-full-daily",
-          "enabled": false,
+          "enabled": true,
           "cron": "15 2 * * *",
           "timezone": "Asia/Shanghai"
         }

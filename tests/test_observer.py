@@ -1276,7 +1276,7 @@ class ObserverTests(unittest.TestCase):
     def test_control_plane_audit_still_reports_trigger_drift(self):
         cases = [
             "wrong cron_expression",
-            "unexpected enabled trigger",
+            "unexpected disabled trigger",
             "wrong timezone",
             "missing trigger",
             "duplicate label",
@@ -1288,8 +1288,8 @@ class ObserverTests(unittest.TestCase):
                 if case == "wrong cron_expression":
                     trigger.pop("cron")
                     trigger["cron_expression"] = "30 * * * *"
-                elif case == "unexpected enabled trigger":
-                    trigger["enabled"] = True
+                elif case == "unexpected disabled trigger":
+                    trigger["enabled"] = False
                 elif case == "wrong timezone":
                     trigger["timezone"] = "UTC"
                 elif case == "missing trigger":
@@ -1306,28 +1306,30 @@ class ObserverTests(unittest.TestCase):
         cli = ControlPlaneCLI()
         manifest = json.loads((ROOT / "workflow.json").read_text(encoding="utf-8"))
         operations = observer.control_contract()["operations"]
-        autopilot_spec = manifest["autopilots"][0]
-        cli.autopilots[0]["status"] = "paused"
-        disabled_hash = observer.sha256_value(
-            {
-                "key": autopilot_spec["key"],
-                "title": autopilot_spec["title"],
-                "description": autopilot_spec["description"].strip() + "\n",
-                "agent": autopilot_spec["agent"],
-                "mode": autopilot_spec["mode"],
-                "project": autopilot_spec["project"],
-                "status": "paused",
-                "issue_title_template": autopilot_spec.get(
-                    "issue_title_template", ""
-                ),
-                "subscriber_ids": ["human-1"],
-            }
-        )
-        cli.autopilots[0]["description"] = observer_marker(
-            "autopilot.workflow-health-audit",
-            autopilot_spec["description"].strip() + "\n",
-            disabled_hash,
-        )
+        for current, autopilot_spec in zip(
+            cli.autopilots, manifest["autopilots"], strict=True
+        ):
+            current["status"] = "paused"
+            disabled_hash = observer.sha256_value(
+                {
+                    "key": autopilot_spec["key"],
+                    "title": autopilot_spec["title"],
+                    "description": autopilot_spec["description"].strip() + "\n",
+                    "agent": autopilot_spec["agent"],
+                    "mode": autopilot_spec["mode"],
+                    "project": autopilot_spec["project"],
+                    "status": "paused",
+                    "issue_title_template": autopilot_spec.get(
+                        "issue_title_template", ""
+                    ),
+                    "subscriber_ids": ["human-1"],
+                }
+            )
+            current["description"] = observer_marker(
+                f"autopilot.{autopilot_spec['key']}",
+                autopilot_spec["description"].strip() + "\n",
+                disabled_hash,
+            )
         self.assertEqual(observer.audit_control_plane(cli, "T-audit"), [])
         cli.agents[0]["description"] = "drifted instructions contract"
         cli.autopilots[0]["triggers"][0]["timezone"] = "UTC"
