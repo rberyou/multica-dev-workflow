@@ -687,7 +687,11 @@ def pending_observation_records(
 ) -> list[dict[str, Any]]:
     by_id = {}
     for field in ["observation_status", "status"]:
-        for status in ["pending", "failed"]:
+        # A scan can stop after claiming an Observation but before it records
+        # the Incident link. The instance lease prevents a live processor from
+        # racing this recovery, so a later lease owner must also resume
+        # durable `processing` records.
+        for status in ["pending", "processing", "failed"]:
             for item in list_issues(
                 cli,
                 project_id=project_id,
@@ -711,7 +715,7 @@ def workflow_instance_id(metadata: dict[str, Any], cli: CLI) -> str:
     return str(
         metadata.get("workflow_instance_id")
         or metadata.get("workflow_id")
-        or f"unregistered:{cli.workspace_id}"
+        or f"unregistered:{getattr(cli, 'workspace_id', 'unknown')}"
     )
 
 
@@ -1448,6 +1452,7 @@ def report_incident(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
     metadata = {
         "workflow_object_type": "incident",
         "workflow_id": WORKFLOW_ID,
+        "workflow_instance_id": workflow_instance_id(source_meta, cli),
         "incident_dedupe_key": dedupe_key,
         "incident_rule_id": args.rule_id,
         "incident_status": "new"
@@ -1518,7 +1523,7 @@ def process_observation(cli: CLI, observation: dict[str, Any]) -> dict[str, Any]
     observation_id = issue_ref(observation)
     metadata = metadata_map(cli, observation_id)
     status = str(metadata.get("observation_status") or metadata.get("status") or "")
-    if status not in {"pending", "failed"}:
+    if status not in {"pending", "processing", "failed"}:
         return {"observation_id": observation_id, "action": "skipped", "status": status}
     payload = parse_json_map(metadata.get("observation_payload"))
     required = [
@@ -1915,7 +1920,7 @@ def scan(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
                 or observation_metadata.get("status")
                 or ""
             )
-            if status in {"pending", "failed"}:
+            if status in {"pending", "processing", "failed"}:
                 processed_observations.append(process_observation(cli, observation))
         renew_scan_lease(cli, control_id, lease_owner, args.lease_minutes)
         for registration in registrations_for_instance:

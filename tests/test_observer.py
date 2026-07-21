@@ -1936,6 +1936,39 @@ class ObserverTests(unittest.TestCase):
             cli.metadata[second["observation_id"]]["incident_id"],
         )
 
+    def test_scan_recovers_observation_left_processing_after_crash(self):
+        cli = Phase1CLI()
+        cli.add_registration()
+        reported = observer.report_anomaly(cli, self.phase1_report_args())
+        observation_id = reported["observation_id"]
+        cli.metadata[observation_id]["observation_status"] = "processing"
+        cli.metadata[observation_id]["status"] = "processing"
+        args = Namespace(
+            mode="incremental",
+            workflow_instance_id="instance-1",
+            max_issues=5000,
+            backlog_hours=24,
+            lease_minutes=30,
+        )
+        with (
+            patch.object(observer, "audit_control_plane", return_value=[]),
+            patch.object(observer, "audit_issue", return_value=[]),
+            patch.object(observer, "parent_findings", return_value=[]),
+        ):
+            result = observer.scan(cli, args)
+        self.assertEqual(len(result["processed_observations"]), 1)
+        processed = result["processed_observations"][0]
+        self.assertEqual(processed["observation_id"], observation_id)
+        self.assertEqual(processed["action"], "processed")
+        incident_id = processed["incident_id"]
+        self.assertEqual(
+            cli.metadata[observation_id]["observation_status"], "processed"
+        )
+        self.assertFalse(cli.metadata["T-100"]["workflow_observation_pending"])
+        self.assertEqual(
+            cli.metadata[incident_id]["workflow_instance_id"], "instance-1"
+        )
+
     def test_scan_commits_cursor_only_after_success(self):
         cli = Phase1CLI()
         registration = cli.add_registration()
