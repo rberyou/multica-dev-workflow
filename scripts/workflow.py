@@ -188,6 +188,11 @@ def command_secure_bindings(args: argparse.Namespace, root: Path) -> int:
             raise WorkflowError(f"secure Agent {agent_key} has no Runtime binding")
         runtime_ids.add(runtime_id)
     bootstrap_runtime_id = str(getattr(args, "bootstrap_runtime_id", None) or "")
+    secure_phase = str((manifest.get("secure_runtime") or {}).get("phase") or "")
+    if secure_phase != "enforced" and not bootstrap_runtime_id:
+        raise WorkflowError(
+            "secure runtime is only planned; pass --bootstrap-runtime-id during Phase 3 bootstrap"
+        )
     if bootstrap_runtime_id:
         try:
             parsed_runtime_id = uuid.UUID(bootstrap_runtime_id)
@@ -336,8 +341,114 @@ def command_observer(args: argparse.Namespace, root: Path) -> int:
             command.append("--report")
         if args.coverage_issue:
             command.extend(["--coverage-issue", args.coverage_issue])
-    else:
+    elif args.command == "health":
         command.extend(["--max-age-minutes", str(args.max_age_minutes)])
+        command.extend(
+            ["--full-max-age-minutes", str(args.full_max_age_minutes)]
+        )
+    elif args.command == "scan":
+        command.extend(
+            [
+                "--mode",
+                args.mode,
+                "--max-issues",
+                str(args.max_issues),
+                "--backlog-hours",
+                str(args.backlog_hours),
+                "--lease-minutes",
+                str(args.lease_minutes),
+            ]
+        )
+        if args.workflow_instance_id:
+            command.extend(["--workflow-instance-id", args.workflow_instance_id])
+    elif args.command == "register-project":
+        command.extend(
+            [
+                "--project-id",
+                args.project_id,
+                "--workflow-instance-id",
+                args.workflow_instance_id,
+                "--protocol-revision",
+                args.protocol_revision,
+            ]
+        )
+        if args.development_squad_id:
+            command.extend(["--development-squad-id", args.development_squad_id])
+        if args.managed_agent_ids:
+            command.extend(["--managed-agent-ids", args.managed_agent_ids])
+        if args.disabled:
+            command.append("--disabled")
+    elif args.command == "bind-workflow-issue":
+        command.extend(
+            [
+                "--issue",
+                args.issue,
+                "--object-type",
+                args.object_type,
+                "--created-by-role",
+                args.created_by_role,
+            ]
+        )
+        if args.root_requirement_id:
+            command.extend(["--root-requirement-id", args.root_requirement_id])
+    elif args.command in {"report-anomaly", "report-incident"}:
+        command.extend(
+            [
+                "--source-issue",
+                args.source_issue,
+                "--rule-id",
+                args.rule_id,
+                "--severity",
+                args.severity,
+                "--summary",
+                args.summary,
+                "--expected",
+                args.expected,
+                "--actual",
+                args.actual,
+            ]
+        )
+        for option, value in [
+            ("--source-requirement", args.source_requirement),
+            ("--evidence", args.evidence),
+            ("--entity", args.entity),
+            ("--protocol-revision", args.protocol_revision),
+            ("--reporter-agent-id", args.reporter_agent_id),
+            ("--reporter-role", args.reporter_role),
+        ]:
+            if value:
+                command.extend([option, value])
+        if args.block_source:
+            command.append("--block-source")
+        if args.command == "report-anomaly" and args.no_wake:
+            command.append("--no-wake")
+    elif args.command == "triage":
+        command.extend(["--incident", args.incident, "--verdict", args.verdict])
+        if args.reason:
+            command.extend(["--reason", args.reason])
+    elif args.command == "prepare-maintenance-decision":
+        command.extend(["--incident", args.incident])
+    elif args.command == "record-maintenance-decision":
+        command.extend(["--incident", args.incident])
+        if args.comment_id:
+            command.extend(["--comment-id", args.comment_id])
+        if args.executor:
+            command.extend(["--executor", args.executor])
+    elif args.command == "verify-fix":
+        command.extend(
+            [
+                "--incident",
+                args.incident,
+                "--result",
+                args.result,
+                "--evidence",
+                args.evidence,
+            ]
+        )
+        if args.deployed_version:
+            command.extend(["--deployed-version", args.deployed_version])
+        if args.deployment_target:
+            command.extend(["--deployment-target", args.deployment_target])
     command.extend(["--output", args.output])
     result = run_process(command, cwd=root, check=False)
     if result.stdout:
@@ -415,9 +526,116 @@ def parser() -> argparse.ArgumentParser:
     audit.add_argument("--output", choices=["json"], default="json")
     audit.set_defaults(func=command_observer)
 
+    register = subparsers.add_parser("register-project")
+    add_context_args(register)
+    register.add_argument("--project-id", required=True)
+    register.add_argument("--workflow-instance-id", required=True)
+    register.add_argument("--development-squad-id")
+    register.add_argument("--managed-agent-ids")
+    register.add_argument("--protocol-revision", default="v3")
+    register.add_argument("--disabled", action="store_true")
+    register.add_argument("--output", choices=["json"], default="json")
+    register.set_defaults(func=command_observer)
+
+    bind = subparsers.add_parser("bind-workflow-issue")
+    add_context_args(bind)
+    bind.add_argument("--issue", required=True)
+    bind.add_argument("--object-type", required=True)
+    bind.add_argument("--root-requirement-id")
+    bind.add_argument("--created-by-role", required=True)
+    bind.add_argument("--output", choices=["json"], default="json")
+    bind.set_defaults(func=command_observer)
+
+    def add_report_arguments(command: argparse.ArgumentParser) -> None:
+        add_context_args(command)
+        command.add_argument("--source-issue", required=True)
+        command.add_argument("--source-requirement")
+        command.add_argument("--rule-id", default="WF-SELF-REPORT-001")
+        command.add_argument(
+            "--severity",
+            choices=["low", "medium", "high", "urgent"],
+            default="medium",
+        )
+        command.add_argument("--summary", required=True)
+        command.add_argument("--expected", required=True)
+        command.add_argument("--actual", required=True)
+        command.add_argument("--evidence")
+        command.add_argument("--entity")
+        command.add_argument("--protocol-revision")
+        command.add_argument("--reporter-agent-id")
+        command.add_argument("--reporter-role")
+        command.add_argument("--block-source", action="store_true")
+        command.add_argument("--output", choices=["json"], default="json")
+        command.set_defaults(func=command_observer)
+
+    report_anomaly = subparsers.add_parser("report-anomaly")
+    add_report_arguments(report_anomaly)
+    report_anomaly.add_argument("--no-wake", action="store_true")
+
+    report_incident = subparsers.add_parser("report-incident")
+    add_report_arguments(report_incident)
+
+    scan = subparsers.add_parser("scan")
+    add_context_args(scan)
+    scan.add_argument("--mode", choices=["incremental", "full"], required=True)
+    scan.add_argument("--workflow-instance-id")
+    scan.add_argument("--max-issues", type=int, default=5000)
+    scan.add_argument("--backlog-hours", type=int, default=24)
+    scan.add_argument("--lease-minutes", type=int, default=30)
+    scan.add_argument("--output", choices=["json"], default="json")
+    scan.set_defaults(func=command_observer)
+
+    triage = subparsers.add_parser("triage")
+    add_context_args(triage)
+    triage.add_argument("--incident", required=True)
+    triage.add_argument(
+        "--verdict",
+        choices=[
+            "CONFIRMED_WORKFLOW_BUG",
+            "WORKFLOW_GAP",
+            "USAGE_ERROR",
+            "PROJECT_DEFECT",
+            "RUNTIME_INCIDENT",
+            "MULTICA_PRODUCT_DEFECT",
+            "FALSE_POSITIVE",
+            "DECISION_REQUIRED",
+        ],
+        required=True,
+    )
+    triage.add_argument("--reason")
+    triage.add_argument("--output", choices=["json"], default="json")
+    triage.set_defaults(func=command_observer)
+
+    prepare_decision = subparsers.add_parser("prepare-maintenance-decision")
+    add_context_args(prepare_decision)
+    prepare_decision.add_argument("--incident", required=True)
+    prepare_decision.add_argument("--output", choices=["json"], default="json")
+    prepare_decision.set_defaults(func=command_observer)
+
+    record_decision = subparsers.add_parser("record-maintenance-decision")
+    add_context_args(record_decision)
+    record_decision.add_argument("--incident", required=True)
+    record_decision.add_argument("--comment-id")
+    record_decision.add_argument("--executor")
+    record_decision.add_argument("--output", choices=["json"], default="json")
+    record_decision.set_defaults(func=command_observer)
+
+    verify_fix_parser = subparsers.add_parser("verify-fix")
+    add_context_args(verify_fix_parser)
+    verify_fix_parser.add_argument("--incident", required=True)
+    verify_fix_parser.add_argument(
+        "--result", choices=["passed", "failed"], required=True
+    )
+    verify_fix_parser.add_argument("--evidence", required=True)
+    verify_fix_parser.add_argument("--deployed-version")
+    verify_fix_parser.add_argument("--deployment-target")
+    verify_fix_parser.add_argument("--output", choices=["json"], default="json")
+    verify_fix_parser.set_defaults(func=command_observer)
+
     health = subparsers.add_parser("health")
     add_context_args(health)
     health.add_argument("--max-age-minutes", type=int, default=135)
+    health.add_argument("--full-max-age-minutes", type=int, default=1560)
     health.add_argument("--output", choices=["json"], default="json")
     health.set_defaults(func=command_observer)
     return root_parser

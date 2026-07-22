@@ -11,9 +11,9 @@ Allowed verdicts:
 - `FALSE_POSITIVE`
 - `DECISION_REQUIRED`
 
-Observer automation creates or reuses only the Incident. A confirmed workflow defect records `waiting_on=maintenance_intake` and requests a durable human or explicitly authorized external Maintainer to choose an existing batch or start maintenance.
+Observer automation consumes durable Observations and creates or reuses only one Incident per dedupe key. A confirmed workflow defect moves to `awaiting_maintenance_decision` and receives a digest-bound approval request.
 
-Observer must not create Maintenance Change, Plan, Implementation, Canary, or Rollout Issues. Maintenance stages are created lazily by the Maintainer after the preceding gate. During a stabilization freeze, no maintenance-tree expansion or status promotion is allowed.
+The registered human approver may use `APPROVE WORKFLOW MAINTENANCE <digest>` or `DEFER WORKFLOW MAINTENANCE <digest>`. Approval creates one minimal Maintenance Case for the ordinary development workflow. Phase 1 does not create a Maintenance Change tree or activate Maintainer/Reviewer automation.
 
 Product defects are routed to the product Project. Multica product defects require a redacted draft and human approval before external publication.
 

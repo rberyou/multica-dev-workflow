@@ -182,6 +182,148 @@ class IncidentCLI:
         raise AssertionError(args)
 
 
+class Phase1CLI(IncidentCLI):
+    def __init__(self):
+        super().__init__()
+        self.workspace_id = "workspace-test"
+        self.items = []
+        self.next_number = 900
+        self.triggered = []
+        self.comment_records = {}
+        self.issue_details["T-100"] = {
+            "id": "source-100",
+            "identifier": "T-100",
+            "status": "in_progress",
+            "project_id": "project-dev",
+            "assignee_id": "agent-dev",
+            "updated_at": "2026-07-21T00:00:00Z",
+        }
+        self.metadata["T-100"] = {
+            "workflow_id": observer.WORKFLOW_ID,
+            "workflow_instance_id": "instance-1",
+            "protocol_revision": "v3",
+        }
+
+    def add_item(self, identifier, project_id, metadata, **values):
+        item = {
+            "id": f"id-{identifier}",
+            "identifier": identifier,
+            "project_id": project_id,
+            "status": values.pop("status", "in_progress"),
+            "updated_at": values.pop("updated_at", "2026-07-21T00:00:00Z"),
+            **values,
+        }
+        self.items.append(item)
+        self.issue_details[identifier] = item
+        self.metadata[identifier] = dict(metadata)
+        return item
+
+    def add_registration(self):
+        return self.add_item(
+            "WOR-REG",
+            "project-ops",
+            {
+                "workflow_object_type": "project_registration",
+                "workflow_id": observer.WORKFLOW_ID,
+                "workflow_instance_id": "instance-1",
+                "workspace_id": self.workspace_id,
+                "project_id": "project-dev",
+                "project_name": "Development",
+                "protocol_revision": "v3",
+                "enabled": True,
+                "managed_agent_ids": '["agent-dev"]',
+                "committed_cursor": observer.cursor_value(
+                    datetime.fromtimestamp(0, timezone.utc)
+                ),
+                "checkpoint_cursor": observer.cursor_value(
+                    datetime.fromtimestamp(0, timezone.utc)
+                ),
+            },
+        )
+
+    def json(self, args, input_text=None):
+        if args[:2] == ["project", "get"]:
+            return {"id": args[2], "title": "Development"}
+        if args[:2] == ["autopilot", "list"]:
+            return [
+                {
+                    "id": "autopilot-observer",
+                    "description": observer_marker("autopilot.workflow-health-audit"),
+                }
+            ]
+        if args[:2] == ["autopilot", "get"]:
+            return {
+                "id": args[2],
+                "description": observer_marker("autopilot.workflow-health-audit"),
+            }
+        if args[:2] == ["autopilot", "trigger"]:
+            self.triggered.append(args[2])
+            return {"id": "run-1"}
+        if args[:2] == ["issue", "list"]:
+            limit = int(args[args.index("--limit") + 1])
+            offset = int(args[args.index("--offset") + 1])
+            items = list(self.items)
+            if "--project" in args:
+                project_id = args[args.index("--project") + 1]
+                items = [item for item in items if item.get("project_id") == project_id]
+            if "--status" in args:
+                status = args[args.index("--status") + 1]
+                items = [item for item in items if item.get("status") == status]
+            filters = [
+                args[index + 1]
+                for index, item in enumerate(args)
+                if item == "--metadata"
+            ]
+            for value in filters:
+                key, expected = value.split("=", 1)
+                items = [
+                    item
+                    for item in items
+                    if str(self.metadata.get(item["identifier"], {}).get(key)).lower()
+                    == expected.lower()
+                ]
+            return items[offset : offset + limit]
+        if args[:2] == ["issue", "create"]:
+            identifier = f"WOR-{self.next_number}"
+            self.next_number += 1
+            item = {
+                "id": f"id-{identifier}",
+                "identifier": identifier,
+                "project_id": args[args.index("--project") + 1],
+                "status": args[args.index("--status") + 1],
+                "title": args[args.index("--title") + 1],
+                "updated_at": observer.utc_now(),
+            }
+            self.items.append(item)
+            self.issue_details[identifier] = item
+            self.metadata[identifier] = {}
+            self.created.append({"args": args, "description": input_text})
+            return item
+        if args[:2] == ["issue", "get"]:
+            return self.issue_details.get(args[2])
+        if args[:3] == ["issue", "comment", "list"]:
+            return self.comment_records.get(args[3], [])
+        if args[:3] == ["issue", "comment", "add"]:
+            record = {
+                "id": f"comment-{len(self.comments) + 1}",
+                "content": input_text,
+                "author_id": "agent-observer",
+                "author_type": "agent",
+            }
+            self.comments.append((args[3], input_text))
+            self.comment_records.setdefault(args[3], []).append(record)
+            return record
+        if args[:2] == ["issue", "update"]:
+            item = self.issue_details[args[2]]
+            if "--status" in args:
+                item["status"] = args[args.index("--status") + 1]
+            if "--priority" in args:
+                item["priority"] = args[args.index("--priority") + 1]
+            self.updates.append(args)
+            return item
+        return super().json(args, input_text)
+
+
 class ControlPlaneCLI:
     def __init__(self):
         manifest = json.loads((ROOT / "workflow.json").read_text(encoding="utf-8"))
@@ -282,46 +424,59 @@ class ControlPlaneCLI:
                 "icon": project_spec.get("icon", ""),
             }
         ]
-        autopilot_spec = manifest["autopilots"][0]
-        autopilot_hash = observer.sha256_value(
-            {
-                "key": autopilot_spec["key"],
-                "title": autopilot_spec["title"],
-                "description": autopilot_spec["description"].strip() + "\n",
-                "agent": autopilot_spec["agent"],
-                "mode": autopilot_spec["mode"],
-                "project": autopilot_spec["project"],
-                "status": autopilot_spec["status"],
-                "issue_title_template": autopilot_spec.get("issue_title_template", ""),
-                "subscriber_ids": ["human-1"],
-            }
-        )
-        self.autopilots = [
-            {
-                "id": "autopilot-1",
-                "title": autopilot_spec["title"],
-                "description": observer_marker(
-                    "autopilot.workflow-health-audit",
-                    autopilot_spec["description"].strip() + "\n",
-                    autopilot_hash,
-                ),
-                "agent_id": self.agent_by_key[autopilot_spec["agent"]]["id"],
-                "mode": autopilot_spec["mode"],
-                "project_id": "project-1",
-                "status": autopilot_spec["status"],
-                "issue_title_template": autopilot_spec.get("issue_title_template", ""),
-                "subscribers": [{"user_id": "human-1", "user_type": "member"}],
-                "triggers": [
-                    {
-                        "id": "trigger-1",
-                        **{
-                            key: autopilot_spec["triggers"][0][key]
-                            for key in ["kind", "label", "enabled", "cron", "timezone"]
-                        },
-                    }
-                ],
-            }
-        ]
+        self.autopilots = []
+        for index, autopilot_spec in enumerate(manifest["autopilots"], start=1):
+            autopilot_hash = observer.sha256_value(
+                {
+                    "key": autopilot_spec["key"],
+                    "title": autopilot_spec["title"],
+                    "description": autopilot_spec["description"].strip() + "\n",
+                    "agent": autopilot_spec["agent"],
+                    "mode": autopilot_spec["mode"],
+                    "project": autopilot_spec["project"],
+                    "status": autopilot_spec["status"],
+                    "issue_title_template": autopilot_spec.get(
+                        "issue_title_template", ""
+                    ),
+                    "subscriber_ids": ["human-1"],
+                }
+            )
+            self.autopilots.append(
+                {
+                    "id": f"autopilot-{index}",
+                    "title": autopilot_spec["title"],
+                    "description": observer_marker(
+                        f"autopilot.{autopilot_spec['key']}",
+                        autopilot_spec["description"].strip() + "\n",
+                        autopilot_hash,
+                    ),
+                    "agent_id": self.agent_by_key[autopilot_spec["agent"]]["id"],
+                    "mode": autopilot_spec["mode"],
+                    "project_id": "project-1",
+                    "status": autopilot_spec["status"],
+                    "issue_title_template": autopilot_spec.get(
+                        "issue_title_template", ""
+                    ),
+                    "subscribers": [
+                        {"user_id": "human-1", "user_type": "member"}
+                    ],
+                    "triggers": [
+                        {
+                            "id": f"trigger-{index}",
+                            **{
+                                key: autopilot_spec["triggers"][0][key]
+                                for key in [
+                                    "kind",
+                                    "label",
+                                    "enabled",
+                                    "cron",
+                                    "timezone",
+                                ]
+                            },
+                        }
+                    ],
+                }
+            )
 
     def json(self, args, input_text=None):
         if args[:2] == ["agent", "get"]:
@@ -1121,7 +1276,7 @@ class ObserverTests(unittest.TestCase):
     def test_control_plane_audit_still_reports_trigger_drift(self):
         cases = [
             "wrong cron_expression",
-            "unexpected enabled trigger",
+            "unexpected disabled trigger",
             "wrong timezone",
             "missing trigger",
             "duplicate label",
@@ -1133,8 +1288,8 @@ class ObserverTests(unittest.TestCase):
                 if case == "wrong cron_expression":
                     trigger.pop("cron")
                     trigger["cron_expression"] = "30 * * * *"
-                elif case == "unexpected enabled trigger":
-                    trigger["enabled"] = True
+                elif case == "unexpected disabled trigger":
+                    trigger["enabled"] = False
                 elif case == "wrong timezone":
                     trigger["timezone"] = "UTC"
                 elif case == "missing trigger":
@@ -1151,28 +1306,30 @@ class ObserverTests(unittest.TestCase):
         cli = ControlPlaneCLI()
         manifest = json.loads((ROOT / "workflow.json").read_text(encoding="utf-8"))
         operations = observer.control_contract()["operations"]
-        autopilot_spec = manifest["autopilots"][0]
-        cli.autopilots[0]["status"] = "paused"
-        disabled_hash = observer.sha256_value(
-            {
-                "key": autopilot_spec["key"],
-                "title": autopilot_spec["title"],
-                "description": autopilot_spec["description"].strip() + "\n",
-                "agent": autopilot_spec["agent"],
-                "mode": autopilot_spec["mode"],
-                "project": autopilot_spec["project"],
-                "status": "paused",
-                "issue_title_template": autopilot_spec.get(
-                    "issue_title_template", ""
-                ),
-                "subscriber_ids": ["human-1"],
-            }
-        )
-        cli.autopilots[0]["description"] = observer_marker(
-            "autopilot.workflow-health-audit",
-            autopilot_spec["description"].strip() + "\n",
-            disabled_hash,
-        )
+        for current, autopilot_spec in zip(
+            cli.autopilots, manifest["autopilots"], strict=True
+        ):
+            current["status"] = "paused"
+            disabled_hash = observer.sha256_value(
+                {
+                    "key": autopilot_spec["key"],
+                    "title": autopilot_spec["title"],
+                    "description": autopilot_spec["description"].strip() + "\n",
+                    "agent": autopilot_spec["agent"],
+                    "mode": autopilot_spec["mode"],
+                    "project": autopilot_spec["project"],
+                    "status": "paused",
+                    "issue_title_template": autopilot_spec.get(
+                        "issue_title_template", ""
+                    ),
+                    "subscriber_ids": ["human-1"],
+                }
+            )
+            current["description"] = observer_marker(
+                f"autopilot.{autopilot_spec['key']}",
+                autopilot_spec["description"].strip() + "\n",
+                disabled_hash,
+            )
         self.assertEqual(observer.audit_control_plane(cli, "T-audit"), [])
         cli.agents[0]["description"] = "drifted instructions contract"
         cli.autopilots[0]["triggers"][0]["timezone"] = "UTC"
@@ -1641,6 +1798,433 @@ class ObserverTests(unittest.TestCase):
         self.assertEqual(result["action"], "created")
         self.assertEqual(result["incident_id"], "T-900")
         self.assertEqual(cli.metadata["T-900"]["recurrence_of"], "T-800")
+
+    def phase1_report_args(self, source_issue="T-100", severity="medium"):
+        return Namespace(
+            source_issue=source_issue,
+            source_requirement=None,
+            rule_id="WF-PHASE1-TEST",
+            severity=severity,
+            summary="observer test anomaly",
+            expected="workflow remains consistent",
+            actual="workflow drifted",
+            evidence="bounded evidence",
+            entity="runtime:shared",
+            dedupe_key=None,
+            protocol_revision=None,
+            reporter_agent_id="agent-dev",
+            reporter_role="developer",
+            block_source=False,
+            notification_cooldown_hours=24,
+            deterministic_confirmation=False,
+            blocked_requirement_count=0,
+            no_wake=True,
+        )
+
+    def test_phase1_parser_exposes_required_commands(self):
+        commands = observer.parser()._subparsers._group_actions[0].choices
+        for command in [
+            "report-anomaly",
+            "register-project",
+            "bind-workflow-issue",
+            "scan",
+            "triage",
+            "prepare-maintenance-decision",
+            "record-maintenance-decision",
+            "verify-fix",
+        ]:
+            self.assertIn(command, commands)
+
+    def test_bind_workflow_issue_injects_registered_source_contract(self):
+        cli = Phase1CLI()
+        cli.add_registration()
+        cli.metadata["T-100"] = {}
+        result = observer.bind_workflow_issue(
+            cli,
+            Namespace(
+                issue="T-100",
+                object_type="requirement",
+                root_requirement_id=None,
+                created_by_role="leader",
+            ),
+        )
+        self.assertEqual(result["workflow_instance_id"], "instance-1")
+        self.assertEqual(cli.metadata["T-100"]["managed_by"], observer.MANAGED_BY)
+        self.assertEqual(cli.metadata["T-100"]["root_requirement_id"], "T-100")
+
+    def test_project_registration_is_idempotent(self):
+        cli = Phase1CLI()
+        args = Namespace(
+            project_id="project-dev",
+            workflow_instance_id="instance-1",
+            development_squad_id="squad-dev",
+            managed_agent_ids="agent-dev,agent-reviewer",
+            protocol_revision="v3",
+            disabled=False,
+        )
+        created = observer.register_project(cli, args)
+        updated = observer.register_project(cli, args)
+        self.assertEqual(created["action"], "created")
+        self.assertEqual(updated["action"], "updated")
+        registrations = [
+            item
+            for item in cli.items
+            if cli.metadata[item["identifier"]].get("workflow_object_type")
+            == "project_registration"
+        ]
+        self.assertEqual(len(registrations), 1)
+
+    def test_report_anomaly_creates_durable_observation_before_incident(self):
+        cli = Phase1CLI()
+        cli.add_registration()
+        args = self.phase1_report_args()
+        first = observer.report_anomaly(cli, args)
+        second = observer.report_anomaly(cli, args)
+        self.assertEqual(first["action"], "created")
+        self.assertEqual(second["action"], "updated")
+        observations = [
+            item
+            for item in cli.items
+            if cli.metadata[item["identifier"]].get("workflow_object_type")
+            == "observation"
+        ]
+        incidents = [
+            item
+            for item in cli.items
+            if cli.metadata[item["identifier"]].get("workflow_object_type")
+            == "incident"
+        ]
+        self.assertEqual(len(observations), 1)
+        self.assertEqual(incidents, [])
+        self.assertTrue(cli.metadata["T-100"]["workflow_observation_pending"])
+
+    def test_high_anomaly_wakes_observer_after_observation_is_durable(self):
+        cli = Phase1CLI()
+        cli.add_registration()
+        args = self.phase1_report_args(severity="high")
+        args.no_wake = False
+        result = observer.report_anomaly(cli, args)
+        self.assertTrue(result["observer_awakened"])
+        self.assertEqual(cli.triggered, ["autopilot-observer"])
+        self.assertEqual(
+            cli.metadata[result["observation_id"]]["observation_status"], "pending"
+        )
+
+    def test_observations_from_two_sources_share_one_incident(self):
+        cli = Phase1CLI()
+        cli.add_registration()
+        cli.issue_details["T-101"] = {
+            "id": "source-101",
+            "identifier": "T-101",
+            "status": "in_progress",
+            "project_id": "project-dev",
+            "assignee_id": "agent-dev",
+            "updated_at": "2026-07-21T00:01:00Z",
+        }
+        cli.metadata["T-101"] = dict(cli.metadata["T-100"])
+        first = observer.report_anomaly(cli, self.phase1_report_args("T-100"))
+        second = observer.report_anomaly(cli, self.phase1_report_args("T-101"))
+        observer.process_observation(cli, cli.issue_details[first["observation_id"]])
+        observer.process_observation(cli, cli.issue_details[second["observation_id"]])
+        incidents = [
+            item
+            for item in cli.items
+            if cli.metadata[item["identifier"]].get("workflow_object_type")
+            == "incident"
+        ]
+        self.assertEqual(len(incidents), 1)
+        self.assertEqual(
+            cli.metadata[first["observation_id"]]["incident_id"],
+            cli.metadata[second["observation_id"]]["incident_id"],
+        )
+
+    def test_scan_recovers_observation_left_processing_after_crash(self):
+        cli = Phase1CLI()
+        cli.add_registration()
+        reported = observer.report_anomaly(cli, self.phase1_report_args())
+        observation_id = reported["observation_id"]
+        cli.metadata[observation_id]["observation_status"] = "processing"
+        cli.metadata[observation_id]["status"] = "processing"
+        args = Namespace(
+            mode="incremental",
+            workflow_instance_id="instance-1",
+            max_issues=5000,
+            backlog_hours=24,
+            lease_minutes=30,
+        )
+        with (
+            patch.object(observer, "audit_control_plane", return_value=[]),
+            patch.object(observer, "audit_issue", return_value=[]),
+            patch.object(observer, "parent_findings", return_value=[]),
+        ):
+            result = observer.scan(cli, args)
+        self.assertEqual(len(result["processed_observations"]), 1)
+        processed = result["processed_observations"][0]
+        self.assertEqual(processed["observation_id"], observation_id)
+        self.assertEqual(processed["action"], "processed")
+        incident_id = processed["incident_id"]
+        self.assertEqual(
+            cli.metadata[observation_id]["observation_status"], "processed"
+        )
+        self.assertFalse(cli.metadata["T-100"]["workflow_observation_pending"])
+        self.assertEqual(
+            cli.metadata[incident_id]["workflow_instance_id"], "instance-1"
+        )
+
+    def test_scan_commits_cursor_only_after_success(self):
+        cli = Phase1CLI()
+        registration = cli.add_registration()
+        args = Namespace(
+            mode="incremental",
+            max_issues=5000,
+            backlog_hours=24,
+            lease_minutes=30,
+        )
+        with (
+            patch.object(observer, "audit_control_plane", return_value=[]),
+            patch.object(observer, "audit_issue", return_value=[]),
+            patch.object(observer, "parent_findings", return_value=[]),
+        ):
+            result = observer.scan(cli, args)
+        self.assertEqual(result["status"], "success")
+        registration_metadata = cli.metadata[registration["identifier"]]
+        self.assertEqual(
+            registration_metadata["committed_cursor"],
+            registration_metadata["checkpoint_cursor"],
+        )
+        controls = [
+            item
+            for item in cli.items
+            if cli.metadata[item["identifier"]].get("workflow_object_type")
+            == "observer_control"
+        ]
+        self.assertEqual(len(controls), 1)
+        self.assertEqual(cli.metadata[controls[0]["identifier"]]["status"], "success")
+
+    def test_scan_uses_instance_scoped_control_and_requires_selection(self):
+        cli = Phase1CLI()
+        cli.add_registration()
+        cli.add_item(
+            "WOR-REG-2",
+            "project-ops",
+            {
+                "workflow_object_type": "project_registration",
+                "workflow_id": observer.WORKFLOW_ID,
+                "workflow_instance_id": "instance-2",
+                "workspace_id": cli.workspace_id,
+                "project_id": "project-two",
+                "project_name": "Two",
+                "protocol_revision": "v3",
+                "enabled": True,
+                "managed_agent_ids": "[]",
+                "committed_cursor": observer.cursor_value(
+                    datetime.fromtimestamp(0, timezone.utc)
+                ),
+                "checkpoint_cursor": observer.cursor_value(
+                    datetime.fromtimestamp(0, timezone.utc)
+                ),
+            },
+        )
+        args = Namespace(
+            mode="incremental",
+            workflow_instance_id=None,
+            max_issues=5000,
+            backlog_hours=24,
+            lease_minutes=30,
+        )
+        with self.assertRaisesRegex(observer.ObserverError, "multiple workflow instances"):
+            observer.scan(cli, args)
+        args.workflow_instance_id = "instance-2"
+        with (
+            patch.object(observer, "audit_control_plane", return_value=[]),
+            patch.object(observer, "audit_issue", return_value=[]),
+            patch.object(observer, "parent_findings", return_value=[]),
+        ):
+            result = observer.scan(cli, args)
+        self.assertEqual(result["workflow_instance_id"], "instance-2")
+        controls = [
+            cli.metadata[item["identifier"]]
+            for item in cli.items
+            if cli.metadata[item["identifier"]].get("workflow_object_type")
+            == "observer_control"
+        ]
+        self.assertEqual([item["workflow_instance_id"] for item in controls], ["instance-2"])
+
+    def test_scan_lost_lease_never_commits_checkpoint(self):
+        cli = Phase1CLI()
+        registration = cli.add_registration()
+        original_cursor = cli.metadata[registration["identifier"]]["committed_cursor"]
+        args = Namespace(
+            mode="incremental",
+            workflow_instance_id=None,
+            max_issues=5000,
+            backlog_hours=24,
+            lease_minutes=30,
+        )
+        original_renew = observer.renew_scan_lease
+        calls = 0
+
+        def lose_before_commit(target, control_id, owner, lease_minutes):
+            nonlocal calls
+            calls += 1
+            if calls == 4:
+                target.metadata[control_id]["lease_owner"] = "new-owner"
+                raise observer.ObserverError("Observer scan lease was lost")
+            original_renew(target, control_id, owner, lease_minutes)
+
+        with (
+            patch.object(observer, "audit_control_plane", return_value=[]),
+            patch.object(observer, "audit_issue", return_value=[]),
+            patch.object(observer, "parent_findings", return_value=[]),
+            patch.object(observer, "renew_scan_lease", side_effect=lose_before_commit),
+        ):
+            with self.assertRaisesRegex(observer.ObserverError, "lease was lost"):
+                observer.scan(cli, args)
+        self.assertEqual(
+            cli.metadata[registration["identifier"]]["committed_cursor"],
+            original_cursor,
+        )
+        self.assertNotEqual(
+            cli.metadata[registration["identifier"]]["checkpoint_cursor"],
+            original_cursor,
+        )
+
+    def test_external_health_requires_existing_instance_control_without_creating_one(self):
+        cli = Phase1CLI()
+        cli.add_registration()
+        with patch.object(observer, "health", return_value={"age_minutes": 1}):
+            with self.assertRaisesRegex(observer.ObserverError, "missing for instances"):
+                observer.external_health(cli, 135, 1560)
+        self.assertFalse(
+            any(
+                cli.metadata[item["identifier"]].get("workflow_object_type")
+                == "observer_control"
+                for item in cli.items
+            )
+        )
+
+    def test_triage_approval_creates_one_minimal_maintenance_case(self):
+        cli = Phase1CLI()
+        incident = cli.add_item(
+            "WOR-INC",
+            "project-ops",
+            {
+                "workflow_object_type": "incident",
+                "incident_status": "new",
+                "incident_dedupe_key": "dedupe",
+                "incident_severity": "high",
+                "incident_source_requirements": '["T-100"]',
+                "source_issue_id": "T-100",
+                "workflow_version": "1.2.0",
+                "incident_evidence_log": "[]",
+                "human_approver_id": "human-1",
+            },
+            status="todo",
+        )
+        observer.triage_incident(
+            cli,
+            Namespace(
+                incident=incident["identifier"],
+                verdict="CONFIRMED_WORKFLOW_BUG",
+                reason="reproduced",
+            ),
+        )
+        prepared = observer.prepare_maintenance_decision(
+            cli, Namespace(incident=incident["identifier"])
+        )
+        cli.comment_records[incident["identifier"]].append(
+            {
+                "id": "approval-1",
+                "content": prepared["approve"],
+                "author_id": "human-1",
+                "author_type": "member",
+            }
+        )
+        first = observer.record_maintenance_decision(
+            cli,
+            Namespace(
+                incident=incident["identifier"],
+                comment_id="approval-1",
+                executor=None,
+            ),
+        )
+        second = observer.record_maintenance_decision(
+            cli,
+            Namespace(
+                incident=incident["identifier"],
+                comment_id="approval-1",
+                executor=None,
+            ),
+        )
+        self.assertEqual(first["action"], "created")
+        self.assertEqual(second["action"], "reused")
+        self.assertEqual(first["maintenance_case_id"], second["maintenance_case_id"])
+
+    def test_routed_incident_can_be_retriaged_when_new_evidence_arrives(self):
+        cli = Phase1CLI()
+        incident = cli.add_item(
+            "WOR-INC",
+            "project-ops",
+            {
+                "workflow_object_type": "incident",
+                "incident_status": "routed",
+                "logical_status": "routed",
+                "verdict": "RUNTIME_INCIDENT",
+                "waiting_on": "runtime_incident",
+            },
+            status="in_review",
+        )
+        result = observer.triage_incident(
+            cli,
+            Namespace(
+                incident=incident["identifier"],
+                verdict="FALSE_POSITIVE",
+                reason="controlled canary fault injection",
+            ),
+        )
+        self.assertEqual(result["previous_status"], "routed")
+        self.assertEqual(result["status"], "false_positive")
+        self.assertEqual(cli.issue_details[incident["identifier"]]["status"], "done")
+        self.assertEqual(cli.metadata[incident["identifier"]]["waiting_on"], "")
+
+    def test_verify_fix_closes_case_and_incident(self):
+        cli = Phase1CLI()
+        incident = cli.add_item(
+            "WOR-INC",
+            "project-ops",
+            {
+                "workflow_object_type": "incident",
+                "incident_status": "awaiting_verification",
+                "maintenance_intake_digest": "approved-digest",
+                "maintenance_case_id": "WOR-CASE",
+            },
+            status="in_review",
+        )
+        case = cli.add_item(
+            "WOR-CASE",
+            "project-ops",
+            {
+                "workflow_object_type": "maintenance_case",
+                "incident_id": incident["identifier"],
+                "maintenance_intake_digest": "approved-digest",
+                "maintenance_case_status": "awaiting_observer_verification",
+            },
+            status="in_review",
+        )
+        result = observer.verify_fix(
+            cli,
+            Namespace(
+                incident=incident["identifier"],
+                result="passed",
+                evidence="reproduction and regression tests passed",
+                deployed_version="v1.2.0-rc.1",
+                deployment_target="workflow-canary",
+            ),
+        )
+        self.assertEqual(result["result"], "passed")
+        self.assertEqual(cli.issue_details[incident["identifier"]]["status"], "done")
+        self.assertEqual(cli.issue_details[case["identifier"]]["status"], "done")
+        self.assertEqual(cli.metadata[incident["identifier"]]["incident_status"], "resolved")
 
 
 if __name__ == "__main__":

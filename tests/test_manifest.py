@@ -73,13 +73,21 @@ class ManifestTests(unittest.TestCase):
 
     def test_scheduled_observer_keeps_health_monitoring_out_of_band(self):
         manifest = json.loads((ROOT / "workflow.json").read_text(encoding="utf-8"))
-        autopilot = next(
+        incremental = next(
             item
             for item in manifest["autopilots"]
             if item["key"] == "workflow-health-audit"
         )
-        self.assertIn("audit --scope issues --report", autopilot["description"])
-        self.assertIn("workflow.py health", autopilot["description"])
+        full = next(
+            item
+            for item in manifest["autopilots"]
+            if item["key"] == "workflow-full-audit"
+        )
+        self.assertIn("scan --mode incremental", incremental["description"])
+        self.assertIn("workflow.py health", incremental["description"])
+        self.assertIn("scan --mode full", full["description"])
+        self.assertEqual(incremental["triggers"][0]["cron"], "0 * * * *")
+        self.assertEqual(full["triggers"][0]["cron"], "15 2 * * *")
 
     def test_release_workflow_uses_protected_environment_request(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text(
@@ -123,6 +131,10 @@ class ManifestTests(unittest.TestCase):
             manifest["operations"]["maintenance_intake_mode"], "human_gated"
         )
         self.assertIs(manifest["operations"]["automatic_expansion"], False)
+        self.assertEqual(
+            manifest["operations"]["full_scan_autopilot"],
+            "workflow-full-audit",
+        )
 
     def test_operations_contract_is_required_for_v2(self):
         with tempfile.TemporaryDirectory() as temp:

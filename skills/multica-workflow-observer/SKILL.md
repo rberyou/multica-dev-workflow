@@ -11,6 +11,8 @@ metadata:
 
 This Skill has two modes. It never fixes workflow source, publishes a release, or applies a deployment Plan.
 
+When a managed Agent creates a workflow Issue, immediately run `bind-workflow-issue` so the Issue inherits the enabled Project Registration, workflow instance, root requirement, object type, creator role, and protocol revision.
+
 ## Reporter Mode
 
 Reporter Mode is the default for development Agents.
@@ -18,10 +20,10 @@ Reporter Mode is the default for development Agents.
 1. Confirm the problem is about workflow behavior, not ordinary product code, tests, requirements, or a Plan defect already handled by Plan revision.
 2. Read the source Issue, top-level requirement, relevant metadata and latest comments.
 3. Choose severity using [incident-contract.md](references/incident-contract.md).
-4. Run the packaged deterministic writer:
+4. Run the packaged deterministic Reporter entry point:
 
 ```text
-python <this-skill>/scripts/observer.py report-incident \
+python <this-skill>/scripts/observer.py report-anomaly \
   --source-issue <T-ID> \
   --rule-id <rule> \
   --severity <level> \
@@ -30,19 +32,20 @@ python <this-skill>/scripts/observer.py report-incident \
   --actual <actual>
 ```
 
-Use `--block-source` only for urgent/high correctness, approval, security, privacy or Git-history risk. Do not create an Incident as a business requirement child.
+The command creates or reuses a durable Observation Inbox record. It does not create an Incident directly. High and urgent reports wake the Observer after the Observation is durable. Use `--block-source` only for urgent/high correctness, approval, security, privacy or Git-history risk.
 
-If reporting fails, set `workflow_incident_pending=true` on the source Issue when possible, record the compact failure and obey the severity blocking rule. Never retry without a bound.
+`report-incident` remains a compatibility alias for `report-anomaly`. If source metadata cannot be updated, the Observation remains authoritative and records the marker failure. Never retry without a bound.
 
 ## Observer Mode
 
 Observer Mode is authorized only by the managed Workflow Observer instructions or its Autopilot.
 
-- Run `scripts/observer.py audit --scope issues --report` for scheduled detection. It scans active workflow Issues plus pending recovery payloads and validates the bundled full desired-state contract. Do not self-check scheduler freshness from the Autopilot; an external operator or scheduler runs repository `scripts/workflow.py health`.
+- Run `scripts/observer.py scan --mode incremental` hourly and `scan --mode full` daily. Scans process pending/processing/failed Observations, inspect only enabled Project Registrations, maintain per-project cursors, and serialize each run with an expiring lease. `audit --scope issues --report` remains an incremental-scan compatibility alias.
 - Use `scripts/observer.py health` from an external operator context to check Autopilot freshness.
-- Triage reports into only the verdicts in [triage-runbook.md](references/triage-runbook.md).
+- Triage Incidents into only the verdicts in [triage-runbook.md](references/triage-runbook.md), prepare a digest-bound maintenance decision, and record only an exact human approval or defer comment.
+- After ordinary development deploys a fix, use `verify-fix` to record independent Observer evidence and close the Maintenance Case and Incident.
 - Do not modify workflow Git source or managed Multica configuration.
-- Create or reuse only the Incident. For a confirmed defect set `waiting_on=maintenance_intake`; do not create Maintenance, Plan, Implementation, Canary or Rollout Issues.
+- Create or reuse only the Incident until an exact digest-bound human approval is recorded. Approval may create one minimal Maintenance Case for the ordinary development workflow; do not create Change Plan, Implementation, Canary, or Rollout child trees in Phase 1.
 - Honor `maintenance_intake_mode=human_gated`, `automatic_expansion=false`, and stabilization freezes. Stage expansion and Observer resume require separate human-approved operations.
 - Keep Incident evidence redacted and bounded.
 - Preserve one redacted pending payload, its stable scan index, original Reporter identity and the source pending marker until Incident metadata and source linkage are complete. Reuse the stable fingerprint on retry, preserve evidence in the bounded Incident log, and apply cooldown to human-facing comments and escalation notification.
