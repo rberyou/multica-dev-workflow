@@ -690,6 +690,11 @@ def phase1_requirement_approval_evidence(
     if str(root_metadata.get("maintenance_execution_mode") or "") != PHASE1_MAINTENANCE_CASE_EXECUTION_MODE:
         raise ReleaseError("Phase 1 Requirement maintenance_execution_mode is not phase1_development_workflow")
 
+    if normalized_revision(root_metadata.get("plan_revision")) != plan_revision:
+        raise ReleaseError("Phase 1 Requirement current Plan revision differs from integration-validation plan_revision")
+    if normalized_revision(root_metadata.get("approved_plan_revision")) != plan_revision:
+        raise ReleaseError("Phase 1 Requirement approved Plan revision differs from integration-validation plan_revision")
+
     case_issue = cli.json(["issue", "get", expected_case_id, "--output", "json"])
     if not isinstance(case_issue, dict):
         raise ReleaseError(f"Maintenance Case is unreadable: {expected_case_id}")
@@ -790,6 +795,7 @@ def phase1_integration_validation_evidence(
                 "source_incident_id": str(metadata.get("source_incident_id") or ""),
                 "maintenance_intake_digest": str(metadata.get("maintenance_intake_digest") or ""),
                 "maintenance_execution_mode": str(metadata.get("maintenance_execution_mode") or ""),
+                "approved_plan_revision": normalized_revision(metadata.get("approved_plan_revision")),
             }
         )
     else:
@@ -806,8 +812,8 @@ def phase1_integration_validation_evidence(
     if maintenance_case_id:
         if expected_maintenance_issue and maintenance_case_id != expected_maintenance_issue:
             raise ReleaseError("integration-validation maintenance_case_id differs from the release Maintenance Case")
-        if required["plan_revision"] != "v1":
-            raise ReleaseError("integration-validation provenance must bind plan_revision=v1")
+        if required["approved_plan_revision"] != required["plan_revision"]:
+            raise ReleaseError("integration-validation approved_plan_revision differs from plan_revision")
         if required["maintenance_execution_mode"] != PHASE1_MAINTENANCE_CASE_EXECUTION_MODE:
             raise ReleaseError("integration-validation maintenance_execution_mode is not phase1_development_workflow")
     else:

@@ -313,7 +313,9 @@ class MaintenanceCaseMultica(FakeMultica):
             "approval_author_type": "member",
             "approval_author_id": "human-1",
             "approval_comment_id": "requirement-approval-1",
-            "approval_revision": "v1",
+            "approval_revision": "v2",
+            "approved_plan_revision": "v2",
+            "plan_revision": "v2",
         }
         self.comments_by_issue["WOR-109"] = [
             {
@@ -321,7 +323,7 @@ class MaintenanceCaseMultica(FakeMultica):
                 "author_type": "member",
                 "author_id": "human-1",
                 "created_at": "2026-07-23T11:00:00Z",
-                "content": "APPROVE REQUIREMENT v1",
+                "content": "APPROVE REQUIREMENT v2",
             }
         ]
         self.issues["WOR-119"] = {
@@ -337,7 +339,8 @@ class MaintenanceCaseMultica(FakeMultica):
             "source_incident_id": "WOR-107",
             "maintenance_intake_digest": PHASE1_DIGEST,
             "maintenance_execution_mode": "phase1_development_workflow",
-            "plan_revision": "v1",
+            "plan_revision": "v2",
+            "approved_plan_revision": "v2",
             "reviewer_id": "agent-code-reviewer",
             "integrator_id": "agent-integrator",
             "implementation_owner_id": "agent-developer",
@@ -355,7 +358,7 @@ class MaintenanceCaseMultica(FakeMultica):
                 "created_at": "2026-07-23T12:00:00Z",
                 "content": (
                     "APPROVED\n"
-                    "plan_revision=v1\n"
+                    "plan_revision=v2\n"
                     "root_requirement_id=WOR-109\n"
                     f"reviewed_commit_sha={'d' * 40}"
                 ),
@@ -1414,7 +1417,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(evidence["root_requirement_id"], "WOR-109")
         self.assertEqual(evidence["maintenance_intake_digest"], PHASE1_DIGEST)
         self.assertEqual(evidence["maintenance_execution_mode"], "phase1_development_workflow")
-        self.assertEqual(evidence["plan_revision"], "v1")
+        self.assertEqual(evidence["plan_revision"], "v2")
         self.assertEqual(evidence["github_merge_commit_sha"], "e" * 40)
         self.assertEqual(evidence["pipeline_status"], "passed")
         self.assertIn("requirement_approval_sha256", evidence)
@@ -1458,6 +1461,26 @@ class ReleaseTests(unittest.TestCase):
             "wrong execution mode": (
                 lambda cli: cli.metadata_by_issue["WOR-109"].update({"maintenance_execution_mode": "manual"}),
                 "maintenance_execution_mode",
+            ),
+            "stale integration plan revision": (
+                lambda cli: cli.metadata_by_issue["WOR-119"].update({"plan_revision": "v1"}),
+                "approved_plan_revision",
+            ),
+            "wrong integration approved plan revision": (
+                lambda cli: cli.metadata_by_issue["WOR-119"].update({"approved_plan_revision": "v1"}),
+                "approved_plan_revision",
+            ),
+            "wrong requirement current plan revision": (
+                lambda cli: cli.metadata_by_issue["WOR-109"].update({"plan_revision": "v1"}),
+                "current Plan revision",
+            ),
+            "wrong requirement approved plan revision": (
+                lambda cli: cli.metadata_by_issue["WOR-109"].update({"approved_plan_revision": "v1"}),
+                "approved Plan revision",
+            ),
+            "wrong approval revision": (
+                lambda cli: cli.metadata_by_issue["WOR-109"].update({"approval_revision": "v1"}),
+                "approval_revision",
             ),
             "root not listed by case": (
                 lambda cli: cli.metadata_by_issue["WOR-108"].update({"implementation_issue_ids": json.dumps(["WOR-999"])}),
