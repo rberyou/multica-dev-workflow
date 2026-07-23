@@ -8,7 +8,7 @@ Release planning binds:
 - green validation run for the merge commit;
 - tracked source hash and Changelog section;
 - expected release assets;
-- verified bounded release evidence: legacy WOR-45 and WOR-48 Implementation records plus the final Phase 1 integration-validation record;
+- verified bounded release evidence: either the legacy RC4 Implementation records or the approved Phase 1 Maintenance Case plus the final ordinary-development integration-validation record;
 - exact Multica human release approval;
 - reviewed Dispatcher and Publisher App installations;
 - protected GitHub Environment, workflow run, independent reviewer and publish gate.
@@ -20,15 +20,15 @@ python scripts/release.py plan --version <version> --maintenance-issue <T-ID> \
   --implementation-provenance <implementation-issue> \
   --implementation-provenance <implementation-issue> \
   --implementation-provenance <implementation-issue>
-APPROVE WORKFLOW RELEASE <short-digest>
+APPROVE WORKFLOW RELEASE <digest>
 $env:GH_TOKEN = <short-lived Dispatcher App installation token>
 python scripts/release.py doctor
 python scripts/release.py approval-block --plan <file>
-python scripts/release.py apply --plan <file> --approve <short-digest>
+python scripts/release.py apply --plan <file> --approve <digest>
 Remove-Item Env:GH_TOKEN
 ```
 
-Implementation, PR, CI and commit-bound Review run through the dedicated Secure Agent Runtime. The Maintainer receives only Broker RPCs and the Reviewer is tokenless. GitHub App creation, key installation, Environment/Ruleset administration and human approvals remain outside Agent runtimes.
+Phase 1 Maintenance Case releases use ordinary development Requirement, PR, CI, Code Review and integration-validation evidence; they do not wake the Maintainer or Maintenance Reviewer. Phase 2+ maintenance uses the dedicated Secure Agent Runtime: the Maintainer receives only Broker RPCs and the Reviewer is tokenless. GitHub App creation, key installation, Environment/Ruleset administration and human approvals remain outside Agent runtimes.
 
 `doctor` requires an explicit short-lived Dispatcher App installation token in `GH_TOKEN`. The token must match reviewed evidence exactly: Actions write, Contents read, Metadata read, selected-repository scope, and only this repository. It then verifies that the repository is public, checks owner/default branch, the `workflow-release` Environment, main-only branch policy, self-review prevention, explicit human reviewers and the normalized Environment configuration hash. If the GitHub API exposes `can_admins_bypass`, it must be false; otherwise the unavailable readback and residual owner-reconfiguration risk are recorded inside the hashed boundary. Dispatcher has no authority to inspect Publisher App identity directly; Publisher identity, installation, permission and sole-bypass claims come from reviewed administrator evidence. `doctor` verifies an active `workflow-release-tags` ruleset for `refs/tags/v*` with creation/update/deletion restrictions. If GitHub omits `bypass_actors`, the reviewed administrator evidence that Publisher is the sole bypass is accepted. If `bypass_actors` is present but malformed, stale or incorrect, `doctor` fails closed.
 
@@ -40,7 +40,7 @@ The human mints the Dispatcher token outside Agent runtimes and removes it after
 
 The workflow validates the request from the exact workflow-dispatch commit with the read-only built-in token and requires `github.actor` to equal the reviewed `<dispatcher-app-slug>[bot]` identity. Its publish job is protected by the `workflow-release` Environment. After approval it records a digest-bound gate, mints a short-lived Publisher App installation token, verifies the exact installation/repository/permission contract, creates the annotated tag through the Git database REST API and publishes the exact approved assets. The built-in token never receives `contents: write`.
 
-Direct `v*` tag pushes do not trigger publication and are rejected by the tag ruleset for ordinary users, Dispatcher credentials, Maintainer credentials and the built-in workflow token. Unauthorized tags are inert and must be reported. New tags bind the release Request digest, Plan digest, source commit, exactly three RC4 evidence records, CI run, expected assets, Maintenance provenance commitments, Dispatcher installation, workflow run ID, Environment approval, publish gate and Publisher installation. For RC4 those records are legacy WOR-45, legacy WOR-48 and the final Phase 1 integration-validation Issue; the final integration-validation merge SHA must equal the release source, and the two legacy merge SHAs must be unique ancestors.
+Direct `v*` tag pushes do not trigger publication and are rejected by the tag ruleset for ordinary users, Dispatcher credentials, Maintainer credentials and the built-in workflow token. Unauthorized tags are inert and must be reported. New tags bind the release Request digest, Plan digest, source commit, implementation provenance digest, CI run, expected assets, Maintenance provenance commitments, Dispatcher installation, workflow run ID, Environment approval, publish gate and Publisher installation. For approved Phase 1 Maintenance Case releases, the tag also binds `authorization_kind=phase1_maintenance_case`, the Maintenance Case, source Incident, case approval comment hash, maintenance intake digest and ordinary implementation provenance hash; missing or mismatched fields fail verification. Legacy RC4 recovery records remain verifiable with WOR-45, WOR-48 and the final Phase 1 integration-validation Issue, with the final integration-validation merge SHA equal to the release source and the two legacy merge SHAs as unique ancestors.
 
 `verify-tag` rechecks the protected Environment approval and exact provenance. Legacy RC1-RC3 annotations remain verifiable as historical evidence but cannot authorize a new release or deployment.
 

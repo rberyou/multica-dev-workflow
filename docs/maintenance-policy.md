@@ -6,7 +6,7 @@ Git is desired state. Multica Agents, Skills, Project, Autopilot and Squad are d
 
 ## Intake
 
-Workflow defects enter through a durable Observation in the managed `工作流运维` Project. The Observer classifies and deduplicates valid reports into Incidents. Only a digest-bound decision by the registered human approver may start maintenance. During Phase 1, approval creates one minimal Maintenance Case for the ordinary development workflow; Maintainer/Reviewer automation and maintenance child trees remain disabled.
+Workflow defects enter through a durable Observation in the managed `工作流运维` Project. The Observer classifies and deduplicates valid reports into Incidents. Only a digest-bound decision by the registered human approver may start maintenance. During Phase 1, approval creates one minimal Maintenance Case for the ordinary development workflow; release evidence comes from the ordinary Requirement, Code Review, PR, CI and integration-validation chain, while Maintainer/Reviewer automation and maintenance child trees remain disabled.
 
 ## Phase 2+ Change Gates
 

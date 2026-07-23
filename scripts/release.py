@@ -1372,23 +1372,52 @@ def bounded_review_issue(
 
 
 def maintenance_github_provenance(
-    authorization: dict[str, Any], release_approval: dict[str, Any]
+    authorization: dict[str, Any],
+    release_approval: dict[str, Any],
+    ordinary_implementation_provenance_sha256: str | None = None,
 ) -> dict[str, str]:
     issue_id = str(authorization.get("issue_id") or "")
-    review_comment_id = str(authorization.get("review_comment_id") or "")
     approval_comment_id = str(release_approval.get("comment_id") or "")
     approval_author_id = str(release_approval.get("author_id") or "")
-    if not all([issue_id, review_comment_id, approval_comment_id, approval_author_id]):
+    if not all([issue_id, approval_comment_id, approval_author_id]):
         raise ReleaseError("maintenance release provenance is incomplete")
     provenance = {
         "maintenance_issue": issue_id,
-        "review_comment_id": review_comment_id,
         "multica_approval_comment_id": approval_comment_id,
         "maintenance_evidence_sha256": digest(authorization),
         "multica_approval_author_sha256": hashlib.sha256(
             approval_author_id.encode("utf-8")
         ).hexdigest(),
     }
+    if authorization.get("authorization_kind") == PHASE1_MAINTENANCE_CASE_AUTHORIZATION:
+        phase1_fields = {
+            "authorization_kind": PHASE1_MAINTENANCE_CASE_AUTHORIZATION,
+            "maintenance_case_id": issue_id,
+            "incident_id": str(authorization.get("incident_id") or ""),
+            "maintenance_case_approval_comment_id": str(
+                authorization.get("approval_comment_id") or ""
+            ),
+            "maintenance_case_approval_sha256": str(
+                authorization.get("approval_sha256") or ""
+            ),
+            "maintenance_intake_digest": str(
+                authorization.get("maintenance_intake_digest") or ""
+            ),
+            "maintenance_target_release": str(authorization.get("target_release") or ""),
+            "phase1_executor": str(authorization.get("executor") or ""),
+            "ordinary_implementation_provenance_sha256": str(
+                ordinary_implementation_provenance_sha256 or ""
+            ),
+        }
+        missing = [key for key, value in phase1_fields.items() if not value]
+        if missing:
+            raise ReleaseError(f"phase1 maintenance release provenance is missing {missing}")
+        provenance.update(phase1_fields)
+        return provenance
+    review_comment_id = str(authorization.get("review_comment_id") or "")
+    if not review_comment_id:
+        raise ReleaseError("maintenance release provenance is incomplete")
+    provenance["review_comment_id"] = review_comment_id
     for key in ["review_issue_id", "batch_review_mappings_sha256"]:
         value = str(authorization.get(key) or "")
         if value:
@@ -1409,10 +1438,73 @@ def maintenance_github_provenance(
     return provenance
 
 
+def required_maintenance_provenance_fields(
+    provenance: dict[str, Any], *, version: str | None = None
+) -> list[str]:
+    kind = str(provenance.get("authorization_kind") or "")
+    required = [
+        "maintenance_issue",
+        "multica_approval_comment_id",
+        "maintenance_evidence_sha256",
+        "multica_approval_author_sha256",
+    ]
+    if kind == PHASE1_MAINTENANCE_CASE_AUTHORIZATION:
+        return required + [
+            "authorization_kind",
+            "maintenance_case_id",
+            "incident_id",
+            "maintenance_case_approval_comment_id",
+            "maintenance_case_approval_sha256",
+            "maintenance_intake_digest",
+            "maintenance_target_release",
+            "phase1_executor",
+            "ordinary_implementation_provenance_sha256",
+        ]
+    if kind:
+        raise ReleaseError(f"unsupported Maintenance authorization kind: {kind}")
+    required.append("review_comment_id")
+    if version == RC2_RECOVERY_VERSION:
+        required.extend(
+            [
+                "recovery_mode",
+                "pending_incident_source",
+                "recovery_decision_comment_id",
+                "control_identity_sha256",
+                "pending_incident_evidence_sha256",
+                "recovery_decision_sha256",
+            ]
+        )
+    return required
+
+
+def validate_maintenance_provenance(
+    provenance: dict[str, Any],
+    *,
+    implementation_provenance_sha256: str | None = None,
+    version: str | None = None,
+) -> None:
+    required = required_maintenance_provenance_fields(provenance, version=version)
+    missing = [key for key in required if not provenance.get(key)]
+    if missing:
+        raise ReleaseError(f"release Request is missing Maintenance provenance: {missing}")
+    if provenance.get("authorization_kind") != PHASE1_MAINTENANCE_CASE_AUTHORIZATION:
+        return
+    if provenance["maintenance_case_id"] != provenance["maintenance_issue"]:
+        raise ReleaseError("Phase 1 maintenance case provenance issue IDs differ")
+    if not re.fullmatch(r"[a-f0-9]{64}", str(provenance["maintenance_intake_digest"])):
+        raise ReleaseError("Phase 1 maintenance intake digest is invalid")
+    if (
+        implementation_provenance_sha256
+        and provenance["ordinary_implementation_provenance_sha256"]
+        != implementation_provenance_sha256
+    ):
+        raise ReleaseError("Phase 1 implementation provenance digest differs")
+
+
 def github_release_approval_block(
     digest_value: str, provenance: dict[str, str] | None = None
 ) -> str:
-    lines = [f"APPROVE WORKFLOW RELEASE {digest_value[:12]}"]
+    lines = [f"APPROVE WORKFLOW RELEASE {digest_value}"]
     lines.extend(f"{key}={value}" for key, value in (provenance or {}).items())
     return "\n".join(lines)
 
@@ -2322,7 +2414,13 @@ def release_request(
     authorization = plan.get("release_authorization") or {}
     if authorization.get("mode") != "maintenance":
         raise ReleaseError("protected Environment releases require Maintenance authorization")
-    provenance = maintenance_github_provenance(authorization, release_approval)
+    implementation_records = plan.get("implementation_provenance") or []
+    implementation_records_sha256 = digest(implementation_records)
+    provenance = maintenance_github_provenance(
+        authorization,
+        release_approval,
+        implementation_records_sha256,
+    )
     control = release_control(root)
     request = {
         "schema_version": 1,
@@ -2339,10 +2437,8 @@ def release_request(
         "expected_assets": plan["expected_assets"],
         "release_plan_digest": plan["release_plan_digest"],
         "maintenance_provenance": provenance,
-        "implementation_provenance": plan.get("implementation_provenance") or [],
-        "implementation_provenance_sha256": digest(
-            plan.get("implementation_provenance") or []
-        ),
+        "implementation_provenance": implementation_records,
+        "implementation_provenance_sha256": implementation_records_sha256,
         "release_control": {
             key: control[key] for key in RELEASE_CONTROL_KEYS
         },
@@ -2425,23 +2521,19 @@ def verify_release_request(
                 "release workflow was not dispatched by the reviewed Dispatcher App"
             )
     provenance = request.get("maintenance_provenance") or {}
-    required = [
-        "maintenance_issue",
-        "review_comment_id",
-        "multica_approval_comment_id",
-        "maintenance_evidence_sha256",
-        "multica_approval_author_sha256",
-    ]
-    missing = [key for key in required if not provenance.get(key)]
-    if missing:
-        raise ReleaseError(f"release Request is missing Maintenance provenance: {missing}")
+    if not isinstance(provenance, dict):
+        raise ReleaseError("release Request Maintenance provenance must be an object")
     implementations = request.get("implementation_provenance") or []
     if not isinstance(implementations, list):
         raise ReleaseError("release Request implementation_provenance must be a list")
-    if str(request.get("implementation_provenance_sha256") or "") != digest(
-        implementations
-    ):
+    implementation_records_sha256 = digest(implementations)
+    if str(request.get("implementation_provenance_sha256") or "") != implementation_records_sha256:
         raise ReleaseError("release Request Implementation provenance digest is invalid")
+    validate_maintenance_provenance(
+        provenance,
+        implementation_provenance_sha256=implementation_records_sha256,
+        version=str(request.get("version") or ""),
+    )
     if request.get("version") == "1.1.0-rc.4":
         validate_rc4_implementation_records(
             root,
@@ -2998,7 +3090,7 @@ def command_plan(args: argparse.Namespace, root: Path) -> int:
     if plan["draft"]:
         print("DRAFT: commit/review the exact source and generate a new release Plan")
     else:
-        print(f"Approval: APPROVE WORKFLOW RELEASE {plan['release_plan_digest'][:12]}")
+        print(f"Approval: APPROVE WORKFLOW RELEASE {plan['release_plan_digest']}")
     return 0
 
 
@@ -3481,17 +3573,31 @@ def command_verify_tag(args: argparse.Namespace, root: Path) -> int:
             "publisher_installation_id",
             "publisher_installation_sha256",
             "implementation_provenance_sha256",
+        ]
+        provenance_keys = [
+            "authorization_kind",
             "maintenance_issue",
+            "maintenance_case_id",
+            "incident_id",
+            "maintenance_case_approval_comment_id",
+            "maintenance_case_approval_sha256",
+            "maintenance_intake_digest",
+            "maintenance_target_release",
+            "phase1_executor",
+            "ordinary_implementation_provenance_sha256",
             "review_comment_id",
             "multica_approval_comment_id",
             "maintenance_evidence_sha256",
             "multica_approval_author_sha256",
+            "review_issue_id",
+            "batch_review_mappings_sha256",
         ]
         values = {}
-        for key in required + ["review_issue_id", "batch_review_mappings_sha256"]:
+        for key in required + provenance_keys:
             if key.endswith("sha256") or key in {
                 "release_request_digest",
                 "publish_gate_digest",
+                "maintenance_intake_digest",
             }:
                 pattern = r"[a-f0-9]{64}"
             elif key in {
@@ -3511,6 +3617,17 @@ def command_verify_tag(args: argparse.Namespace, root: Path) -> int:
             raise ReleaseError(
                 f"protected Environment tag is missing provenance fields: {missing}"
             )
+        maintenance_provenance = {
+            key: values[key] for key in provenance_keys if key in values
+        }
+        try:
+            validate_maintenance_provenance(
+                maintenance_provenance,
+                implementation_provenance_sha256=values["implementation_provenance_sha256"],
+                version=version,
+            )
+        except ReleaseError as exc:
+            raise ReleaseError(f"protected Environment tag has invalid Maintenance provenance: {exc}") from exc
         control = release_control(root)
         if values["release_environment"] != str(control["environment"]):
             raise ReleaseError("annotated release Environment differs from release control")
