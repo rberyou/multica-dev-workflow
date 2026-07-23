@@ -9,11 +9,12 @@
 - Bind workflow dispatch to the reviewed Dispatcher bot actor, defer PR readback to the built-in read-only workflow token, and allow recovery publication to use a new approved gate without rewriting the immutable tag gate.
 - Push Maintainer branches only from Broker-owned bare snapshots, bind CONNECT tunnels to TLS SNI, delete task credential homes on exit, and make install and binding updates transactionally restorable.
 - Make local release apply dispatch a digest-bound Release Request without creating, deleting or pushing tags or publishing Releases; raw tag pushes no longer trigger publication.
-- Bind RC4 provenance to both stabilization Implementation PRs, the Release Request, workflow run, Environment approval actor, Publisher installation, CI and bounded Maintenance Review evidence.
+- Bind RC4 provenance to legacy WOR-45 and WOR-48 records plus the final Phase 1 integration-validation record, the Release Request, workflow run, Environment approval actor, Publisher installation, CI and bounded Maintenance Review evidence.
 - Add the host-only workflow-console Skill, automatic Maintainer/Reviewer handoff loop, two-phase Runtime bindings Bootstrap, install/doctor/update/rollback scripts, and a self-contained `win-x64` release asset.
 - Scope Observer workflow gates to managed objects while preserving pending-Incident recovery for legacy/external intake.
 - Disable automatic maintenance-tree expansion, require human-gated maintenance intake and lazily create later stages.
 - Keep Reporter Skill available while Observer Autopilot operations are paused.
+- Correct RC4 current-main finalization evidence to require legacy WOR-45, legacy WOR-48 and the final Phase 1 integration-validation record; document that Dispatcher does not inspect Publisher App identity and that omitted `bypass_actors` relies on reviewed administrator evidence while malformed or incorrect present values fail closed.
 
 ## 1.1.0-rc.3
 
