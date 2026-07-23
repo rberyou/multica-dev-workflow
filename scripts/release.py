@@ -1161,16 +1161,41 @@ def verify_release_tag_ruleset(
             f"GitHub release tag ruleset is missing restrictions: {sorted(required_rules - rule_types)}"
         )
     publisher = evidence.get("publisher_app") or {}
-    app = gh_json(root, ["api", f"apps/{publisher['slug']}"])
-    if (
-        not isinstance(app, dict)
-        or int(app.get("id") or 0) != int(publisher["id"])
-        or str(app.get("slug") or "") != str(publisher["slug"])
-    ):
-        raise ReleaseError("GitHub Publisher App public identity differs from administrator evidence")
-    observed_bypass = [item for item in detail.get("bypass_actors") or [] if isinstance(item, dict)]
-    if observed_bypass and observed_bypass != expected.get("bypass_actors"):
-        raise ReleaseError("GitHub release tag Ruleset bypass actors differ from administrator evidence")
+    expected_bypass = expected.get("bypass_actors") or []
+    if "bypass_actors" in detail:
+        raw_bypass = detail.get("bypass_actors")
+        if not isinstance(raw_bypass, list):
+            raise ReleaseError("GitHub release tag Ruleset bypass_actors must be a list when present")
+        observed_bypass = []
+        for item in raw_bypass:
+            if not isinstance(item, dict) or set(item) != {
+                "actor_type",
+                "actor_id",
+                "bypass_mode",
+            }:
+                raise ReleaseError("GitHub release tag Ruleset contains a malformed bypass actor")
+            if not isinstance(item.get("actor_id"), int) or isinstance(item.get("actor_id"), bool):
+                raise ReleaseError("GitHub release tag Ruleset bypass actor ID is malformed")
+            observed_bypass.append(
+                {
+                    "actor_type": str(item.get("actor_type") or ""),
+                    "actor_id": int(item["actor_id"]),
+                    "bypass_mode": str(item.get("bypass_mode") or ""),
+                }
+            )
+        if len(observed_bypass) != 1:
+            raise ReleaseError("GitHub release tag Ruleset must expose exactly one bypass actor when present")
+        observed_actor = observed_bypass[0]
+        expected_actor = expected_bypass[0] if expected_bypass else {}
+        if int(observed_actor["actor_id"]) != int(expected_actor.get("actor_id") or 0):
+            raise ReleaseError("GitHub release tag Ruleset Publisher App bypass actor ID differs from administrator evidence")
+        if (
+            observed_actor.get("actor_type") != "Integration"
+            or observed_actor.get("bypass_mode") != "always"
+        ):
+            raise ReleaseError("GitHub release tag Ruleset bypass actor must be the sole always Integration bypass")
+        if observed_bypass != expected_bypass:
+            raise ReleaseError("GitHub release tag Ruleset bypass actors differ from administrator evidence")
     normalized_rules = []
     for item in detail.get("rules") or []:
         if not isinstance(item, dict):
@@ -1269,15 +1294,19 @@ def verify_app_installation(
 
 def environment_protection_snapshot(
     detail: dict[str, Any],
-) -> tuple[list[dict[str, Any]], set[str], bool]:
+) -> tuple[list[dict[str, Any]], set[str], bool, int]:
     normalized_rules = []
     reviewers: set[str] = set()
     prevent_self_review = False
     reviewer_rule_count = 0
+    branch_policy_rule_count = 0
     for rule in detail.get("protection_rules") or []:
         if not isinstance(rule, dict):
             raise ReleaseError("GitHub release Environment contains an invalid protection rule")
         rule_type = str(rule.get("type") or "")
+        if rule_type == "branch_policy":
+            branch_policy_rule_count += 1
+            continue
         if rule_type == "wait_timer":
             normalized_rules.append(
                 {"type": rule_type, "wait_timer": int(rule.get("wait_timer") or 0)}
@@ -1313,7 +1342,12 @@ def environment_protection_snapshot(
         raise ReleaseError(
             "GitHub release Environment must have exactly one required_reviewers rule"
         )
-    return sorted(normalized_rules, key=canonical), reviewers, prevent_self_review
+    return (
+        sorted(normalized_rules, key=canonical),
+        reviewers,
+        prevent_self_review,
+        branch_policy_rule_count,
+    )
 
 
 def environment_admin_bypass_evidence(detail: dict[str, Any]) -> dict[str, Any]:
@@ -1370,17 +1404,28 @@ def verify_release_environment(
         ) from exc
     if not isinstance(detail, dict):
         raise ReleaseError("GitHub release Environment response is invalid")
-    environment_rules, reviewers, prevent_self_review = environment_protection_snapshot(
-        detail
-    )
+    (
+        environment_rules,
+        reviewers,
+        prevent_self_review,
+        branch_policy_rule_count,
+    ) = environment_protection_snapshot(detail)
     if not reviewers:
         raise ReleaseError("GitHub release Environment has no required human reviewer")
     if not prevent_self_review:
         raise ReleaseError("GitHub release Environment must prevent self-review")
     admin_bypass = environment_admin_bypass_evidence(detail)
 
+    if branch_policy_rule_count != 1:
+        raise ReleaseError(
+            "GitHub release Environment must expose exactly one branch_policy protection marker"
+        )
     policy = detail.get("deployment_branch_policy") or {}
-    if policy.get("protected_branches") or not policy.get("custom_branch_policies"):
+    if (
+        not isinstance(policy, dict)
+        or policy.get("protected_branches") is not False
+        or policy.get("custom_branch_policies") is not True
+    ):
         raise ReleaseError("GitHub release Environment must use a custom main-only branch policy")
     policies = gh_json(
         root,
