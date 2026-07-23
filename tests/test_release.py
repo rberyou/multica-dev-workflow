@@ -251,6 +251,55 @@ class RecoveryMultica(FakeMultica):
         return super().json(args)
 
 
+PHASE1_DIGEST = "aa2642238e952cf126bbe3d90fc72d6249a9ff4e8b8ece70a723d2b76f89c227"
+
+
+class MaintenanceCaseMultica(FakeMultica):
+    def __init__(self):
+        super().__init__()
+        self.issues["WOR-108"] = {
+            "id": "case-internal",
+            "identifier": "WOR-108",
+            "status": "todo",
+        }
+        self.metadata_by_issue["WOR-108"] = {
+            "workflow_id": "development-delivery",
+            "workflow_object_type": "maintenance_case",
+            "incident_id": "WOR-107",
+            "approval_comment_id": "approval-1",
+            "executor": "ordinary_development_workflow",
+            "maintenance_case_status": "in_development",
+            "logical_status": "in_development",
+            "maintenance_intake_digest": PHASE1_DIGEST,
+            "implementation_issue_ids": json.dumps(["WOR-109"]),
+            "release_version": "",
+        }
+        self.issues["WOR-107"] = {
+            "id": "incident-internal",
+            "identifier": "WOR-107",
+            "status": "in_review",
+        }
+        self.metadata_by_issue["WOR-107"] = {
+            "workflow_id": "development-delivery",
+            "workflow_object_type": "incident",
+            "workflow_version": "v1.1.0-rc.4",
+            "maintenance_case_id": "WOR-108",
+            "maintenance_decision": "approved",
+            "maintenance_decision_comment_id": "approval-1",
+            "maintenance_intake_digest": PHASE1_DIGEST,
+            "human_approver_id": "human-1",
+        }
+        self.comments_by_issue["WOR-107"] = [
+            {
+                "id": "approval-1",
+                "author_type": "member",
+                "author_id": "human-1",
+                "created_at": "2026-07-23T10:18:48Z",
+                "content": f"APPROVE WORKFLOW MAINTENANCE {PHASE1_DIGEST[:16]}",
+            }
+        ]
+
+
 class ReleaseTests(unittest.TestCase):
     DISPATCHER_APP_ID = 11223
     DISPATCHER_INSTALLATION_ID = 44556
@@ -1048,6 +1097,109 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(evidence["reviewed_commit_sha"], "head-sha")
         self.assertEqual(evidence["review_comment_id"], "review-1")
         self.assertEqual(evidence["github_merged_at"], pr["mergedAt"])
+
+    def test_phase1_maintenance_case_authorizes_without_reviewer_pr_head(self):
+        cli = MaintenanceCaseMultica()
+        evidence = release.maintenance_evidence(
+            ROOT, cli, "WOR-108", maintenance_pr(), "1.1.0-rc.4"
+        )
+        self.assertEqual(evidence["mode"], "maintenance")
+        self.assertEqual(evidence["authorization_kind"], "phase1_maintenance_case")
+        self.assertEqual(evidence["incident_id"], "WOR-107")
+        self.assertEqual(evidence["approval_comment_id"], "approval-1")
+        self.assertEqual(evidence["human_approver_id"], "human-1")
+        self.assertEqual(evidence["maintenance_intake_digest"], PHASE1_DIGEST)
+        self.assertEqual(evidence["executor"], "ordinary_development_workflow")
+        self.assertEqual(evidence["implementation_issue_ids"], ["WOR-109"])
+        self.assertEqual(evidence["target_release"], "v1.1.0-rc.4")
+        self.assertNotIn("maintenance_reviewer_id", evidence)
+        self.assertNotIn("review_comment_id", evidence)
+        self.assertNotIn("reviewed_commit_sha", evidence)
+
+    def assert_phase1_maintenance_case_rejected(self, mutate, pattern):
+        cli = MaintenanceCaseMultica()
+        mutate(cli)
+        with self.assertRaisesRegex(release.ReleaseError, pattern):
+            release.maintenance_evidence(
+                ROOT, cli, "WOR-108", maintenance_pr(), "1.1.0-rc.4"
+            )
+
+    def test_phase1_maintenance_case_rejects_invalid_authorization(self):
+        cases = {
+            "missing approval id": (
+                lambda cli: cli.metadata_by_issue["WOR-108"].pop("approval_comment_id"),
+                "approval_comment_id",
+            ),
+            "missing approval comment": (
+                lambda cli: cli.comments_by_issue.__setitem__("WOR-107", []),
+                "approval comment",
+            ),
+            "wrong approval author": (
+                lambda cli: cli.comments_by_issue["WOR-107"][0].update({"author_id": "human-2"}),
+                "wrong author",
+            ),
+            "altered approval content": (
+                lambda cli: cli.comments_by_issue["WOR-107"][0].update(
+                    {"content": f"APPROVE WORKFLOW MAINTENANCE {PHASE1_DIGEST[:16]}\nextra"}
+                ),
+                "exact content",
+            ),
+            "digest mismatch": (
+                lambda cli: cli.metadata_by_issue["WOR-108"].update(
+                    {"maintenance_intake_digest": "b" * 64}
+                ),
+                "digest",
+            ),
+            "missing incident": (
+                lambda cli: cli.metadata_by_issue["WOR-108"].pop("incident_id"),
+                "incident_id",
+            ),
+            "unapproved incident": (
+                lambda cli: cli.metadata_by_issue["WOR-107"].update(
+                    {"maintenance_decision": "deferred"}
+                ),
+                "approved",
+            ),
+            "missing implementation list": (
+                lambda cli: cli.metadata_by_issue["WOR-108"].update(
+                    {"implementation_issue_ids": "[]"}
+                ),
+                "implementation_issue_ids",
+            ),
+            "wrong executor": (
+                lambda cli: cli.metadata_by_issue["WOR-108"].update(
+                    {"executor": "workflow_maintainer"}
+                ),
+                "ordinary_development_workflow",
+            ),
+            "wrong object type": (
+                lambda cli: cli.metadata_by_issue["WOR-108"].update(
+                    {"workflow_object_type": "requirement"}
+                ),
+                "workflow_object_type",
+            ),
+            "wrong target release": (
+                lambda cli: cli.metadata_by_issue["WOR-107"].update(
+                    {"workflow_version": "v1.1.0-rc.5"}
+                ),
+                "target release",
+            ),
+            "closed case": (
+                lambda cli: cli.metadata_by_issue["WOR-108"].update(
+                    {"maintenance_case_status": "closed"}
+                ),
+                "status",
+            ),
+            "superseded case": (
+                lambda cli: cli.metadata_by_issue["WOR-108"].update(
+                    {"maintenance_case_status": "superseded"}
+                ),
+                "status",
+            ),
+        }
+        for label, (mutate, pattern) in cases.items():
+            with self.subTest(case=label):
+                self.assert_phase1_maintenance_case_rejected(mutate, pattern)
 
     def test_maintenance_evidence_resolves_bounded_implementation_review(self):
         cli = bounded_batch_cli()
