@@ -298,6 +298,69 @@ class MaintenanceCaseMultica(FakeMultica):
                 "content": f"APPROVE WORKFLOW MAINTENANCE {PHASE1_DIGEST[:16]}",
             }
         ]
+        self.issues["WOR-109"] = {
+            "id": "requirement-internal",
+            "identifier": "WOR-109",
+            "status": "in_progress",
+        }
+        self.metadata_by_issue["WOR-109"] = {
+            "workflow_object_type": "requirement",
+            "maintenance_case_id": "WOR-108",
+            "source_incident_id": "WOR-107",
+            "maintenance_intake_digest": PHASE1_DIGEST,
+            "maintenance_execution_mode": "phase1_development_workflow",
+            "human_approver_id": "human-1",
+            "approval_author_type": "member",
+            "approval_author_id": "human-1",
+            "approval_comment_id": "requirement-approval-1",
+            "approval_revision": "v1",
+        }
+        self.comments_by_issue["WOR-109"] = [
+            {
+                "id": "requirement-approval-1",
+                "author_type": "member",
+                "author_id": "human-1",
+                "created_at": "2026-07-23T11:00:00Z",
+                "content": "APPROVE REQUIREMENT v1",
+            }
+        ]
+        self.issues["WOR-119"] = {
+            "id": "integration-internal",
+            "identifier": "WOR-119",
+            "status": "done",
+        }
+        self.metadata_by_issue["WOR-119"] = {
+            "workflow_id": "development-delivery",
+            "workflow_object_type": "integration_validation",
+            "maintenance_case_id": "WOR-108",
+            "root_requirement_id": "WOR-109",
+            "source_incident_id": "WOR-107",
+            "maintenance_intake_digest": PHASE1_DIGEST,
+            "maintenance_execution_mode": "phase1_development_workflow",
+            "plan_revision": "v1",
+            "reviewer_id": "agent-code-reviewer",
+            "integrator_id": "agent-integrator",
+            "implementation_owner_id": "agent-developer",
+            "review_comment_id": "review-119",
+            "reviewed_commit_sha": "d" * 40,
+            "requirement_pr_number": "19",
+            "requirement_merge_commit_sha": "e" * 40,
+            "pipeline_status": "passed",
+        }
+        self.comments_by_issue["WOR-119"] = [
+            {
+                "id": "review-119",
+                "author_type": "agent",
+                "author_id": "agent-code-reviewer",
+                "created_at": "2026-07-23T12:00:00Z",
+                "content": (
+                    "APPROVED\n"
+                    "plan_revision=v1\n"
+                    "root_requirement_id=WOR-109\n"
+                    f"reviewed_commit_sha={'d' * 40}"
+                ),
+            }
+        ]
 
 
 class ReleaseTests(unittest.TestCase):
@@ -1200,6 +1263,165 @@ class ReleaseTests(unittest.TestCase):
         for label, (mutate, pattern) in cases.items():
             with self.subTest(case=label):
                 self.assert_phase1_maintenance_case_rejected(mutate, pattern)
+
+    @staticmethod
+    def phase1_case_pr():
+        return {
+            "number": 19,
+            "headRefOid": "d" * 40,
+            "mergeCommit": {"oid": "e" * 40},
+            "mergedAt": "2026-07-23T13:00:00Z",
+            "baseRefName": "main",
+            "state": "MERGED",
+        }
+
+    def phase1_case_integration_evidence(self, cli=None):
+        cli = cli or MaintenanceCaseMultica()
+        with patch.object(release, "merged_pr_by_number", return_value=self.phase1_case_pr()):
+            return release.phase1_integration_validation_evidence(
+                ROOT,
+                cli,
+                "WOR-119",
+                cli.issues["WOR-119"],
+                cli.metadata_by_issue["WOR-119"],
+                "e" * 40,
+                "WOR-108",
+            )
+
+    def test_phase1_maintenance_case_integration_validation_binds_requirement_provenance(self):
+        evidence = self.phase1_case_integration_evidence()
+        self.assertEqual(evidence["workflow_object_type"], "integration_validation")
+        self.assertEqual(evidence["maintenance_case_id"], "WOR-108")
+        self.assertEqual(evidence["source_incident_id"], "WOR-107")
+        self.assertEqual(evidence["root_requirement_id"], "WOR-109")
+        self.assertEqual(evidence["maintenance_intake_digest"], PHASE1_DIGEST)
+        self.assertEqual(evidence["maintenance_execution_mode"], "phase1_development_workflow")
+        self.assertEqual(evidence["plan_revision"], "v1")
+        self.assertEqual(evidence["github_merge_commit_sha"], "e" * 40)
+        self.assertEqual(evidence["pipeline_status"], "passed")
+        self.assertIn("requirement_approval_sha256", evidence)
+        self.assertNotIn("maintenance_change_id", evidence)
+
+    def assert_phase1_case_integration_rejected(self, mutate, pattern):
+        cli = MaintenanceCaseMultica()
+        mutate(cli)
+        with (
+            patch.object(release, "merged_pr_by_number", return_value=self.phase1_case_pr()),
+            self.assertRaisesRegex(release.ReleaseError, pattern),
+        ):
+            release.phase1_integration_validation_evidence(
+                ROOT,
+                cli,
+                "WOR-119",
+                cli.issues["WOR-119"],
+                cli.metadata_by_issue["WOR-119"],
+                "e" * 40,
+                "WOR-108",
+            )
+
+    def test_phase1_maintenance_case_integration_validation_rejects_invalid_bindings(self):
+        cases = {
+            "missing evidence": (
+                lambda cli: cli.metadata_by_issue["WOR-119"].pop("maintenance_case_id"),
+                "missing fields",
+            ),
+            "wrong maintenance case": (
+                lambda cli: cli.metadata_by_issue["WOR-119"].update({"maintenance_case_id": "WOR-999"}),
+                "maintenance_case_id",
+            ),
+            "wrong incident": (
+                lambda cli: cli.metadata_by_issue["WOR-119"].update({"source_incident_id": "WOR-999"}),
+                "source_incident_id",
+            ),
+            "wrong digest": (
+                lambda cli: cli.metadata_by_issue["WOR-109"].update({"maintenance_intake_digest": "b" * 64}),
+                "maintenance_intake_digest",
+            ),
+            "wrong execution mode": (
+                lambda cli: cli.metadata_by_issue["WOR-109"].update({"maintenance_execution_mode": "manual"}),
+                "maintenance_execution_mode",
+            ),
+            "root not listed by case": (
+                lambda cli: cli.metadata_by_issue["WOR-108"].update({"implementation_issue_ids": json.dumps(["WOR-999"])}),
+                "implementation_issue_ids",
+            ),
+            "sha mismatch": (
+                lambda cli: cli.metadata_by_issue["WOR-119"].update({"reviewed_commit_sha": "c" * 40}),
+                "stale",
+            ),
+            "ci not passed": (
+                lambda cli: cli.metadata_by_issue["WOR-119"].update({"pipeline_status": "pending"}),
+                "passed CI",
+            ),
+            "wrong reviewer": (
+                lambda cli: cli.metadata_by_issue["WOR-119"].update({"reviewer_id": "agent-reviewer"}),
+                "Code Reviewer",
+            ),
+            "reviewer integrator collision": (
+                lambda cli: cli.metadata_by_issue["WOR-119"].update({"integrator_id": "agent-code-reviewer"}),
+                "integrator",
+            ),
+            "missing approval comment": (
+                lambda cli: cli.comments_by_issue.__setitem__("WOR-109", []),
+                "approval comment",
+            ),
+            "missing review comment": (
+                lambda cli: cli.comments_by_issue.__setitem__("WOR-119", []),
+                "Review comment",
+            ),
+            "review after merge": (
+                lambda cli: cli.comments_by_issue["WOR-119"][0].update({"created_at": "2026-07-23T13:00:01Z"}),
+                "predate",
+            ),
+        }
+        for label, (mutate, pattern) in cases.items():
+            with self.subTest(case=label):
+                self.assert_phase1_case_integration_rejected(mutate, pattern)
+
+    def test_rc4_maintenance_case_records_accept_final_requirement_validation_only(self):
+        evidence = self.phase1_case_integration_evidence()
+        release.validate_rc4_implementation_records(
+            ROOT, [evidence], "e" * 40, check_ancestry=False
+        )
+        with self.assertRaisesRegex(release.ReleaseError, "exactly the final"):
+            release.validate_rc4_implementation_records(
+                ROOT,
+                [
+                    {
+                        "issue_id": "WOR-45",
+                        "maintenance_change_id": "WOR-43",
+                        "github_pr_number": 9,
+                        "github_merge_commit_sha": "8" * 40,
+                    },
+                    evidence,
+                ],
+                "e" * 40,
+                check_ancestry=False,
+            )
+
+    def test_planned_phase1_case_revalidation_detects_changes_without_pr_api(self):
+        cli = MaintenanceCaseMultica()
+        evidence = self.phase1_case_integration_evidence(cli)
+        stale = {**evidence, "pipeline_status": "pending"}
+        plan = {
+            "version": "1.1.0-rc.4",
+            "source_commit": "e" * 40,
+            "release_plan_digest": "f" * 64,
+            "merged_pr": {
+                "number": 19,
+                "head_sha": "d" * 40,
+                "merge_commit_sha": "e" * 40,
+                "merged_at": "2026-07-23T13:00:00Z",
+            },
+            "release_authorization": release.maintenance_evidence(
+                ROOT, cli, "WOR-108", self.phase1_case_pr(), "1.1.0-rc.4"
+            ),
+            "implementation_provenance": [stale],
+        }
+        with patch.object(release, "merged_pr_by_number") as pr_mock:
+            with self.assertRaisesRegex(release.ReleaseError, "Implementation provenance changed"):
+                release.verify_release_approval(ROOT, cli, plan)
+        pr_mock.assert_not_called()
 
     def test_maintenance_evidence_resolves_bounded_implementation_review(self):
         cli = bounded_batch_cli()
