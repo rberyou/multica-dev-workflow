@@ -124,6 +124,15 @@ def control_agent_identities(cli: MulticaCLI) -> dict[str, str]:
     return identities
 
 
+def development_code_reviewer_id(cli: MulticaCLI) -> str:
+    agents = as_list(cli.json(["agent", "list", "--output", "json"]), "agents")
+    reviewer = managed_match(agents, "agent.code-reviewer", "instructions")
+    reviewer_id = str(reviewer.get("id") or "")
+    if not reviewer_id:
+        raise ReleaseError("managed Code Reviewer identity is incomplete")
+    return reviewer_id
+
+
 def control_identities(root: Path, cli: MulticaCLI) -> dict[str, str]:
     identities = control_agent_identities(cli)
     squads = as_list(cli.json(["squad", "list", "--output", "json"]), "squads")
@@ -424,11 +433,194 @@ def merged_pr_by_number(root: Path, number: int) -> dict[str, Any]:
     return value
 
 
+def phase1_decision_evidence(
+    cli: MulticaCLI,
+    root_requirement_id: str,
+    expected_maintenance_issue: str,
+) -> dict[str, str]:
+    issue = cli.json(["issue", "get", root_requirement_id, "--output", "json"])
+    if not isinstance(issue, dict):
+        raise ReleaseError(f"Phase 1 Requirement is unreadable: {root_requirement_id}")
+    metadata = metadata_map(
+        cli.json(["issue", "metadata", "list", root_requirement_id, "--output", "json"])
+    )
+    if str(metadata.get("workflow_object_type") or "") != "requirement":
+        raise ReleaseError("Phase 1 decision root is not a Requirement")
+    if expected_maintenance_issue and str(metadata.get("maintenance_change_id") or "") != expected_maintenance_issue:
+        raise ReleaseError("Phase 1 Requirement maintenance_change_id differs from the release Maintenance Change")
+    human_approver_id = str(metadata.get("human_approver_id") or "")
+    decision_comment_id = str(metadata.get("phase1_decision_comment_id") or "")
+    if not human_approver_id or not decision_comment_id:
+        raise ReleaseError("Phase 1 Requirement is missing human decision metadata")
+    comments = as_list(
+        cli.json(
+            [
+                "issue",
+                "comment",
+                "list",
+                root_requirement_id,
+                "--full",
+                "--output",
+                "json",
+            ]
+        ),
+        "comments",
+    )
+    matches = [item for item in comments if str(item.get("id") or "") == decision_comment_id]
+    if len(matches) != 1:
+        raise ReleaseError("Phase 1 human decision comment is missing or ambiguous")
+    comment = matches[0]
+    content = str(comment.get("content") or "")
+    if (
+        comment.get("author_type") != "member"
+        or str(comment.get("author_id") or "") != human_approver_id
+    ):
+        raise ReleaseError("Phase 1 decision was not authored by the human approver")
+    if not any(line.strip().startswith("DECISION:") for line in content.splitlines()):
+        raise ReleaseError("Phase 1 human decision comment is missing DECISION")
+    return {
+        "phase1_decision_comment_id": decision_comment_id,
+        "phase1_decision_sha256": digest(
+            {
+                "comment_id": decision_comment_id,
+                "author_type": comment.get("author_type"),
+                "author_id": comment.get("author_id"),
+                "content": content.strip(),
+            }
+        ),
+    }
+
+
+def issue_aliases(issue_id: str, issue: dict[str, Any]) -> set[str]:
+    return issue_refs(issue_id, issue)
+
+
+def phase1_integration_validation_evidence(
+    root: Path,
+    cli: MulticaCLI,
+    issue_id: str,
+    issue: dict[str, Any],
+    metadata: dict[str, Any],
+    source_commit: str,
+    expected_maintenance_issue: str | None = None,
+    planned: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if str(issue.get("status") or "") != "done":
+        raise ReleaseError("integration-validation provenance Issue must be done")
+    reviewer_id = development_code_reviewer_id(cli)
+    if str(metadata.get("reviewer_id") or "") != reviewer_id:
+        raise ReleaseError("integration-validation reviewer_id differs from the managed Code Reviewer")
+    integrator_id = str(metadata.get("integrator_id") or "")
+    if not integrator_id:
+        raise ReleaseError("integration-validation provenance is missing integrator_id")
+    if reviewer_id == integrator_id:
+        raise ReleaseError("Code Reviewer must differ from the integrator")
+    implementation_owner_id = str(metadata.get("implementation_owner_id") or "")
+    if implementation_owner_id and reviewer_id == implementation_owner_id:
+        raise ReleaseError("Code Reviewer must differ from the implementation owner")
+    required = {
+        "maintenance_change_id": str(metadata.get("maintenance_change_id") or ""),
+        "root_requirement_id": str(metadata.get("root_requirement_id") or ""),
+        "plan_revision": str(metadata.get("plan_revision") or ""),
+        "maintenance_plan_revision": str(metadata.get("maintenance_plan_revision") or ""),
+        "review_comment_id": str(metadata.get("review_comment_id") or ""),
+        "reviewed_commit_sha": str(metadata.get("reviewed_commit_sha") or metadata.get("review_commit_sha") or ""),
+        "pipeline_status": str(metadata.get("pipeline_status") or ""),
+    }
+    missing = [key for key, value in required.items() if not value]
+    if missing:
+        raise ReleaseError(f"integration-validation provenance is missing fields: {missing}")
+    if expected_maintenance_issue and required["maintenance_change_id"] != expected_maintenance_issue:
+        raise ReleaseError("integration-validation maintenance_change_id differs from the release Maintenance Change")
+    if required["plan_revision"] != "v2":
+        raise ReleaseError("integration-validation provenance must bind plan_revision=v2")
+    if required["maintenance_plan_revision"] != "v4":
+        raise ReleaseError("integration-validation provenance must bind maintenance_plan_revision=v4")
+    if required["pipeline_status"] != "passed":
+        raise ReleaseError("integration-validation provenance is missing passed CI")
+    pr_number_value = metadata.get("github_pr_number") or metadata.get("requirement_pr_number")
+    merge_sha_value = metadata.get("github_merge_commit_sha") or metadata.get("requirement_merge_commit_sha")
+    try:
+        pr_number = int(pr_number_value or 0)
+    except ValueError as exc:
+        raise ReleaseError("integration-validation provenance PR number is invalid") from exc
+    if not pr_number or not merge_sha_value:
+        raise ReleaseError("integration-validation provenance is missing Requirement PR merge fields")
+    if planned is not None:
+        if str(planned.get("issue_id") or "") not in issue_aliases(issue_id, issue):
+            raise ReleaseError("planned integration-validation provenance does not match its Multica Issue")
+        pr = {
+            "number": pr_number,
+            "state": "MERGED",
+            "baseRefName": "main",
+            "headRefOid": str(planned.get("reviewed_commit_sha") or ""),
+            "mergeCommit": {"oid": str(planned.get("github_merge_commit_sha") or "")},
+            "mergedAt": str(planned.get("github_merged_at") or ""),
+        }
+    else:
+        pr = merged_pr_by_number(root, pr_number)
+    merge_sha = str((pr.get("mergeCommit") or {}).get("oid") or "")
+    if required["reviewed_commit_sha"] != str(pr.get("headRefOid") or ""):
+        raise ReleaseError("integration-validation Review is stale for the Requirement PR")
+    if str(merge_sha_value) != merge_sha:
+        raise ReleaseError("integration-validation merge commit differs from the Requirement PR")
+    if merge_sha != source_commit:
+        raise ReleaseError("integration-validation merge SHA must equal the release source")
+    comments = as_list(
+        cli.json(["issue", "comment", "list", issue_id, "--full", "--output", "json"]),
+        "comments",
+    )
+    matches = [item for item in comments if str(item.get("id") or "") == required["review_comment_id"]]
+    if len(matches) != 1:
+        raise ReleaseError("integration-validation Review comment is missing or ambiguous")
+    comment = matches[0]
+    content = str(comment.get("content") or "")
+    first_verdict = next((line.strip() for line in content.splitlines() if line.strip()), "")
+    if (
+        comment.get("author_type") != "agent"
+        or str(comment.get("author_id") or "") != reviewer_id
+        or first_verdict != "APPROVED"
+    ):
+        raise ReleaseError("integration-validation Review was not approved by the managed Code Reviewer")
+    if re.findall(r"(?m)^\s*plan_revision=([^\s]+)\s*$", content) != [required["plan_revision"]]:
+        raise ReleaseError("integration-validation Review does not bind exactly one plan_revision")
+    if re.findall(r"(?m)^\s*maintenance_plan_revision=([^\s]+)\s*$", content) != [required["maintenance_plan_revision"]]:
+        raise ReleaseError("integration-validation Review does not bind exactly one maintenance_plan_revision")
+    if re.findall(r"(?m)^\s*reviewed_commit_sha=([^\s]+)\s*$", content) != [required["reviewed_commit_sha"]]:
+        raise ReleaseError("integration-validation Review does not bind exactly one reviewed_commit_sha")
+    review_created_at = str(comment.get("created_at") or comment.get("createdAt") or "")
+    if parse_iso_datetime(review_created_at, "Integration Review comment") >= parse_iso_datetime(
+        str(pr.get("mergedAt") or ""), "Requirement PR merge"
+    ):
+        raise ReleaseError("integration-validation Review must predate the Requirement PR merge")
+    decision = phase1_decision_evidence(
+        cli,
+        required["root_requirement_id"],
+        expected_maintenance_issue or required["maintenance_change_id"],
+    )
+    return {
+        "issue_id": str(issue.get("identifier") or issue_id),
+        "workflow_object_type": "integration_validation",
+        "maintenance_change_id": required["maintenance_change_id"],
+        "root_requirement_id": required["root_requirement_id"],
+        "plan_revision": required["plan_revision"],
+        "maintenance_plan_revision": required["maintenance_plan_revision"],
+        "review_comment_id": required["review_comment_id"],
+        "reviewed_commit_sha": required["reviewed_commit_sha"],
+        "github_pr_number": pr_number,
+        "github_merge_commit_sha": merge_sha,
+        "github_merged_at": str(pr.get("mergedAt") or ""),
+        "pipeline_status": required["pipeline_status"],
+        **decision,
+    }
+
 def maintenance_implementation_evidence(
     root: Path,
     cli: MulticaCLI,
     issue_id: str,
     planned: dict[str, Any] | None = None,
+    source_commit: str | None = None,
+    expected_maintenance_issue: str | None = None,
 ) -> dict[str, Any]:
     issue = cli.json(["issue", "get", issue_id, "--output", "json"])
     if not isinstance(issue, dict):
@@ -438,8 +630,22 @@ def maintenance_implementation_evidence(
     )
     if str(metadata.get("workflow_id") or "") != "development-delivery":
         raise ReleaseError("implementation provenance workflow_id is not development-delivery")
-    if str(metadata.get("workflow_object_type") or "") != "maintenance_implementation":
-        raise ReleaseError("implementation provenance Issue is not a maintenance_implementation")
+    object_type = str(metadata.get("workflow_object_type") or "")
+    if object_type == "integration_validation":
+        if not source_commit:
+            raise ReleaseError("integration-validation provenance requires the release source commit")
+        return phase1_integration_validation_evidence(
+            root,
+            cli,
+            issue_id,
+            issue,
+            metadata,
+            source_commit,
+            expected_maintenance_issue,
+            planned,
+        )
+    if object_type != "maintenance_implementation":
+        raise ReleaseError("implementation provenance Issue is not a maintenance_implementation or integration_validation")
     if str(issue.get("status") or "") != "done":
         raise ReleaseError("implementation provenance Issue must be done")
     reviewer_id = control_agent_identities(cli)["maintenance_reviewer_id"]
@@ -543,6 +749,59 @@ def maintenance_implementation_evidence(
     }
 
 
+def validate_rc4_implementation_records(
+    root: Path,
+    records: list[dict[str, Any]],
+    source_commit: str,
+    *,
+    check_ancestry: bool,
+) -> None:
+    if len(records) != 3:
+        raise ReleaseError("v1.1.0-rc.4 requires exactly three Implementation provenance Issues")
+    if not all(isinstance(item, dict) for item in records):
+        raise ReleaseError("v1.1.0-rc.4 Implementation provenance records must be objects")
+    issue_ids = [str(item.get("issue_id") or "") for item in records]
+    if len(issue_ids) != len(set(issue_ids)):
+        raise ReleaseError("v1.1.0-rc.4 implementation provenance contains a duplicate record")
+    final_records = [
+        item
+        for item in records
+        if str(item.get("workflow_object_type") or "") == "integration_validation"
+    ]
+    if len(final_records) != 1:
+        raise ReleaseError("v1.1.0-rc.4 requires exactly one final integration-validation record")
+    legacy_ids = {
+        str(item.get("issue_id") or "")
+        for item in records
+        if str(item.get("workflow_object_type") or "") != "integration_validation"
+    }
+    if legacy_ids != {"WOR-45", "WOR-48"}:
+        raise ReleaseError("v1.1.0-rc.4 requires legacy Implementation records WOR-45 and WOR-48")
+    merge_shas = [str(item.get("github_merge_commit_sha") or "") for item in records]
+    if not all(merge_shas) or len(merge_shas) != len(set(merge_shas)):
+        raise ReleaseError("v1.1.0-rc.4 Implementation merge SHAs must be unique")
+    final = final_records[0]
+    legacy_records = [item for item in records if item is not final]
+    if str(final.get("github_merge_commit_sha") or "") != source_commit:
+        raise ReleaseError("v1.1.0-rc.4 final integration-validation merge SHA must equal the release source")
+    if not check_ancestry:
+        return
+    for prior in legacy_records:
+        reachable = run(
+            [
+                "git",
+                "merge-base",
+                "--is-ancestor",
+                str(prior["github_merge_commit_sha"]),
+                source_commit,
+            ],
+            root,
+            check=False,
+        )
+        if reachable.returncode != 0:
+            raise ReleaseError("v1.1.0-rc.4 legacy Implementation PR is not in release history")
+
+
 def implementation_provenance(
     root: Path,
     cli: MulticaCLI,
@@ -550,6 +809,7 @@ def implementation_provenance(
     source_commit: str,
     version: str,
     planned: list[dict[str, Any]] | None = None,
+    expected_maintenance_issue: str | None = None,
 ) -> list[dict[str, Any]]:
     normalized_ids = [str(item) for item in issue_ids if str(item)]
     if len(normalized_ids) != len(set(normalized_ids)):
@@ -564,34 +824,24 @@ def implementation_provenance(
     evidence = sorted(
         [
             maintenance_implementation_evidence(
-                root, cli, item, planned_by_issue.get(item)
+                root,
+                cli,
+                item,
+                planned_by_issue.get(item),
+                source_commit,
+                expected_maintenance_issue,
             )
             for item in normalized_ids
         ],
         key=lambda item: (item["github_pr_number"], item["issue_id"]),
     )
     if version == "1.1.0-rc.4":
-        if len(evidence) != 2:
-            raise ReleaseError("v1.1.0-rc.4 requires exactly two Implementation provenance Issues")
-        source_matches = [
-            item for item in evidence if item["github_merge_commit_sha"] == source_commit
-        ]
-        if len(source_matches) != 1:
-            raise ReleaseError("v1.1.0-rc.4 provenance must bind the final release PR")
-        prior = next(item for item in evidence if item not in source_matches)
-        reachable = run(
-            [
-                "git",
-                "merge-base",
-                "--is-ancestor",
-                prior["github_merge_commit_sha"],
-                source_commit,
-            ],
+        validate_rc4_implementation_records(
             root,
-            check=False,
+            evidence,
+            source_commit,
+            check_ancestry=planned is None,
         )
-        if reachable.returncode != 0:
-            raise ReleaseError("v1.1.0-rc.4 prior Implementation PR is not in release history")
     return evidence
 
 
@@ -1873,8 +2123,13 @@ def verify_release_request(
         implementations
     ):
         raise ReleaseError("release Request Implementation provenance digest is invalid")
-    if request.get("version") == "1.1.0-rc.4" and len(implementations) != 2:
-        raise ReleaseError("v1.1.0-rc.4 release Request must bind two Implementation Issues")
+    if request.get("version") == "1.1.0-rc.4":
+        validate_rc4_implementation_records(
+            root,
+            implementations,
+            str(request.get("source_commit") or ""),
+            check_ancestry=False,
+        )
     if verify_state:
         verify_current_state(root, request)
     return expected
@@ -2135,6 +2390,7 @@ def build_plan(
             implementation_issues or [],
             commit,
             version,
+            expected_maintenance_issue=str(maintenance_issue),
         )
     plan = {
         "schema_version": 1,
@@ -2274,6 +2530,7 @@ def verify_release_approval(
             str(plan["source_commit"]),
             str(plan.get("version") or ""),
             planned_implementations,
+            expected_maintenance_issue=str(authorization["issue_id"]),
         )
         if current_implementations != planned_implementations:
             raise ReleaseError("Implementation provenance changed after release planning")
