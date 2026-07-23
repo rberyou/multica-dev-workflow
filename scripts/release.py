@@ -40,6 +40,16 @@ RC2_RECOVERY_VERSION = "1.1.0-rc.2"
 RC2_AFFECTED_VERSION = "v1.1.0-rc.1"
 PROTECTED_ENVIRONMENT_MODE = "protected_environment"
 RELEASE_CONTROL_PATH = "docs/release-control.json"
+PHASE1_MAINTENANCE_CASE_AUTHORIZATION = "phase1_maintenance_case"
+PHASE1_MAINTENANCE_CASE_EXECUTOR = "ordinary_development_workflow"
+PHASE1_MAINTENANCE_CASE_ACTIVE_STATUSES = {
+    "approved",
+    "in_development",
+    "in_fix",
+    "fix_ready",
+    "awaiting_deployment",
+    "awaiting_observer_verification",
+}
 RELEASE_CONTROL_KEYS = [
     "repository",
     "required_visibility",
@@ -80,6 +90,26 @@ def metadata_map(value: Any) -> dict[str, Any]:
         key = item.get("key") or item.get("name")
         if key:
             result[str(key)] = item.get("value")
+    return result
+
+
+def normalized_string_list(value: Any, label: str) -> list[str]:
+    if isinstance(value, str):
+        if not value.strip():
+            return []
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ReleaseError(f"{label} must be a JSON array") from exc
+    if not isinstance(value, list):
+        raise ReleaseError(f"{label} must be a JSON array")
+    result = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ReleaseError(f"{label} must contain non-empty strings")
+        result.append(item.strip())
+    if len(result) != len(set(result)):
+        raise ReleaseError(f"{label} contains duplicates")
     return result
 
 
@@ -273,6 +303,135 @@ def recovery_exception_evidence(
     return identities, bounded
 
 
+def release_tag(version: str | None) -> str:
+    value = str(version or "")
+    if not value:
+        return ""
+    return value if value.startswith("v") else f"v{value}"
+
+
+def phase1_maintenance_case_evidence(
+    cli: MulticaCLI,
+    issue_id: str,
+    issue: dict[str, Any],
+    metadata: dict[str, Any],
+    version: str | None = None,
+) -> dict[str, Any]:
+    if str(metadata.get("workflow_id") or "") != "development-delivery":
+        raise ReleaseError("Maintenance Case workflow_id is not development-delivery")
+    incident_id = str(metadata.get("incident_id") or "")
+    if not incident_id:
+        raise ReleaseError("Maintenance Case is missing incident_id")
+    incident = cli.json(["issue", "get", incident_id, "--output", "json"])
+    if not isinstance(incident, dict):
+        raise ReleaseError(f"Maintenance Case Incident is unreadable: {incident_id}")
+    incident_metadata = metadata_map(
+        cli.json(["issue", "metadata", "list", incident_id, "--output", "json"])
+    )
+    if str(incident_metadata.get("workflow_object_type") or "") != "incident":
+        raise ReleaseError("Maintenance Case incident_id is not a workflow Incident")
+    case_refs = issue_refs(issue_id, issue)
+    linked_case = str(incident_metadata.get("maintenance_case_id") or "")
+    if linked_case and linked_case not in case_refs:
+        raise ReleaseError("Incident maintenance_case_id differs from the selected Maintenance Case")
+    if str(incident_metadata.get("maintenance_decision") or "") != "approved":
+        raise ReleaseError("Maintenance Case Incident is not approved for maintenance")
+
+    case_digest = str(metadata.get("maintenance_intake_digest") or "")
+    incident_digest = str(incident_metadata.get("maintenance_intake_digest") or "")
+    if not case_digest or not incident_digest:
+        raise ReleaseError("Maintenance Case maintenance_intake_digest is missing")
+    if case_digest != incident_digest:
+        raise ReleaseError("Maintenance Case digest differs from the Incident approval scope")
+
+    human_approver_id = str(incident_metadata.get("human_approver_id") or "")
+    if not human_approver_id:
+        raise ReleaseError("Maintenance Case human approver is missing")
+    case_approver_id = str(metadata.get("human_approver_id") or "")
+    if case_approver_id and case_approver_id != human_approver_id:
+        raise ReleaseError("Maintenance Case human approver differs from the Incident")
+    approval_comment_id = str(metadata.get("approval_comment_id") or "")
+    if not approval_comment_id:
+        raise ReleaseError("Maintenance Case approval_comment_id is missing")
+    incident_decision_comment_id = str(
+        incident_metadata.get("maintenance_decision_comment_id") or ""
+    )
+    if incident_decision_comment_id and incident_decision_comment_id != approval_comment_id:
+        raise ReleaseError("Maintenance Case approval comment differs from the Incident decision")
+    comments = as_list(
+        cli.json(["issue", "comment", "list", incident_id, "--full", "--output", "json"]),
+        "comments",
+    )
+    matches = [item for item in comments if str(item.get("id") or "") == approval_comment_id]
+    if len(matches) != 1:
+        raise ReleaseError("Maintenance Case approval comment is missing or ambiguous")
+    approval = matches[0]
+    expected_approval = f"APPROVE WORKFLOW MAINTENANCE {case_digest[:16]}"
+    if (
+        approval.get("author_type") != "member"
+        or str(approval.get("author_id") or "") != human_approver_id
+        or str(approval.get("content") or "").strip() != expected_approval
+    ):
+        raise ReleaseError("Maintenance Case approval has the wrong author or exact content")
+
+    executor = str(metadata.get("executor") or "")
+    if executor != PHASE1_MAINTENANCE_CASE_EXECUTOR:
+        raise ReleaseError("Maintenance Case executor is not ordinary_development_workflow")
+    implementation_issue_ids = normalized_string_list(
+        metadata.get("implementation_issue_ids"), "implementation_issue_ids"
+    )
+    if not implementation_issue_ids:
+        raise ReleaseError("Maintenance Case implementation_issue_ids is missing")
+    case_status = str(
+        metadata.get("maintenance_case_status")
+        or metadata.get("logical_status")
+        or ""
+    )
+    if case_status not in PHASE1_MAINTENANCE_CASE_ACTIVE_STATUSES:
+        raise ReleaseError("Maintenance Case status is not eligible for release planning")
+    expected_release = release_tag(version)
+    target_release = str(
+        metadata.get("target_release")
+        or metadata.get("release_version")
+        or incident_metadata.get("target_release")
+        or incident_metadata.get("workflow_version")
+        or ""
+    )
+    if not target_release:
+        raise ReleaseError("Maintenance Case target release is missing")
+    if expected_release and target_release != expected_release:
+        raise ReleaseError("Maintenance Case target release differs from the requested version")
+
+    approval_created_at = str(
+        approval.get("created_at") or approval.get("createdAt") or ""
+    )
+    return {
+        "mode": "maintenance",
+        "authorization_kind": PHASE1_MAINTENANCE_CASE_AUTHORIZATION,
+        "issue_id": issue_id,
+        "workspace_id": cli.workspace_id,
+        "profile": cli.profile,
+        "workflow_id": "development-delivery",
+        "incident_id": incident_id,
+        "approval_comment_id": approval_comment_id,
+        "approval_created_at": approval_created_at,
+        "approval_sha256": digest(
+            {
+                "comment_id": approval_comment_id,
+                "author_type": approval.get("author_type"),
+                "author_id": approval.get("author_id"),
+                "content": str(approval.get("content") or "").strip(),
+            }
+        ),
+        "human_approver_id": human_approver_id,
+        "maintenance_intake_digest": case_digest,
+        "executor": executor,
+        "implementation_issue_ids": implementation_issue_ids,
+        "target_release": target_release,
+        "maintenance_case_status": case_status,
+    }
+
+
 def maintenance_evidence(
     root: Path,
     cli: MulticaCLI,
@@ -286,8 +445,15 @@ def maintenance_evidence(
     metadata = metadata_map(
         cli.json(["issue", "metadata", "list", issue_id, "--output", "json"])
     )
-    if str(metadata.get("workflow_object_type") or "") != "maintenance_change":
-        raise ReleaseError("release requires a workflow_object_type=maintenance_change Issue")
+    object_type = str(metadata.get("workflow_object_type") or "")
+    if object_type == "maintenance_case":
+        return phase1_maintenance_case_evidence(
+            cli, issue_id, issue, metadata, version
+        )
+    if object_type != "maintenance_change":
+        raise ReleaseError(
+            "release requires a workflow_object_type=maintenance_change or maintenance_case Issue"
+        )
     recovery_mode = str(metadata.get("recovery_mode") or "")
     recovery_evidence: dict[str, str] = {}
     if recovery_mode:
