@@ -181,6 +181,10 @@ class FakeMultica:
                     "id": "agent-reviewer",
                     "instructions": marker("agent.workflow-maintenance-reviewer"),
                 },
+                {
+                    "id": "agent-code-reviewer",
+                    "instructions": marker("agent.code-reviewer"),
+                },
             ]
         if args[:2] == ["squad", "list"]:
             return [{"id": "squad-1", "instructions": marker("squad.development-delivery")}]
@@ -598,8 +602,24 @@ class ReleaseTests(unittest.TestCase):
                     "review_comment_id": "review-48",
                     "reviewed_commit_sha": "9" * 40,
                     "github_pr_number": 10,
-                    "github_merge_commit_sha": "a" * 40,
+                    "github_merge_commit_sha": "2" * 40,
                     "github_merged_at": "2026-07-19T00:00:00Z",
+                },
+                {
+                    "issue_id": "WOR-101",
+                    "workflow_object_type": "integration_validation",
+                    "maintenance_change_id": "WOR-49",
+                    "root_requirement_id": "WOR-92",
+                    "plan_revision": "v2",
+                    "maintenance_plan_revision": "v4",
+                    "review_comment_id": "review-101",
+                    "reviewed_commit_sha": "c" * 40,
+                    "github_pr_number": 15,
+                    "github_merge_commit_sha": "a" * 40,
+                    "github_merged_at": "2026-07-20T00:00:00Z",
+                    "pipeline_status": "passed",
+                    "phase1_decision_comment_id": "decision-1",
+                    "phase1_decision_sha256": "3" * 64,
                 },
             ],
             "release_control": {
@@ -625,6 +645,184 @@ class ReleaseTests(unittest.TestCase):
         request["release_request_digest"] = release.digest(request)
         return request
 
+    @staticmethod
+    def phase1_cli():
+        cli = FakeMultica()
+        cli.issues["WOR-92"] = {
+            "id": "requirement-internal",
+            "identifier": "WOR-92",
+            "status": "in_progress",
+        }
+        cli.metadata_by_issue["WOR-92"] = {
+            "workflow_object_type": "requirement",
+            "maintenance_change_id": "WOR-49",
+            "human_approver_id": "human-1",
+            "phase1_decision_comment_id": "decision-1",
+        }
+        cli.comments_by_issue["WOR-92"] = [
+            {
+                "id": "decision-1",
+                "author_type": "member",
+                "author_id": "human-1",
+                "content": "DECISION: use Phase 1 ordinary-development evidence for RC4",
+            }
+        ]
+        cli.issues["WOR-101"] = {
+            "id": "integration-internal",
+            "identifier": "WOR-101",
+            "status": "done",
+        }
+        cli.metadata_by_issue["WOR-101"] = {
+            "workflow_id": "development-delivery",
+            "workflow_object_type": "integration_validation",
+            "maintenance_change_id": "WOR-49",
+            "root_requirement_id": "WOR-92",
+            "plan_revision": "v2",
+            "maintenance_plan_revision": "v4",
+            "reviewer_id": "agent-code-reviewer",
+            "integrator_id": "agent-integrator",
+            "implementation_owner_id": "agent-developer",
+            "review_comment_id": "review-101",
+            "reviewed_commit_sha": "c" * 40,
+            "requirement_pr_number": "15",
+            "requirement_merge_commit_sha": "a" * 40,
+            "pipeline_status": "passed",
+        }
+        cli.comments_by_issue["WOR-101"] = [
+            {
+                "id": "review-101",
+                "author_type": "agent",
+                "author_id": "agent-code-reviewer",
+                "created_at": "2026-07-19T23:00:00Z",
+                "content": (
+                    "APPROVED\n"
+                    "plan_revision=v2\n"
+                    "maintenance_plan_revision=v4\n"
+                    f"reviewed_commit_sha={'c' * 40}"
+                ),
+            }
+        ]
+        return cli
+
+    def assert_phase1_evidence_rejected(self, mutate, pattern):
+        cli = self.phase1_cli()
+        mutate(cli)
+        pr = {
+            "number": 15,
+            "headRefOid": "c" * 40,
+            "mergeCommit": {"oid": "a" * 40},
+            "mergedAt": "2026-07-20T00:00:00Z",
+            "baseRefName": "main",
+            "state": "MERGED",
+        }
+        with (
+            patch.object(release, "merged_pr_by_number", return_value=pr),
+            self.assertRaisesRegex(release.ReleaseError, pattern),
+        ):
+            release.phase1_integration_validation_evidence(
+                ROOT,
+                cli,
+                "WOR-101",
+                cli.issues["WOR-101"],
+                cli.metadata_by_issue["WOR-101"],
+                "a" * 40,
+                "WOR-49",
+            )
+
+    def test_phase1_integration_validation_binds_review_decision_and_ci(self):
+        cli = self.phase1_cli()
+        pr = {
+            "number": 15,
+            "headRefOid": "c" * 40,
+            "mergeCommit": {"oid": "a" * 40},
+            "mergedAt": "2026-07-20T00:00:00Z",
+            "baseRefName": "main",
+            "state": "MERGED",
+        }
+        with patch.object(release, "merged_pr_by_number", return_value=pr):
+            evidence = release.phase1_integration_validation_evidence(
+                ROOT,
+                cli,
+                "WOR-101",
+                cli.issues["WOR-101"],
+                cli.metadata_by_issue["WOR-101"],
+                "a" * 40,
+                "WOR-49",
+            )
+        self.assertEqual(evidence["workflow_object_type"], "integration_validation")
+        self.assertEqual(evidence["maintenance_plan_revision"], "v4")
+        self.assertEqual(evidence["phase1_decision_comment_id"], "decision-1")
+
+    def test_phase1_integration_validation_rejects_invalid_bindings(self):
+        cases = {
+            "wrong human decision author": (
+                lambda cli: cli.comments_by_issue["WOR-92"][0].update({"author_id": "human-2"}),
+                "human approver",
+            ),
+            "missing decision": (
+                lambda cli: cli.comments_by_issue.__setitem__("WOR-92", []),
+                "decision comment",
+            ),
+            "wrong Code Reviewer": (
+                lambda cli: cli.metadata_by_issue["WOR-101"].update({"reviewer_id": "agent-reviewer"}),
+                "Code Reviewer",
+            ),
+            "reviewer integrator collision": (
+                lambda cli: cli.metadata_by_issue["WOR-101"].update({"integrator_id": "agent-code-reviewer"}),
+                "integrator",
+            ),
+            "stale reviewed SHA": (
+                lambda cli: cli.metadata_by_issue["WOR-101"].update({"reviewed_commit_sha": "b" * 40}),
+                "stale",
+            ),
+            "missing maintenance_plan_revision": (
+                lambda cli: cli.metadata_by_issue["WOR-101"].pop("maintenance_plan_revision"),
+                "missing fields",
+            ),
+            "wrong root Requirement": (
+                lambda cli: cli.metadata_by_issue["WOR-92"].update({"maintenance_change_id": "WOR-50"}),
+                "maintenance_change_id",
+            ),
+            "wrong maintenance change": (
+                lambda cli: cli.metadata_by_issue["WOR-101"].update({"maintenance_change_id": "WOR-50"}),
+                "maintenance_change_id",
+            ),
+            "missing CI": (
+                lambda cli: cli.metadata_by_issue["WOR-101"].update({"pipeline_status": "pending"}),
+                "passed CI",
+            ),
+            "post-merge Review": (
+                lambda cli: cli.comments_by_issue["WOR-101"][0].update({"created_at": "2026-07-20T00:00:01Z"}),
+                "predate",
+            ),
+        }
+        for label, (mutate, pattern) in cases.items():
+            with self.subTest(case=label):
+                self.assert_phase1_evidence_rejected(mutate, pattern)
+
+    def test_rc4_records_reject_duplicates_wrong_source_and_non_ancestor(self):
+        records = self.release_request_fixture()["implementation_provenance"]
+        duplicate = json.loads(json.dumps(records))
+        duplicate[1]["issue_id"] = "WOR-45"
+        with self.assertRaisesRegex(release.ReleaseError, "duplicate"):
+            release.validate_rc4_implementation_records(
+                ROOT, duplicate, "a" * 40, check_ancestry=False
+            )
+        wrong_source = json.loads(json.dumps(records))
+        wrong_source[2]["github_merge_commit_sha"] = "4" * 40
+        with self.assertRaisesRegex(release.ReleaseError, "release source"):
+            release.validate_rc4_implementation_records(
+                ROOT, wrong_source, "a" * 40, check_ancestry=False
+            )
+        failed = subprocess.CompletedProcess(["git"], 1, "", "")
+        with (
+            patch.object(release, "run", return_value=failed),
+            self.assertRaisesRegex(release.ReleaseError, "release history"),
+        ):
+            release.validate_rc4_implementation_records(
+                ROOT, records, "a" * 40, check_ancestry=True
+            )
+
     def test_all_version_files_match_rc(self):
         checked = release.verify_versions(ROOT, "1.1.0-rc.4")
         self.assertIn("VERSION", checked)
@@ -634,7 +832,13 @@ class ReleaseTests(unittest.TestCase):
     def test_stale_runtime_instruction_version_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
             temp_root = Path(temp) / "repo"
-            shutil.copytree(ROOT, temp_root, ignore=shutil.ignore_patterns(".git", "build", "__pycache__"))
+            shutil.copytree(
+                ROOT,
+                temp_root,
+                ignore=shutil.ignore_patterns(
+                    ".git", "build", "__pycache__", "secure-runtime", "control-plane-contract.json"
+                ),
+            )
             leader = temp_root / "instructions/roles/leader.md"
             leader.write_text(
                 leader.read_text(encoding="utf-8").replace(
@@ -1604,7 +1808,7 @@ class ReleaseTests(unittest.TestCase):
                 request["release_request_digest"],
             )
 
-    def test_rc4_release_request_requires_both_implementation_records(self):
+    def test_rc4_release_request_requires_three_implementation_records(self):
         request = self.release_request_fixture()
         request["implementation_provenance"] = request["implementation_provenance"][:1]
         request["implementation_provenance_sha256"] = release.digest(
@@ -1621,7 +1825,7 @@ class ReleaseTests(unittest.TestCase):
                 "release_control",
                 return_value=request["release_control"],
             ),
-            self.assertRaisesRegex(release.ReleaseError, "bind two Implementation Issues"),
+            self.assertRaisesRegex(release.ReleaseError, "exactly three Implementation provenance"),
         ):
             release.verify_release_request(ROOT, request)
 
