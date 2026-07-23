@@ -424,6 +424,10 @@ class ReleaseTests(unittest.TestCase):
         dispatcher_installation_id=None,
         dispatcher_permissions=None,
         dispatcher_repositories=None,
+        branch_policy_marker_count=1,
+        deployment_branch_policy=None,
+        deployment_branch_policies=None,
+        ruleset_bypass_actors="default",
     ):
         dispatcher_app_id = dispatcher_app_id or ReleaseTests.DISPATCHER_APP_ID
         dispatcher_installation_id = (
@@ -470,25 +474,32 @@ class ReleaseTests(unittest.TestCase):
                 },
             }
         if args[:2] == ["api", "repos/rberyou/multica-dev-workflow/environments/workflow-release"]:
+            if deployment_branch_policy is None:
+                deployment_branch_policy = {
+                    "protected_branches": False,
+                    "custom_branch_policies": True,
+                }
+            protection_rules = [
+                {
+                    "type": "required_reviewers",
+                    "prevent_self_review": True,
+                    "reviewers": [
+                        {
+                            "type": "User",
+                            "reviewer": {"id": 7, "login": reviewer},
+                        }
+                    ],
+                }
+            ]
+            protection_rules.extend(
+                {"type": "branch_policy"}
+                for _ in range(branch_policy_marker_count)
+            )
             detail = {
                 "id": 42,
                 "name": "workflow-release",
-                "protection_rules": [
-                    {
-                        "type": "required_reviewers",
-                        "prevent_self_review": True,
-                        "reviewers": [
-                            {
-                                "type": "User",
-                                "reviewer": {"id": 7, "login": reviewer},
-                            }
-                        ],
-                    }
-                ],
-                "deployment_branch_policy": {
-                    "protected_branches": False,
-                    "custom_branch_policies": True,
-                },
+                "protection_rules": protection_rules,
+                "deployment_branch_policy": deployment_branch_policy,
             }
             if can_admins_bypass is not None:
                 detail["can_admins_bypass"] = can_admins_bypass
@@ -497,11 +508,17 @@ class ReleaseTests(unittest.TestCase):
             "api",
             "repos/rberyou/multica-dev-workflow/environments/workflow-release/deployment-branch-policies",
         ]:
-            return {"branch_policies": [{"name": "main"}]}
+            if deployment_branch_policies is None:
+                deployment_branch_policies = ["main"]
+            return {
+                "branch_policies": [
+                    {"name": name} for name in deployment_branch_policies
+                ]
+            }
         if args[:2] == ["api", "repos/rberyou/multica-dev-workflow/rulesets"]:
             return [{"id": 99, "name": "workflow-release-tags"}]
         if args[:2] == ["api", "repos/rberyou/multica-dev-workflow/rulesets/99"]:
-            return {
+            ruleset = {
                 "id": 99,
                 "name": "workflow-release-tags",
                 "source": "rberyou/multica-dev-workflow",
@@ -516,14 +533,18 @@ class ReleaseTests(unittest.TestCase):
                     {"type": "update"},
                     {"type": "deletion"},
                 ],
-                "bypass_actors": [
+            }
+            if ruleset_bypass_actors == "default":
+                ruleset["bypass_actors"] = [
                     {
                         "actor_type": "Integration",
                         "actor_id": ReleaseTests.PUBLISHER_APP_ID,
                         "bypass_mode": "always",
                     }
-                ],
-            }
+                ]
+            elif ruleset_bypass_actors is not None:
+                ruleset["bypass_actors"] = ruleset_bypass_actors
+            return ruleset
         if args[:2] == ["api", "apps/multica-workflow-publisher"]:
             return {
                 "id": ReleaseTests.PUBLISHER_APP_ID,
@@ -1128,13 +1149,17 @@ class ReleaseTests(unittest.TestCase):
             release.verify_plan_file(plan, plan["release_plan_digest"][:12])
 
     def test_release_environment_requires_isolated_reviewer(self):
+        calls = []
+
+        def fake_gh(root, args):
+            calls.append(list(args))
+            return self.protected_environment_gh(
+                args, ruleset_bypass_actors=None
+            )
+
         with (
             patch.dict(release.os.environ, {"GH_TOKEN": "dispatcher-token"}, clear=True),
-            patch.object(
-                release,
-                "gh_json",
-                side_effect=lambda root, args: self.protected_environment_gh(args),
-            ),
+            patch.object(release, "gh_json", side_effect=fake_gh),
         ):
             boundary = release.verify_release_environment(ROOT)
         self.assertEqual(boundary["reviewers"], ["isolated-reviewer"])
@@ -1142,6 +1167,127 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(boundary["dispatcher_app_id"], self.DISPATCHER_APP_ID)
         self.assertTrue(boundary["dispatcher_token_verified"])
         self.assertEqual(boundary["publisher_app_id"], self.PUBLISHER_APP_ID)
+        self.assertFalse(
+            any(
+                args[:2] == ["api", "apps/multica-workflow-publisher"]
+                for args in calls
+            )
+        )
+
+    def test_release_environment_requires_one_branch_policy_marker_and_main_policy(self):
+        marker_cases = {
+            "missing": 0,
+            "duplicate": 2,
+        }
+        for label, count in marker_cases.items():
+            with self.subTest(case=label):
+                with (
+                    patch.object(
+                        release,
+                        "gh_json",
+                        side_effect=lambda root, args, count=count: self.protected_environment_gh(
+                            args, branch_policy_marker_count=count
+                        ),
+                    ),
+                    self.assertRaisesRegex(release.ReleaseError, "exactly one branch_policy"),
+                ):
+                    release.verify_release_environment(ROOT, verify_dispatcher_token=False)
+
+        policy_cases = {
+            "protected branches": {
+                "deployment_branch_policy": {
+                    "protected_branches": True,
+                    "custom_branch_policies": True,
+                }
+            },
+            "not custom": {
+                "deployment_branch_policy": {
+                    "protected_branches": False,
+                    "custom_branch_policies": False,
+                }
+            },
+            "wrong branch": {"deployment_branch_policies": ["release"]},
+            "extra branch": {"deployment_branch_policies": ["main", "release"]},
+        }
+        for label, kwargs in policy_cases.items():
+            with self.subTest(case=label):
+                pattern = "branch policies must equal" if label in {"wrong branch", "extra branch"} else "custom main-only"
+                with (
+                    patch.object(
+                        release,
+                        "gh_json",
+                        side_effect=lambda root, args, kwargs=kwargs: self.protected_environment_gh(
+                            args, **kwargs
+                        ),
+                    ),
+                    self.assertRaisesRegex(release.ReleaseError, pattern),
+                ):
+                    release.verify_release_environment(ROOT, verify_dispatcher_token=False)
+
+    def test_release_tag_ruleset_bypass_actors_fail_closed_when_present_invalid(self):
+        cases = {
+            "non-list": (
+                {"actor_type": "Integration"},
+                "bypass_actors must be a list",
+            ),
+            "malformed": (
+                [
+                    {
+                        "actor_type": "Integration",
+                        "actor_id": self.PUBLISHER_APP_ID,
+                    }
+                ],
+                "malformed bypass actor",
+            ),
+            "stale-id": (
+                [
+                    {
+                        "actor_type": "Integration",
+                        "actor_id": self.PUBLISHER_APP_ID + 1,
+                        "bypass_mode": "always",
+                    }
+                ],
+                "Publisher App bypass actor ID differs",
+            ),
+            "wrong-actor": (
+                [
+                    {
+                        "actor_type": "RepositoryRole",
+                        "actor_id": self.PUBLISHER_APP_ID,
+                        "bypass_mode": "always",
+                    }
+                ],
+                "sole always Integration bypass",
+            ),
+            "extra-actor": (
+                [
+                    {
+                        "actor_type": "Integration",
+                        "actor_id": self.PUBLISHER_APP_ID,
+                        "bypass_mode": "always",
+                    },
+                    {
+                        "actor_type": "RepositoryRole",
+                        "actor_id": 5,
+                        "bypass_mode": "always",
+                    },
+                ],
+                "exactly one bypass actor",
+            ),
+        }
+        for label, (bypass_actors, pattern) in cases.items():
+            with self.subTest(case=label):
+                with (
+                    patch.object(
+                        release,
+                        "gh_json",
+                        side_effect=lambda root, args, bypass_actors=bypass_actors: self.protected_environment_gh(
+                            args, ruleset_bypass_actors=bypass_actors
+                        ),
+                    ),
+                    self.assertRaisesRegex(release.ReleaseError, pattern),
+                ):
+                    release.verify_release_environment(ROOT, verify_dispatcher_token=False)
 
     def test_release_environment_requires_public_repository(self):
         with (
