@@ -1372,7 +1372,9 @@ def bounded_review_issue(
 
 
 def maintenance_github_provenance(
-    authorization: dict[str, Any], release_approval: dict[str, Any]
+    authorization: dict[str, Any],
+    release_approval: dict[str, Any],
+    ordinary_implementation_provenance_sha256: str | None = None,
 ) -> dict[str, str]:
     issue_id = str(authorization.get("issue_id") or "")
     approval_comment_id = str(release_approval.get("comment_id") or "")
@@ -1403,6 +1405,9 @@ def maintenance_github_provenance(
             ),
             "maintenance_target_release": str(authorization.get("target_release") or ""),
             "phase1_executor": str(authorization.get("executor") or ""),
+            "ordinary_implementation_provenance_sha256": str(
+                ordinary_implementation_provenance_sha256 or ""
+            ),
         }
         missing = [key for key, value in phase1_fields.items() if not value]
         if missing:
@@ -2409,11 +2414,13 @@ def release_request(
     authorization = plan.get("release_authorization") or {}
     if authorization.get("mode") != "maintenance":
         raise ReleaseError("protected Environment releases require Maintenance authorization")
-    provenance = maintenance_github_provenance(authorization, release_approval)
     implementation_records = plan.get("implementation_provenance") or []
     implementation_records_sha256 = digest(implementation_records)
-    if provenance.get("authorization_kind") == PHASE1_MAINTENANCE_CASE_AUTHORIZATION:
-        provenance["ordinary_implementation_provenance_sha256"] = implementation_records_sha256
+    provenance = maintenance_github_provenance(
+        authorization,
+        release_approval,
+        implementation_records_sha256,
+    )
     control = release_control(root)
     request = {
         "schema_version": 1,

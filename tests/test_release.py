@@ -1184,8 +1184,19 @@ class ReleaseTests(unittest.TestCase):
         authorization = release.maintenance_evidence(
             ROOT, cli, "WOR-108", maintenance_pr(), "1.1.0-rc.4"
         )
+        with self.assertRaisesRegex(
+            release.ReleaseError, "ordinary_implementation_provenance_sha256"
+        ):
+            release.maintenance_github_provenance(
+                authorization,
+                {"comment_id": "release-approval-1", "author_id": "human-1"},
+            )
+
+        implementation_sha256 = "4" * 64
         provenance = release.maintenance_github_provenance(
-            authorization, {"comment_id": "release-approval-1", "author_id": "human-1"}
+            authorization,
+            {"comment_id": "release-approval-1", "author_id": "human-1"},
+            implementation_sha256,
         )
         self.assertEqual(provenance["authorization_kind"], "phase1_maintenance_case")
         self.assertEqual(provenance["maintenance_issue"], "WOR-108")
@@ -1195,12 +1206,62 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(provenance["maintenance_intake_digest"], PHASE1_DIGEST)
         self.assertEqual(provenance["phase1_executor"], "ordinary_development_workflow")
         self.assertEqual(provenance["maintenance_target_release"], "v1.1.0-rc.4")
+        self.assertEqual(
+            provenance["ordinary_implementation_provenance_sha256"],
+            implementation_sha256,
+        )
         self.assertNotIn("review_comment_id", provenance)
         self.assertNotIn("human-1", json.dumps(provenance))
         block = release.github_release_approval_block("a" * 64, provenance)
         self.assertIn("APPROVE WORKFLOW RELEASE " + "a" * 64, block)
         self.assertIn("authorization_kind=phase1_maintenance_case", block)
         self.assertIn("maintenance_case_id=WOR-108", block)
+        self.assertIn(
+            "ordinary_implementation_provenance_sha256=" + implementation_sha256,
+            block,
+        )
+
+        comment = {
+            "comments": [
+                {
+                    "id": "release-approval-1",
+                    "author": {"login": "rberyou"},
+                    "body": "\n".join(
+                        line
+                        for line in block.splitlines()
+                        if not line.startswith(
+                            "ordinary_implementation_provenance_sha256="
+                        )
+                    ),
+                }
+            ]
+        }
+        with (
+            patch.object(release, "gh_json", return_value=comment),
+            self.assertRaisesRegex(release.ReleaseError, "found 0"),
+        ):
+            release.verify_github_release_approval(
+                ROOT, "a" * 64, 3, expected_provenance=provenance
+            )
+
+        comment["comments"][0]["body"] = block.replace(
+            "ordinary_implementation_provenance_sha256=" + implementation_sha256,
+            "ordinary_implementation_provenance_sha256=" + "9" * 64,
+        )
+        with (
+            patch.object(release, "gh_json", return_value=comment),
+            self.assertRaisesRegex(release.ReleaseError, "found 0"),
+        ):
+            release.verify_github_release_approval(
+                ROOT, "a" * 64, 3, expected_provenance=provenance
+            )
+
+        comment["comments"][0]["body"] = block
+        with patch.object(release, "gh_json", return_value=comment):
+            approval = release.verify_github_release_approval(
+                ROOT, "a" * 64, 3, expected_provenance=provenance
+            )
+        self.assertEqual(approval["comment_id"], "release-approval-1")
 
     def assert_phase1_maintenance_case_rejected(self, mutate, pattern):
         cli = MaintenanceCaseMultica()
@@ -1317,6 +1378,8 @@ class ReleaseTests(unittest.TestCase):
             ROOT, cli, "WOR-108", self.phase1_case_pr(), "1.1.0-rc.4"
         )
         implementation = self.phase1_case_integration_evidence(cli)
+        implementation_provenance = [implementation]
+        implementation_sha256 = release.digest(implementation_provenance)
         request = self.release_request_fixture()
         request.update(
             {
@@ -1332,15 +1395,12 @@ class ReleaseTests(unittest.TestCase):
                 "maintenance_provenance": release.maintenance_github_provenance(
                     authorization,
                     {"comment_id": "release-approval-1", "author_id": "human-1"},
+                    implementation_sha256,
                 ),
-                "implementation_provenance": [implementation],
+                "implementation_provenance": implementation_provenance,
             }
         )
-        implementation_sha256 = release.digest(request["implementation_provenance"])
         request["implementation_provenance_sha256"] = implementation_sha256
-        request["maintenance_provenance"][
-            "ordinary_implementation_provenance_sha256"
-        ] = implementation_sha256
         request["release_request_digest"] = release.digest(
             {key: value for key, value in request.items() if key != "release_request_digest"}
         )
