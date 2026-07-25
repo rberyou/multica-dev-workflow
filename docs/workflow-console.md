@@ -7,9 +7,7 @@ The current console is host-only and read-only. Phase 1 does not deploy Workflow
 ## Host Status
 
 ```text
-python skills/multica-workflow-console/scripts/workflow_console.py status \
-  --repo <checkout> \
-  --workspace <workspace>
+python skills/multica-workflow-console/scripts/workflow_console.py status --repo <checkout> --workspace <workspace>
 ```
 
 The console refuses to run when Multica Agent task variables are present. It reports repository, release and workflow state but does not approve, merge, publish, deploy or mutate a Maintenance Case.
@@ -25,6 +23,20 @@ Human participation is limited to decision-bearing gates:
 5. Approve each separate Workspace deployment Plan.
 
 The implementation and review loop uses the ordinary Integrator, Developer and Code Reviewer roles. For an Incident fix, the Integrator writes the final Requirement and integration-validation evidence back to the minimal Maintenance Case. Observer remains responsible for independent post-deployment verification and Incident closure.
+
+## Incident Fix Handoff
+
+After the human approves maintenance, record the ordinary-development handoff and advance evidence in order. Each command is idempotent for matching evidence and rejects skipped stages or conflicting evidence.
+
+```text
+python skills/multica-workflow-observer/scripts/observer.py record-maintenance-decision --incident <incident> --comment-id <approval-comment> --executor ordinary_development_workflow
+python skills/multica-workflow-observer/scripts/observer.py record-maintenance-progress --incident <incident> --stage in-development --implementation-issue <requirement>
+python skills/multica-workflow-observer/scripts/observer.py record-maintenance-progress --incident <incident> --stage fix-ready --requirement-issue <requirement> --integration-validation-issue <validation-issue> --pr-number <number> --merge-commit-sha <sha>
+python skills/multica-workflow-observer/scripts/observer.py record-maintenance-progress --incident <incident> --stage release-recorded --release-version <v-version> --release-source-commit <sha> --release-request-digest <digest>
+python skills/multica-workflow-observer/scripts/observer.py record-maintenance-progress --incident <incident> --stage deployment-recorded --deployment-target <workspace-id-or-slug> --deployment-plan-digest <digest> --deployment-journal <apply-journal.json>
+```
+
+The deployment journal must be the completed journal produced by `workflow.py apply` and must reference its immutable plan-digest Workspace deployment record. Only the assigned Observer identity may then run `verify-fix`. A failed verification keeps the Case open for correction; a passed verification closes the Case and Incident and restores any source Issues that were blocked by that Incident.
 
 ## Future Components
 

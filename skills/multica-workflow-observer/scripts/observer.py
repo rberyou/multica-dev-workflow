@@ -37,6 +37,30 @@ PHASE1_OPERATION_TYPES = {
     "observer_control",
     "maintenance_case",
 }
+OBSERVATION_MAX_ATTEMPTS = 5
+OBSERVATION_STATUSES = {"pending", "processing", "processed", "failed", "quarantined"}
+INCIDENT_STATUSES = {
+    "new",
+    "triaging",
+    "awaiting_maintenance_decision",
+    "maintenance_approved",
+    "in_fix",
+    "awaiting_verification",
+    "resolved",
+    "routed",
+    "deferred",
+    "false_positive",
+    "blocked",
+}
+MAINTENANCE_CASE_STATUSES = {
+    "approved",
+    "in_development",
+    "fix_ready",
+    "awaiting_deployment",
+    "awaiting_observer_verification",
+    "completed",
+    "blocked",
+}
 TRIAGE_VERDICTS = {
     "CONFIRMED_WORKFLOW_BUG",
     "WORKFLOW_GAP",
@@ -330,6 +354,14 @@ def metadata_string_list(value: Any) -> list[str]:
         if isinstance(parsed, list):
             return [str(item) for item in parsed if str(item)]
     return []
+
+
+def nonnegative_int(value: Any, default: int = 0) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed >= 0 else default
 
 
 def deep_find(value: Any, key: str) -> Any:
@@ -985,9 +1017,18 @@ def bind_workflow_issue(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
         raise ObserverError(
             "Issue workflow_instance_id conflicts with its Project Registration"
         )
-    root_requirement_id = args.root_requirement_id or str(
-        current.get("root_requirement_id") or issue_id
-    )
+    resolved_root_id, _, _ = resolve_requirement_context(cli, issue, current)
+    requested_root_id = str(args.root_requirement_id or "")
+    existing_root_id = str(current.get("root_requirement_id") or "")
+    if requested_root_id and requested_root_id != resolved_root_id:
+        raise ObserverError(
+            "root_requirement_id conflicts with the Issue parent chain"
+        )
+    if existing_root_id and existing_root_id != resolved_root_id:
+        raise ObserverError(
+            "existing root_requirement_id conflicts with the Issue parent chain"
+        )
+    root_requirement_id = resolved_root_id
     values = {
         "managed_by": MANAGED_BY,
         "workflow_id": WORKFLOW_ID,
@@ -1000,6 +1041,10 @@ def bind_workflow_issue(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
             registration_metadata.get("protocol_revision") or "v3"
         ),
     }
+    for key, value in values.items():
+        existing = current.get(key)
+        if existing not in {None, ""} and str(existing) != str(value):
+            raise ObserverError(f"existing {key} conflicts with the requested binding")
     set_metadata_map(cli, issue_id, values)
     return {
         "issue_id": issue_id,
@@ -1102,13 +1147,20 @@ def report_anomaly(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
     ):
         raise ObserverError("Reporter identity is not registered for this project")
     payload_digest = sha256_value(payload)
-    matches = operation_records(
-        cli, str(operations_project["id"]), "observation"
+    matches = list_issues(
+        cli, project_id=str(operations_project["id"]), max_issues=5000
     )
     observations = []
+    full_marker = f"[obs:{fingerprint}]"
+    legacy_marker = f"[obs:{fingerprint[:12]}]"
     for item in matches:
         metadata = record_metadata(cli, item)
-        if str(metadata.get("observation_fingerprint") or "") == fingerprint:
+        title = str(item.get("title") or "")
+        if (
+            str(metadata.get("observation_fingerprint") or "") == fingerprint
+            or full_marker in title
+            or legacy_marker in title
+        ):
             observations.append((item, metadata))
     if len(observations) > 1:
         raise ObserverError("multiple Observations share the same fingerprint")
@@ -1116,9 +1168,16 @@ def report_anomaly(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
         observation, existing_metadata = observations[0]
         observation_id = issue_ref(observation)
         action = "updated"
-        same_payload = str(existing_metadata.get("payload_digest") or "") == payload_digest
+        same_payload = (
+            str(existing_metadata.get("payload_digest") or "") == payload_digest
+        )
         status = str(existing_metadata.get("observation_status") or "pending")
         next_status = status if same_payload else "pending"
+        attempt_count = (
+            nonnegative_int(existing_metadata.get("attempt_count"))
+            if same_payload
+            else 0
+        )
     else:
         observation = cli.json(
             [
@@ -1127,7 +1186,7 @@ def report_anomaly(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
                 "--title",
                 (
                     f"[Workflow Observation][{args.severity}]"
-                    f"[obs:{fingerprint[:12]}] {redacted_text(args.summary, 160)}"
+                    f"{full_marker} {redacted_text(args.summary, 120)}"
                 ),
                 "--description-stdin",
                 "--project",
@@ -1146,6 +1205,7 @@ def report_anomaly(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
         observation_id = issue_ref(observation)
         action = "created"
         next_status = "pending"
+        attempt_count = 0
     if not observation_id:
         raise ObserverError("Observation did not return an Issue ID")
     now = utc_now()
@@ -1167,9 +1227,7 @@ def report_anomaly(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
             "observation_payload": json.dumps(payload, ensure_ascii=False, sort_keys=True),
             "observation_status": next_status,
             "status": next_status,
-            "attempt_count": int(
-                (observations[0][1] if observations else {}).get("attempt_count") or 0
-            ),
+            "attempt_count": attempt_count,
             "last_error": "",
             "first_seen_at": (
                 (observations[0][1] if observations else {}).get("first_seen_at")
@@ -1195,7 +1253,7 @@ def report_anomaly(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
         set_metadata(cli, observation_id, "source_marker_error", warnings[-1])
     awakened = False
     if (
-        next_status != "processed"
+        next_status in {"pending", "failed"}
         and args.severity in {"high", "urgent"}
         and not getattr(args, "no_wake", False)
     ):
@@ -1215,6 +1273,72 @@ def report_anomaly(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
         "observer_awakened": awakened,
         "warnings": warnings,
     }
+
+
+def block_source_issue(
+    cli: CLI,
+    source: dict[str, Any],
+    source_id: str,
+    incident_id: str,
+    reason: str,
+) -> bool:
+    metadata = metadata_map(cli, source_id)
+    status = str(source.get("status") or "")
+    owner = str(metadata.get("workflow_blocked_by_incident_id") or "")
+    if status == "blocked" and owner not in {"", incident_id}:
+        return False
+    if status != "blocked":
+        set_metadata(cli, source_id, "workflow_blocked_previous_status", status or "todo")
+    set_metadata(cli, source_id, "workflow_blocked_by_incident_id", incident_id)
+    set_metadata(cli, source_id, "waiting_on", "workflow_fix")
+    set_metadata(cli, source_id, "blocked_reason", reason)
+    if status != "blocked":
+        cli.json(
+            ["issue", "update", source_id, "--status", "blocked", "--output", "json"]
+        )
+    return True
+
+
+def restore_incident_sources(
+    cli: CLI, incident_id: str, incident_metadata: dict[str, Any]
+) -> list[str]:
+    restored = []
+    for source_id in metadata_string_list(
+        incident_metadata.get("incident_blocked_source_ids")
+    ):
+        source = cli.json(["issue", "get", source_id, "--output", "json"])
+        if not isinstance(source, dict):
+            raise ObserverError(f"blocked source Issue is unreadable: {source_id}")
+        metadata = metadata_map(cli, issue_ref(source) or source_id)
+        if str(metadata.get("workflow_blocked_by_incident_id") or "") != incident_id:
+            continue
+        previous = str(metadata.get("workflow_blocked_previous_status") or "todo")
+        if previous not in ALL_ISSUE_STATUSES or previous == "blocked":
+            previous = "todo"
+        if str(source.get("status") or "") == "blocked":
+            cli.json(
+                [
+                    "issue",
+                    "update",
+                    source_id,
+                    "--status",
+                    previous,
+                    "--output",
+                    "json",
+                ]
+            )
+        set_metadata_map(
+            cli,
+            source_id,
+            {
+                "workflow_blocked_by_incident_id": "",
+                "workflow_blocked_previous_status": "",
+                "waiting_on": "",
+                "blocked_reason": "",
+            },
+        )
+        restored.append(source_id)
+    return restored
 
 
 def incident_fingerprint(dedupe_key: str) -> str:
@@ -1374,6 +1498,20 @@ def report_incident(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
         action = "created"
 
     current_incident_meta = metadata_map(cli, incident_id)
+    current_logical_status = str(
+        current_incident_meta.get("logical_status")
+        or current_incident_meta.get("incident_status")
+        or ""
+    )
+    if (
+        incident
+        and str(incident.get("status") or "") in ACTIVE_STATUSES
+        and current_logical_status in {"resolved", "false_positive"}
+    ):
+        # A prior attempt may have reopened the physical Issue and then failed
+        # before resetting the logical state. Treat that durable split state as
+        # the same reopen operation so triage is not permanently blocked.
+        reopened = True
     previous_requirements = set(
         metadata_string_list(current_incident_meta.get("incident_source_requirements"))
     )
@@ -1388,7 +1526,9 @@ def report_incident(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
     cooldown_hours = int(getattr(args, "notification_cooldown_hours", 24))
     deterministic_confirmation = bool(getattr(args, "deterministic_confirmation", False))
     blocked_requirement_count = int(getattr(args, "blocked_requirement_count", 0) or 0)
-    previous_blocked_count = int(current_incident_meta.get("incident_blocked_requirement_count") or 0)
+    previous_blocked_count = nonnegative_int(
+        current_incident_meta.get("incident_blocked_requirement_count")
+    )
     now = datetime.now(timezone.utc)
     notification_due = bool(
         action == "created"
@@ -1446,6 +1586,11 @@ def report_incident(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
             }
         )
     evidence_log = evidence_log[-20:]
+    blocked_source_ids = set(
+        metadata_string_list(current_incident_meta.get("incident_blocked_source_ids"))
+    )
+    if args.block_source:
+        blocked_source_ids.add(source_id)
     metadata = {
         "workflow_object_type": "incident",
         "workflow_id": WORKFLOW_ID,
@@ -1469,9 +1614,13 @@ def report_incident(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
         "human_approver_id": approver_id,
         "workflow_version": version,
         "protocol_revision": protocol,
-        "waiting_on": "workflow_observer",
-        "incident_evidence_count": int(
-            current_incident_meta.get("incident_evidence_count") or 0
+        "waiting_on": (
+            "workflow_observer"
+            if action == "created" or reopened
+            else str(current_incident_meta.get("waiting_on") or "workflow_observer")
+        ),
+        "incident_evidence_count": nonnegative_int(
+            current_incident_meta.get("incident_evidence_count")
         )
         + (1 if evidence_is_new else 0),
         "incident_last_seen_at": seen_at,
@@ -1483,6 +1632,9 @@ def report_incident(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
         "incident_sources_truncated": sources_truncated
         or str(current_incident_meta.get("incident_sources_truncated")).lower()
         == "true",
+        "incident_blocked_source_ids": json.dumps(
+            sorted(blocked_source_ids), ensure_ascii=False
+        ),
     }
     if notification_due:
         metadata["incident_last_notified_at"] = seen_at
@@ -1502,9 +1654,13 @@ def report_incident(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
             f"WORKFLOW INCIDENT {action.upper()}: {incident_id} (`{args.rule_id}`, {effective_severity})",
         )
     if args.block_source:
-        cli.json(["issue", "update", source_id, "--status", "blocked", "--output", "json"])
-        set_metadata(cli, source_id, "waiting_on", "workflow_fix")
-        set_metadata(cli, source_id, "blocked_reason", f"workflow incident {incident_id}: {safe_summary}")
+        block_source_issue(
+            cli,
+            source,
+            source_id,
+            incident_id,
+            f"workflow incident {incident_id}: {safe_summary}",
+        )
     set_metadata(cli, source_id, "workflow_incident_pending_payload", "")
     set_metadata(cli, source_id, "workflow_incident_pending_index", "")
     set_metadata(cli, source_id, "workflow_incident_pending", False)
@@ -1535,7 +1691,7 @@ def process_observation(cli: CLI, observation: dict[str, Any]) -> dict[str, Any]
         "protocol_revision",
     ]
     missing = [key for key in required if payload.get(key) in {None, ""}]
-    attempts = int(metadata.get("attempt_count") or 0) + 1
+    attempts = nonnegative_int(metadata.get("attempt_count")) + 1
     set_metadata_map(
         cli,
         observation_id,
@@ -1622,16 +1778,31 @@ def process_observation(cli: CLI, observation: dict[str, Any]) -> dict[str, Any]
             "incident_id": incident["incident_id"],
         }
     except ObserverError as exc:
+        next_status = (
+            "quarantined"
+            if attempts >= OBSERVATION_MAX_ATTEMPTS
+            else "failed"
+        )
+        failed_at = utc_now()
         set_metadata_map(
             cli,
             observation_id,
             {
-                "observation_status": "failed",
-                "status": "failed",
+                "observation_status": next_status,
+                "status": next_status,
                 "last_error": redacted_text(exc, 1000),
+                "failed_at": failed_at,
+                "retry_exhausted": next_status == "quarantined",
+                "quarantined_at": failed_at if next_status == "quarantined" else "",
             },
         )
-        raise
+        return {
+            "observation_id": observation_id,
+            "action": next_status,
+            "status": next_status,
+            "attempt_count": attempts,
+            "error": redacted_text(exc, 1000),
+        }
 
 
 def observer_control(
@@ -1918,7 +2089,69 @@ def scan(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
                 or ""
             )
             if status in {"pending", "processing", "failed"}:
-                processed_observations.append(process_observation(cli, observation))
+                try:
+                    processed_observations.append(
+                        process_observation(cli, observation)
+                    )
+                except ObserverError as exc:
+                    error = redacted_text(exc, 1000)
+                    next_status = "failed"
+                    attempts = 0
+                    try:
+                        current_observation = metadata_map(cli, issue_ref(observation))
+                        attempts = nonnegative_int(
+                            current_observation.get("attempt_count")
+                        )
+                        next_status = (
+                            "quarantined"
+                            if attempts >= OBSERVATION_MAX_ATTEMPTS
+                            else "failed"
+                        )
+                        set_metadata_map(
+                            cli,
+                            issue_ref(observation),
+                            {
+                                "observation_status": next_status,
+                                "status": next_status,
+                                "last_error": error,
+                                "failed_at": utc_now(),
+                                "retry_exhausted": next_status == "quarantined",
+                            },
+                        )
+                    except ObserverError:
+                        pass
+                    processed_observations.append(
+                        {
+                            "observation_id": issue_ref(observation),
+                            "action": next_status,
+                            "status": next_status,
+                            "attempt_count": attempts,
+                            "error": error,
+                        }
+                    )
+        observation_failures = [
+            item
+            for item in processed_observations
+            if item.get("status") in {"failed", "quarantined"}
+        ]
+        observation_quarantines = [
+            item
+            for item in processed_observations
+            if item.get("status") == "quarantined"
+        ]
+        operation_issues = list_issues(
+            cli,
+            project_id=str(operations_project["id"]),
+            max_issues=args.max_issues,
+        )
+        for operation_issue in operation_issues:
+            findings.extend(
+                audit_operation_issue(
+                    cli,
+                    operation_issue,
+                    record_metadata(cli, operation_issue),
+                )
+            )
         renew_scan_lease(cli, control_id, lease_owner, args.lease_minutes)
         for registration in registrations_for_instance:
             renew_scan_lease(cli, control_id, lease_owner, args.lease_minutes)
@@ -1978,6 +2211,8 @@ def scan(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
             "last_success_at": completed_at,
             "scanned_count": scanned_count,
             "finding_count": len(findings),
+            "observation_failure_count": len(observation_failures),
+            "observation_quarantine_count": len(observation_quarantines),
             "status": "success",
             "error": "",
             "lease_owner": "",
@@ -1994,6 +2229,7 @@ def scan(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
             "findings": findings,
             "reported": reported,
             "processed_observations": processed_observations,
+            "observation_failures": observation_failures,
             "registrations": len(registrations),
             "scan_upper_bound": upper_bound.isoformat().replace("+00:00", "Z"),
         }
@@ -2032,10 +2268,6 @@ def triage_incident(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
     current_status = str(
         metadata.get("logical_status") or metadata.get("incident_status") or "new"
     )
-    if current_status not in {"new", "triaging", "blocked", "routed", "deferred"}:
-        raise ObserverError(
-            f"Incident cannot be triaged from logical status {current_status}"
-        )
     if verdict in {"CONFIRMED_WORKFLOW_BUG", "WORKFLOW_GAP"}:
         logical_status = "awaiting_maintenance_decision"
         waiting_on = "maintenance_decision"
@@ -2052,12 +2284,41 @@ def triage_incident(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
         logical_status = "routed"
         waiting_on = verdict.lower()
         issue_status = "in_review"
+    if current_status == logical_status and str(metadata.get("verdict") or "") == verdict:
+        if str(issue.get("status") or "") != issue_status:
+            cli.json(
+                [
+                    "issue",
+                    "update",
+                    incident_id,
+                    "--status",
+                    issue_status,
+                    "--output",
+                    "json",
+                ]
+            )
+        restored = (
+            restore_incident_sources(cli, incident_id, metadata)
+            if logical_status == "false_positive"
+            else []
+        )
+        return {
+            "incident_id": incident_id,
+            "previous_status": current_status,
+            "status": logical_status,
+            "verdict": verdict,
+            "waiting_on": waiting_on,
+            "action": "reused",
+            "restored_source_issue_ids": restored,
+        }
+    if current_status not in {"new", "triaging", "blocked", "routed", "deferred"}:
+        raise ObserverError(
+            f"Incident cannot be triaged from logical status {current_status}"
+        )
     set_metadata_map(
         cli,
         incident_id,
         {
-            "incident_status": logical_status,
-            "logical_status": logical_status,
             "verdict": verdict,
             "triage_reason": redacted_text(args.reason or "", 1000),
             "triaged_at": utc_now(),
@@ -2076,18 +2337,33 @@ def triage_incident(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
                 "json",
             ]
         )
+    set_metadata_map(
+        cli,
+        incident_id,
+        {
+            "incident_status": logical_status,
+            "logical_status": logical_status,
+        },
+    )
     if args.reason:
         add_comment(
             cli,
             incident_id,
             f"Observer triage: `{verdict}`\n\n{redacted_text(args.reason, 2000)}",
         )
+    restored = (
+        restore_incident_sources(cli, incident_id, metadata)
+        if logical_status == "false_positive"
+        else []
+    )
     return {
         "incident_id": incident_id,
         "previous_status": current_status,
         "status": logical_status,
         "verdict": verdict,
         "waiting_on": waiting_on,
+        "action": "updated",
+        "restored_source_issue_ids": restored,
     }
 
 
@@ -2137,48 +2413,67 @@ def prepare_maintenance_decision(cli: CLI, args: argparse.Namespace) -> dict[str
     intake = maintenance_intake(incident_id, metadata)
     digest = sha256_value(intake)
     short_digest = digest[:16]
+    current_status = str(
+        metadata.get("logical_status") or metadata.get("incident_status") or ""
+    )
+    if current_status != "awaiting_maintenance_decision":
+        raise ObserverError(
+            f"maintenance decision cannot be prepared from logical status {current_status}"
+        )
     action = (
         "reused"
         if str(metadata.get("maintenance_intake_digest") or "") == digest
-        and str(
-            metadata.get("logical_status") or metadata.get("incident_status") or ""
-        )
-        == "awaiting_maintenance_decision"
         else "prepared"
     )
-    set_metadata_map(
-        cli,
-        incident_id,
-        {
-            "maintenance_intake_digest": digest,
-            "maintenance_intake_summary": json.dumps(
-                intake, ensure_ascii=False, sort_keys=True
-            ),
-            "incident_status": "awaiting_maintenance_decision",
-            "logical_status": "awaiting_maintenance_decision",
-            "waiting_on": "maintenance_decision",
-            "maintenance_decision_requested_at": utc_now(),
-        },
-    )
+    approve_command = f"APPROVE WORKFLOW MAINTENANCE {short_digest}"
+    defer_command = f"DEFER WORKFLOW MAINTENANCE {short_digest}"
     if action == "prepared":
+        set_metadata_map(
+            cli,
+            incident_id,
+            {
+                "maintenance_intake_digest": digest,
+                "maintenance_intake_summary": json.dumps(
+                    intake, ensure_ascii=False, sort_keys=True
+                ),
+                "incident_status": "awaiting_maintenance_decision",
+                "logical_status": "awaiting_maintenance_decision",
+                "waiting_on": "maintenance_decision",
+                "maintenance_decision_requested_at": utc_now(),
+            },
+        )
+    comments = as_list(
+        cli.json(
+            ["issue", "comment", "list", incident_id, "--full", "--output", "json"]
+        ),
+        "comments",
+    )
+    prompt_exists = any(
+        approve_command in str(comment.get("content") or "")
+        and defer_command in str(comment.get("content") or "")
+        for comment in comments
+    )
+    if not prompt_exists:
         add_comment(
             cli,
             incident_id,
             (
                 "Maintenance decision required. Use exactly one command:\n\n"
-                f"`APPROVE WORKFLOW MAINTENANCE {short_digest}`\n\n"
-                f"`DEFER WORKFLOW MAINTENANCE {short_digest}` with `reason=` and "
+                f"`{approve_command}`\n\n"
+                f"`{defer_command}` with `reason=` and "
                 "`next_review_at=` lines."
             ),
         )
+        if action == "reused":
+            action = "repaired"
     return {
         "action": action,
         "incident_id": incident_id,
         "maintenance_intake": intake,
         "digest": digest,
         "short_digest": short_digest,
-        "approve": f"APPROVE WORKFLOW MAINTENANCE {short_digest}",
-        "defer": f"DEFER WORKFLOW MAINTENANCE {short_digest}",
+        "approve": approve_command,
+        "defer": defer_command,
     }
 
 
@@ -2233,7 +2528,7 @@ def decision_comment(
             continue
         author_id, author_type = comment_author(comment)
         if author_id != approver_id or author_type not in {"member", "user"}:
-            raise ObserverError("maintenance decision was not authored by the human approver")
+            continue
         fields = {}
         for line in lines[1:]:
             if "=" not in line:
@@ -2287,6 +2582,13 @@ def record_maintenance_decision(cli: CLI, args: argparse.Namespace) -> dict[str,
         args.comment_id,
     )
     comment_id = str(comment.get("id") or "")
+    current_status = str(
+        metadata.get("logical_status") or metadata.get("incident_status") or ""
+    )
+    if args.executor not in {None, "", "ordinary_development_workflow"}:
+        raise ObserverError(
+            "Phase 1 Maintenance Cases must use ordinary_development_workflow"
+        )
     if decision == "DEFER":
         reason = fields.get("reason", "")
         next_review_at = fields.get("next_review_at", "")
@@ -2295,12 +2597,26 @@ def record_maintenance_decision(cli: CLI, args: argparse.Namespace) -> dict[str,
             raise ObserverError("deferred maintenance requires reason and next_review_at")
         if review_time <= datetime.now(timezone.utc):
             raise ObserverError("deferred maintenance next_review_at must be in the future")
+        if current_status == "deferred":
+            if (
+                str(metadata.get("maintenance_decision_comment_id") or "")
+                != comment_id
+            ):
+                raise ObserverError("Incident was deferred by a different decision")
+            return {
+                "incident_id": incident_id,
+                "decision": "deferred",
+                "next_review_at": str(metadata.get("next_review_at") or next_review_at),
+                "action": "reused",
+            }
+        if current_status != "awaiting_maintenance_decision":
+            raise ObserverError(
+                f"maintenance cannot be deferred from logical status {current_status}"
+            )
         set_metadata_map(
             cli,
             incident_id,
             {
-                "incident_status": "deferred",
-                "logical_status": "deferred",
                 "waiting_on": "maintenance_review_date",
                 "maintenance_decision": "deferred",
                 "maintenance_decision_comment_id": comment_id,
@@ -2308,10 +2624,16 @@ def record_maintenance_decision(cli: CLI, args: argparse.Namespace) -> dict[str,
                 "next_review_at": next_review_at,
             },
         )
+        set_metadata_map(
+            cli,
+            incident_id,
+            {"incident_status": "deferred", "logical_status": "deferred"},
+        )
         return {
             "incident_id": incident_id,
             "decision": "deferred",
             "next_review_at": next_review_at,
+            "action": "updated",
         }
     cases = find_maintenance_case(cli, str(operations_project["id"]), incident_id)
     if len(cases) > 1:
@@ -2342,26 +2664,74 @@ def record_maintenance_decision(cli: CLI, args: argparse.Namespace) -> dict[str,
     case_id = issue_ref(case)
     if not case_id:
         raise ObserverError("Maintenance Case did not return an Issue ID")
+    case_metadata = metadata_map(cli, case_id)
+    expected_case = {
+        "workflow_object_type": "maintenance_case",
+        "workflow_id": WORKFLOW_ID,
+        "incident_id": incident_id,
+        "maintenance_intake_digest": digest,
+        "approval_comment_id": comment_id,
+        "human_approver_id": str(metadata.get("human_approver_id") or ""),
+        "executor": "ordinary_development_workflow",
+    }
+    for key, value in expected_case.items():
+        existing = case_metadata.get(key)
+        if existing not in {None, ""} and str(existing) != str(value):
+            raise ObserverError(f"existing Maintenance Case {key} conflicts with approval")
+    if current_status in {
+        "maintenance_approved",
+        "in_fix",
+        "awaiting_verification",
+        "resolved",
+    }:
+        if str(metadata.get("maintenance_case_id") or "") != case_id:
+            raise ObserverError("Incident is bound to a different Maintenance Case")
+        return {
+            "incident_id": incident_id,
+            "decision": "approved",
+            "maintenance_case_id": case_id,
+            "action": "reused",
+        }
+    if current_status != "awaiting_maintenance_decision":
+        raise ObserverError(
+            f"maintenance cannot be approved from logical status {current_status}"
+        )
+    defaults = {
+        **expected_case,
+        "implementation_issue_ids": "[]",
+        "pr_number": "",
+        "merge_commit_sha": "",
+        "release_version": "",
+        "deployment_target": "",
+        "observer_verification_id": "",
+    }
     set_metadata_map(
         cli,
         case_id,
         {
-            "workflow_object_type": "maintenance_case",
-            "workflow_id": WORKFLOW_ID,
-            "incident_id": incident_id,
-            "maintenance_intake_digest": digest,
-            "approval_comment_id": comment_id,
-            "human_approver_id": str(metadata.get("human_approver_id") or ""),
-            "executor": args.executor or "ordinary_development_workflow",
-            "maintenance_case_status": "approved",
-            "logical_status": "approved",
-            "implementation_issue_ids": "[]",
-            "pr_number": "",
-            "merge_commit_sha": "",
-            "release_version": "",
-            "deployment_target": "",
-            "observer_verification_id": "",
+            key: value
+            for key, value in defaults.items()
+            if case_metadata.get(key) in {None, ""}
         },
+    )
+    cli.json(["issue", "update", case_id, "--status", "todo", "--output", "json"])
+    set_metadata_map(
+        cli,
+        case_id,
+        {"maintenance_case_status": "approved", "logical_status": "approved"},
+    )
+    set_metadata_map(
+        cli,
+        incident_id,
+        {
+            "waiting_on": "ordinary_development_workflow",
+            "maintenance_decision": "approved",
+            "maintenance_decision_comment_id": comment_id,
+            "maintenance_case_id": case_id,
+        },
+    )
+    cli.json(
+        ["issue", "update", incident_id, "--status", "in_review", "--output", "json"]
     )
     set_metadata_map(
         cli,
@@ -2369,10 +2739,6 @@ def record_maintenance_decision(cli: CLI, args: argparse.Namespace) -> dict[str,
         {
             "incident_status": "maintenance_approved",
             "logical_status": "maintenance_approved",
-            "waiting_on": "ordinary_development_workflow",
-            "maintenance_decision": "approved",
-            "maintenance_decision_comment_id": comment_id,
-            "maintenance_case_id": case_id,
         },
     )
     return {
@@ -2383,117 +2749,638 @@ def record_maintenance_decision(cli: CLI, args: argparse.Namespace) -> dict[str,
     }
 
 
-def verify_fix(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
-    issue, metadata = load_incident(cli, args.incident)
-    incident_id = issue_ref(issue) or args.incident
-    case_id = str(metadata.get("maintenance_case_id") or "")
+def maintenance_case_for_incident(
+    cli: CLI, incident_id: str, incident_metadata: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any], str]:
+    case_id = str(incident_metadata.get("maintenance_case_id") or "")
     if not case_id:
         raise ObserverError("Incident has no approved Maintenance Case")
     case = cli.json(["issue", "get", case_id, "--output", "json"])
-    case_metadata = metadata_map(cli, issue_ref(case) or case_id)
+    if not isinstance(case, dict):
+        raise ObserverError("Maintenance Case is unreadable")
+    canonical_case_id = issue_ref(case) or case_id
+    case_metadata = metadata_map(cli, canonical_case_id)
     if str(case_metadata.get("workflow_object_type") or "") != "maintenance_case":
         raise ObserverError("Maintenance Case is unreadable or invalid")
     if str(case_metadata.get("incident_id") or "") != incident_id:
         raise ObserverError("Maintenance Case is not bound to this Incident")
-    approved_digest = str(metadata.get("maintenance_intake_digest") or "")
+    if str(case_metadata.get("executor") or "") != "ordinary_development_workflow":
+        raise ObserverError(
+            "Phase 1 Maintenance Case must use ordinary_development_workflow"
+        )
+    return case, case_metadata, canonical_case_id
+
+
+def compatible_evidence(
+    current: dict[str, Any], desired: dict[str, Any], label: str
+) -> None:
+    for key, value in desired.items():
+        existing = current.get(key)
+        if existing not in {None, ""} and str(existing) != str(value):
+            raise ObserverError(f"{label} {key} conflicts with existing evidence")
+
+
+def maintenance_attempt_record(metadata: dict[str, Any]) -> dict[str, Any]:
+    fields = [
+        "requirement_issue_id",
+        "review_issue_id",
+        "pr_number",
+        "merge_commit_sha",
+        "fix_ready_at",
+        "release_version",
+        "release_source_commit",
+        "release_request_digest",
+        "release_recorded_at",
+        "deployment_target",
+        "deployment_plan_digest",
+        "deployment_journal_sha256",
+        "deployment_record_sha256",
+        "deployed_version",
+        "deployed_at",
+        "verification_result",
+        "verification_evidence",
+        "observer_verification_id",
+        "verified_at",
+    ]
+    return {
+        key: metadata[key]
+        for key in fields
+        if metadata.get(key) not in {None, ""}
+    }
+
+
+def record_maintenance_progress(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
+    incident, incident_metadata = load_incident(cli, args.incident)
+    incident_id = issue_ref(incident) or args.incident
+    case, case_metadata, case_id = maintenance_case_for_incident(
+        cli, incident_id, incident_metadata
+    )
+    approved_digest = str(incident_metadata.get("maintenance_intake_digest") or "")
     if not approved_digest or str(
         case_metadata.get("maintenance_intake_digest") or ""
     ) != approved_digest:
         raise ObserverError("Maintenance Case approval scope differs from the Incident")
-    if str(
+    caller_id = os.environ.get("MULTICA_AGENT_ID")
+    if caller_id and caller_id == str(incident_metadata.get("observer_id") or ""):
+        raise ObserverError("Observer cannot record ordinary development progress")
+    case_status = str(
         case_metadata.get("logical_status")
         or case_metadata.get("maintenance_case_status")
         or ""
-    ) not in {
-        "fix_ready",
-        "awaiting_deployment",
-        "awaiting_observer_verification",
-    }:
-        raise ObserverError("Maintenance Case is not ready for Observer verification")
-    caller_id = os.environ.get("MULTICA_AGENT_ID")
-    if caller_id and metadata.get("observer_id") and caller_id != metadata.get("observer_id"):
-        raise ObserverError("fix verification must be performed by the assigned Observer")
-    evidence = redacted_text(args.evidence, 2000)
-    verified_at = utc_now()
-    if args.result == "failed":
+    )
+    incident_status = str(
+        incident_metadata.get("logical_status")
+        or incident_metadata.get("incident_status")
+        or ""
+    )
+    now = utc_now()
+    stage = args.stage
+
+    if stage == "in-development":
+        if case_status not in {"approved", "in_development"}:
+            raise ObserverError(
+                f"development cannot start from Maintenance Case status {case_status}"
+            )
+        implementation_ids = sorted(
+            set(metadata_string_list(case_metadata.get("implementation_issue_ids")))
+            | set(args.implementation_issue or [])
+        )
+        if not implementation_ids:
+            raise ObserverError(
+                "development start requires at least one implementation Issue"
+            )
+        set_metadata_map(
+            cli,
+            case_id,
+            {
+                "implementation_issue_ids": json.dumps(
+                    implementation_ids, ensure_ascii=False
+                ),
+                "development_started_at": str(
+                    case_metadata.get("development_started_at") or now
+                ),
+            },
+        )
+        cli.json(
+            ["issue", "update", case_id, "--status", "in_progress", "--output", "json"]
+        )
         set_metadata_map(
             cli,
             case_id,
             {
                 "maintenance_case_status": "in_development",
                 "logical_status": "in_development",
-                "verification_result": "failed",
-                "verification_evidence": evidence,
-                "observer_verification_id": str(uuid.uuid4()),
             },
+        )
+        set_metadata(cli, incident_id, "waiting_on", "ordinary_development_workflow")
+        cli.json(
+            [
+                "issue",
+                "update",
+                incident_id,
+                "--status",
+                "in_progress",
+                "--output",
+                "json",
+            ]
+        )
+        set_metadata_map(
+            cli,
+            incident_id,
+            {"incident_status": "in_fix", "logical_status": "in_fix"},
+        )
+        target_status = "in_development"
+    elif stage == "fix-ready":
+        if case_status not in {"in_development", "fix_ready"}:
+            raise ObserverError(
+                f"fix cannot be recorded from Maintenance Case status {case_status}"
+            )
+        if not all(
+            [
+                args.requirement_issue,
+                args.integration_validation_issue,
+                args.pr_number,
+                args.merge_commit_sha,
+            ]
+        ):
+            raise ObserverError(
+                "fix-ready requires Requirement, integration-validation, PR and merge commit evidence"
+            )
+        if not re.fullmatch(r"[a-f0-9]{40,64}", args.merge_commit_sha):
+            raise ObserverError("merge_commit_sha is invalid")
+        if not re.fullmatch(r"[1-9][0-9]*", str(args.pr_number)):
+            raise ObserverError("pr_number is invalid")
+        implementation_ids = sorted(
+            set(metadata_string_list(case_metadata.get("implementation_issue_ids")))
+            | {
+                str(args.requirement_issue),
+                str(args.integration_validation_issue),
+            }
+        )
+        evidence = {
+            "implementation_issue_ids": json.dumps(
+                implementation_ids, ensure_ascii=False
+            ),
+            "requirement_issue_id": args.requirement_issue,
+            "review_issue_id": args.integration_validation_issue,
+            "pr_number": str(args.pr_number),
+            "merge_commit_sha": args.merge_commit_sha,
+        }
+        existing_implementation_ids = set(
+            metadata_string_list(case_metadata.get("implementation_issue_ids"))
+        )
+        if not existing_implementation_ids.issubset(set(implementation_ids)):
+            raise ObserverError(
+                "fix-ready implementation_issue_ids omit existing evidence"
+            )
+        if str(case_metadata.get("verification_result") or "") == "failed":
+            failed_attempt = maintenance_attempt_record(case_metadata)
+            verification_id = str(
+                failed_attempt.get("observer_verification_id") or ""
+            )
+            if not verification_id:
+                raise ObserverError(
+                    "failed verification is missing observer_verification_id"
+                )
+            history = parse_json_map_list(
+                case_metadata.get("maintenance_attempt_history")
+            )
+            if not any(
+                str(item.get("observer_verification_id") or "") == verification_id
+                for item in history
+            ):
+                history.append(failed_attempt)
+                set_metadata(
+                    cli,
+                    case_id,
+                    "maintenance_attempt_history",
+                    bounded_json_log(history),
+                )
+            set_metadata_map(
+                cli,
+                case_id,
+                {
+                    **evidence,
+                    "fix_ready_at": now,
+                    "release_version": "",
+                    "release_tag": "",
+                    "release_source_commit": "",
+                    "release_request_digest": "",
+                    "release_recorded_at": "",
+                    "deployment_target": "",
+                    "deployment_plan_digest": "",
+                    "deployment_journal_sha256": "",
+                    "deployment_record_sha256": "",
+                    "deployed_version": "",
+                    "deployed_at": "",
+                    "verification_evidence": "",
+                    "observer_verification_id": "",
+                    "verified_at": "",
+                    "verification_comment_error": "",
+                    "verification_result": "",
+                },
+            )
+        else:
+            compatible_evidence(
+                case_metadata,
+                {
+                    key: value
+                    for key, value in evidence.items()
+                    if key != "implementation_issue_ids"
+                },
+                "fix-ready",
+            )
+            set_metadata_map(cli, case_id, {**evidence, "fix_ready_at": now})
+        cli.json(
+            ["issue", "update", case_id, "--status", "in_review", "--output", "json"]
+        )
+        set_metadata_map(
+            cli,
+            case_id,
+            {"maintenance_case_status": "fix_ready", "logical_status": "fix_ready"},
+        )
+        set_metadata(cli, incident_id, "waiting_on", "release")
+        cli.json(
+            ["issue", "update", incident_id, "--status", "in_review", "--output", "json"]
         )
         set_metadata_map(
             cli,
             incident_id,
             {
-                "incident_status": "in_fix",
-                "logical_status": "in_fix",
-                "waiting_on": "ordinary_development_workflow",
+                "incident_status": "awaiting_verification",
+                "logical_status": "awaiting_verification",
             },
         )
-        add_comment(cli, incident_id, f"Observer verification failed.\n\n{evidence}")
-        return {"incident_id": incident_id, "result": "failed"}
+        target_status = "fix_ready"
+    elif stage == "release-recorded":
+        if case_status not in {"fix_ready", "awaiting_deployment"}:
+            raise ObserverError(
+                f"release cannot be recorded from Maintenance Case status {case_status}"
+            )
+        if not all(
+            [args.release_version, args.release_source_commit, args.release_request_digest]
+        ):
+            raise ObserverError(
+                "release-recorded requires version, source commit and Request digest"
+            )
+        if not re.fullmatch(r"v[^\s]+", args.release_version):
+            raise ObserverError("release_version must be a v-prefixed tag")
+        if not re.fullmatch(r"[a-f0-9]{40,64}", args.release_source_commit):
+            raise ObserverError("release_source_commit is invalid")
+        if not re.fullmatch(r"[a-f0-9]{64}", args.release_request_digest):
+            raise ObserverError("release_request_digest is invalid")
+        if str(case_metadata.get("merge_commit_sha") or "") != args.release_source_commit:
+            raise ObserverError("release source commit differs from the reviewed merge commit")
+        evidence = {
+            "release_version": args.release_version,
+            "release_tag": args.release_version,
+            "release_source_commit": args.release_source_commit,
+            "release_request_digest": args.release_request_digest,
+        }
+        compatible_evidence(case_metadata, evidence, "release")
+        set_metadata_map(cli, case_id, {**evidence, "release_recorded_at": now})
+        cli.json(
+            ["issue", "update", case_id, "--status", "in_review", "--output", "json"]
+        )
+        set_metadata_map(
+            cli,
+            case_id,
+            {
+                "maintenance_case_status": "awaiting_deployment",
+                "logical_status": "awaiting_deployment",
+            },
+        )
+        set_metadata(cli, incident_id, "waiting_on", "deployment")
+        if incident_status != "awaiting_verification":
+            set_metadata_map(
+                cli,
+                incident_id,
+                {
+                    "incident_status": "awaiting_verification",
+                    "logical_status": "awaiting_verification",
+                },
+            )
+        target_status = "awaiting_deployment"
+    else:
+        if case_status not in {
+            "awaiting_deployment",
+            "awaiting_observer_verification",
+        }:
+            raise ObserverError(
+                f"deployment cannot be recorded from Maintenance Case status {case_status}"
+            )
+        if not all(
+            [
+                args.deployment_target,
+                args.deployment_plan_digest,
+                args.deployment_journal,
+            ]
+        ):
+            raise ObserverError(
+                "deployment-recorded requires target, Plan digest and apply journal"
+            )
+        if not re.fullmatch(r"[a-f0-9]{64}", args.deployment_plan_digest):
+            raise ObserverError("deployment_plan_digest is invalid")
+        journal_path = Path(args.deployment_journal).expanduser().resolve()
+        try:
+            journal_bytes = journal_path.read_bytes()
+            journal = json.loads(journal_bytes.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ObserverError("deployment journal is unreadable") from exc
+        if not isinstance(journal, dict) or not journal.get("finished_at"):
+            raise ObserverError("deployment journal is incomplete")
+        if str(journal.get("plan_digest") or "") != args.deployment_plan_digest:
+            raise ObserverError("deployment journal Plan digest differs from the command")
+        release_source = str(case_metadata.get("release_source_commit") or "")
+        if not release_source or str(journal.get("source_commit") or "") != release_source:
+            raise ObserverError("deployment journal source commit differs from the release")
+        workspace = journal.get("workspace") if isinstance(journal.get("workspace"), dict) else {}
+        workspace_refs = {
+            str(workspace.get(key) or "") for key in ("id", "name", "slug")
+        } - {""}
+        if str(args.deployment_target) not in workspace_refs:
+            raise ObserverError("deployment target differs from the journal workspace")
+        deployment_record_ref = str(journal.get("deployment_record") or "")
+        if not deployment_record_ref:
+            raise ObserverError("deployment journal has no deployment record")
+        deployment_record_path = Path(deployment_record_ref).expanduser().resolve()
+        try:
+            deployment_record_bytes = deployment_record_path.read_bytes()
+            deployment_record = json.loads(deployment_record_bytes.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ObserverError("deployment record is unreadable") from exc
+        if not isinstance(deployment_record, dict):
+            raise ObserverError("deployment record is invalid")
+        record_workspace = (
+            deployment_record.get("workspace")
+            if isinstance(deployment_record.get("workspace"), dict)
+            else {}
+        )
+        record_workspace_refs = {
+            str(record_workspace.get(key) or "") for key in ("id", "name", "slug")
+        } - {""}
+        journal_actor = str(journal.get("applied_actor") or "")
+        record_actor = str(deployment_record.get("applied_actor") or "")
+        try:
+            recorded_journal_path = Path(
+                str(deployment_record.get("journal") or "")
+            ).expanduser().resolve()
+        except OSError as exc:
+            raise ObserverError("deployment record journal path is invalid") from exc
+        if (
+            deployment_record.get("schema_version") != 1
+            or str(deployment_record.get("plan_digest") or "")
+            != args.deployment_plan_digest
+            or str(deployment_record.get("source_commit") or "") != release_source
+            or str(args.deployment_target) not in record_workspace_refs
+            or recorded_journal_path != journal_path
+            or str(deployment_record.get("deployed_at") or "")
+            != str(journal.get("finished_at") or "")
+            or not journal_actor
+            or record_actor != journal_actor
+        ):
+            raise ObserverError("deployment record differs from the completed apply journal")
+        evidence = {
+            "deployment_target": args.deployment_target,
+            "deployment_plan_digest": args.deployment_plan_digest,
+            "deployment_journal_sha256": hashlib.sha256(journal_bytes).hexdigest(),
+            "deployment_record_sha256": hashlib.sha256(
+                deployment_record_bytes
+            ).hexdigest(),
+            "deployed_version": str(case_metadata.get("release_version") or ""),
+        }
+        compatible_evidence(case_metadata, evidence, "deployment")
+        set_metadata_map(cli, case_id, {**evidence, "deployed_at": now})
+        cli.json(
+            ["issue", "update", case_id, "--status", "in_review", "--output", "json"]
+        )
+        set_metadata_map(
+            cli,
+            case_id,
+            {
+                "maintenance_case_status": "awaiting_observer_verification",
+                "logical_status": "awaiting_observer_verification",
+            },
+        )
+        set_metadata(cli, incident_id, "waiting_on", "observer_verification")
+        set_metadata_map(
+            cli,
+            incident_id,
+            {
+                "incident_status": "awaiting_verification",
+                "logical_status": "awaiting_verification",
+            },
+        )
+        target_status = "awaiting_observer_verification"
+    return {
+        "incident_id": incident_id,
+        "maintenance_case_id": case_id,
+        "stage": stage,
+        "maintenance_case_status": target_status,
+    }
+
+
+def verify_fix(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
+    issue, metadata = load_incident(cli, args.incident)
+    incident_id = issue_ref(issue) or args.incident
+    case, case_metadata, case_id = maintenance_case_for_incident(
+        cli, incident_id, metadata
+    )
+    approved_digest = str(metadata.get("maintenance_intake_digest") or "")
+    if not approved_digest or str(
+        case_metadata.get("maintenance_intake_digest") or ""
+    ) != approved_digest:
+        raise ObserverError("Maintenance Case approval scope differs from the Incident")
+    case_status = str(
+        case_metadata.get("logical_status")
+        or case_metadata.get("maintenance_case_status")
+        or ""
+    )
+    caller_id = os.environ.get("MULTICA_AGENT_ID")
+    if not caller_id:
+        raise ObserverError("fix verification requires the assigned Observer Agent identity")
+    if caller_id != str(metadata.get("observer_id") or ""):
+        raise ObserverError("fix verification must be performed by the assigned Observer")
+    evidence = redacted_text(args.evidence, 2000)
+    verified_at = utc_now()
+    incident_status = str(
+        metadata.get("logical_status") or metadata.get("incident_status") or ""
+    )
+    recorded_result = str(case_metadata.get("verification_result") or "")
+    recovering_pass = args.result == "passed" and recorded_result == "passed"
+    if recorded_result == "passed" and args.result != "passed":
+        raise ObserverError("a successful Observer verification cannot be downgraded")
+    allowed_case_statuses = (
+        {"awaiting_observer_verification", "completed"}
+        if recovering_pass
+        else {"awaiting_observer_verification"}
+    )
+    if case_status not in allowed_case_statuses:
+        raise ObserverError(
+            "Maintenance Case has not recorded a completed deployment"
+        )
+    allowed_incident_statuses = (
+        {"awaiting_verification", "resolved"}
+        if recovering_pass
+        else {"awaiting_verification"}
+    )
+    if incident_status not in allowed_incident_statuses:
+        raise ObserverError(
+            f"Incident cannot be verified from logical status {incident_status}"
+        )
+    required_deployment_evidence = [
+        "release_version",
+        "release_source_commit",
+        "release_request_digest",
+        "deployment_target",
+        "deployment_plan_digest",
+        "deployment_journal_sha256",
+        "deployment_record_sha256",
+        "deployed_version",
+    ]
+    missing_deployment_evidence = [
+        key for key in required_deployment_evidence if not case_metadata.get(key)
+    ]
+    if missing_deployment_evidence:
+        raise ObserverError(
+            "Maintenance Case deployment evidence is incomplete: "
+            f"{missing_deployment_evidence}"
+        )
+    if args.result == "failed":
+        verification_id = str(uuid.uuid4())
+        set_metadata_map(
+            cli,
+            case_id,
+            {
+                "verification_result": "failed",
+                "verification_evidence": evidence,
+                "observer_verification_id": verification_id,
+                "verified_at": verified_at,
+            },
+        )
+        cli.json(
+            ["issue", "update", case_id, "--status", "in_progress", "--output", "json"]
+        )
+        set_metadata_map(
+            cli,
+            case_id,
+            {
+                "maintenance_case_status": "in_development",
+                "logical_status": "in_development",
+            },
+        )
+        set_metadata(cli, incident_id, "waiting_on", "ordinary_development_workflow")
+        cli.json(
+            [
+                "issue",
+                "update",
+                incident_id,
+                "--status",
+                "in_progress",
+                "--output",
+                "json",
+            ]
+        )
+        set_metadata_map(
+            cli,
+            incident_id,
+            {"incident_status": "in_fix", "logical_status": "in_fix"},
+        )
+        try:
+            add_comment(cli, incident_id, f"Observer verification failed.\n\n{evidence}")
+        except ObserverError as exc:
+            set_metadata(
+                cli,
+                case_id,
+                "verification_comment_error",
+                redacted_text(exc, 500),
+            )
+        return {
+            "incident_id": incident_id,
+            "result": "failed",
+            "verification_id": verification_id,
+        }
     if not args.deployed_version or not args.deployment_target:
         raise ObserverError(
             "successful verification requires deployed version and deployment target"
         )
-    incident_status = str(
-        metadata.get("logical_status") or metadata.get("incident_status") or ""
+    recorded_version = str(
+        case_metadata.get("deployed_version")
+        or case_metadata.get("release_version")
+        or ""
     )
-    if incident_status != "awaiting_verification":
-        raise ObserverError(
-            f"Incident cannot be verified from logical status {incident_status}"
-        )
-    recorded_version = str(case_metadata.get("release_version") or "")
     recorded_target = str(case_metadata.get("deployment_target") or "")
     if recorded_version and recorded_version != args.deployed_version:
         raise ObserverError("deployed version differs from Maintenance Case evidence")
     if recorded_target and recorded_target != args.deployment_target:
         raise ObserverError("deployment target differs from Maintenance Case evidence")
-    verification_id = str(uuid.uuid4())
+    already_resolved = incident_status == "resolved" and case_status == "completed"
+    verification_id = str(
+        case_metadata.get("observer_verification_id") or uuid.uuid4()
+    )
+    verification_values = {
+        "verification_result": "passed",
+        "verification_evidence": evidence,
+        "observer_verification_id": verification_id,
+        "release_version": args.deployed_version,
+        "deployment_target": args.deployment_target or "",
+        "verified_at": str(case_metadata.get("verified_at") or verified_at),
+    }
+    resolved_at = str(
+        metadata.get("resolved_at") or verification_values["verified_at"]
+    )
+    compatible_evidence(case_metadata, verification_values, "verification")
     set_metadata_map(
         cli,
         case_id,
-        {
-            "maintenance_case_status": "completed",
-            "logical_status": "completed",
-            "verification_result": "passed",
-            "verification_evidence": evidence,
-            "observer_verification_id": verification_id,
-            "release_version": args.deployed_version,
-            "deployment_target": args.deployment_target or "",
-            "verified_at": verified_at,
-        },
+        verification_values,
+    )
+    cli.json(["issue", "update", case_id, "--status", "done", "--output", "json"])
+    set_metadata_map(
+        cli,
+        case_id,
+        {"maintenance_case_status": "completed", "logical_status": "completed"},
     )
     set_metadata_map(
         cli,
         incident_id,
         {
-            "incident_status": "resolved",
-            "logical_status": "resolved",
             "waiting_on": "",
             "incident_fixed_release": args.deployed_version,
             "observer_verification_id": verification_id,
-            "resolved_at": verified_at,
+            "resolved_at": resolved_at,
         },
     )
-    cli.json(["issue", "update", case_id, "--status", "done", "--output", "json"])
     cli.json(["issue", "update", incident_id, "--status", "done", "--output", "json"])
-    add_comment(
+    set_metadata_map(
         cli,
         incident_id,
-        f"Observer verification passed for `{args.deployed_version}`.\n\n{evidence}",
+        {"incident_status": "resolved", "logical_status": "resolved"},
     )
+    restored_sources = restore_incident_sources(cli, incident_id, metadata)
+    if not already_resolved:
+        try:
+            add_comment(
+                cli,
+                incident_id,
+                f"Observer verification passed for `{args.deployed_version}`.\n\n{evidence}",
+            )
+        except ObserverError as exc:
+            set_metadata(
+                cli,
+                case_id,
+                "verification_comment_error",
+                redacted_text(exc, 500),
+            )
     return {
         "incident_id": incident_id,
         "maintenance_case_id": case_id,
         "result": "passed",
         "verification_id": verification_id,
+        "action": "reused" if already_resolved else (
+            "repaired" if recovering_pass else "updated"
+        ),
+        "restored_source_issue_ids": restored_sources,
     }
 
 
@@ -3467,11 +4354,160 @@ def parent_findings(cli: CLI, issue: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+def audit_operation_issue(
+    cli: CLI, issue: dict[str, Any], metadata: dict[str, Any]
+) -> list[dict[str, Any]]:
+    object_type = str(metadata.get("workflow_object_type") or "")
+    status = str(metadata.get("logical_status") or metadata.get("status") or "")
+    findings = []
+
+    def require_fields(rule_id: str, fields: list[str]) -> None:
+        missing = [field for field in fields if metadata.get(field) in {None, ""}]
+        if missing:
+            findings.append(
+                finding(
+                    rule_id,
+                    "medium",
+                    issue,
+                    f"{object_type} records contain required durable metadata",
+                    f"missing metadata fields: {missing}",
+                )
+            )
+
+    if object_type == "observation":
+        observation_status = str(
+            metadata.get("observation_status") or metadata.get("status") or ""
+        )
+        require_fields(
+            "WF-OBSERVATION-STATE-001",
+            [
+                "observation_fingerprint",
+                "workflow_instance_id",
+                "source_issue_id",
+                "payload_digest",
+                "observation_payload",
+            ],
+        )
+        if observation_status not in OBSERVATION_STATUSES:
+            findings.append(
+                finding(
+                    "WF-OBSERVATION-STATE-001",
+                    "medium",
+                    issue,
+                    f"Observation status is one of {sorted(OBSERVATION_STATUSES)}",
+                    f"observation_status={observation_status or '<empty>'}",
+                )
+            )
+        if observation_status == "quarantined":
+            findings.append(
+                finding(
+                    "WF-OBSERVATION-RETRY-001",
+                    "medium",
+                    issue,
+                    "permanently failing Observations are retained for operator review",
+                    str(metadata.get("last_error") or "quarantined without last_error"),
+                )
+            )
+    elif object_type == "incident":
+        incident_status = str(
+            metadata.get("logical_status") or metadata.get("incident_status") or ""
+        )
+        require_fields(
+            "WF-INCIDENT-STATE-001",
+            ["incident_dedupe_key", "incident_status", "incident_evidence_log"],
+        )
+        if incident_status not in INCIDENT_STATUSES:
+            findings.append(
+                finding(
+                    "WF-INCIDENT-STATE-001",
+                    "medium",
+                    issue,
+                    f"Incident status is one of {sorted(INCIDENT_STATUSES)}",
+                    f"incident_status={incident_status or '<empty>'}",
+                )
+            )
+        if incident_status in {
+            "maintenance_approved",
+            "in_fix",
+            "awaiting_verification",
+            "resolved",
+        }:
+            require_fields(
+                "WF-INCIDENT-STATE-001",
+                ["maintenance_case_id", "maintenance_intake_digest"],
+            )
+    elif object_type == "maintenance_case":
+        case_status = str(
+            metadata.get("logical_status")
+            or metadata.get("maintenance_case_status")
+            or ""
+        )
+        require_fields(
+            "WF-MAINTENANCE-CASE-STATE-001",
+            ["incident_id", "maintenance_intake_digest", "executor"],
+        )
+        if case_status not in MAINTENANCE_CASE_STATUSES:
+            findings.append(
+                finding(
+                    "WF-MAINTENANCE-CASE-STATE-001",
+                    "medium",
+                    issue,
+                    f"Maintenance Case status is one of {sorted(MAINTENANCE_CASE_STATUSES)}",
+                    f"maintenance_case_status={case_status or '<empty>'}",
+                )
+            )
+        if str(metadata.get("executor") or "") != "ordinary_development_workflow":
+            findings.append(
+                finding(
+                    "WF-MAINTENANCE-CASE-STATE-001",
+                    "high",
+                    issue,
+                    "Phase 1 Maintenance Cases use ordinary_development_workflow",
+                    f"executor={metadata.get('executor')}",
+                )
+            )
+        if case_status in {"awaiting_deployment", "awaiting_observer_verification", "completed"}:
+            require_fields(
+                "WF-MAINTENANCE-CASE-STATE-001",
+                ["release_version", "release_source_commit", "release_request_digest"],
+            )
+        if case_status in {"awaiting_observer_verification", "completed"}:
+            require_fields(
+                "WF-MAINTENANCE-CASE-STATE-001",
+                [
+                    "deployment_target",
+                    "deployment_plan_digest",
+                    "deployment_journal_sha256",
+                    "deployment_record_sha256",
+                ],
+            )
+    elif object_type == "project_registration":
+        require_fields(
+            "WF-REGISTRATION-STATE-001",
+            [
+                "workflow_instance_id",
+                "workspace_id",
+                "project_id",
+                "protocol_revision",
+                "committed_cursor",
+                "checkpoint_cursor",
+            ],
+        )
+    elif object_type == "observer_control":
+        require_fields(
+            "WF-OBSERVER-CONTROL-STATE-001",
+            ["workflow_instance_id"],
+        )
+    return findings
+
+
 def audit_issue(cli: CLI, issue: dict[str, Any], backlog_hours: int) -> list[dict[str, Any]]:
     issue_id = issue_ref(issue)
     meta = metadata_map(cli, issue_id)
     object_type = meta.get("workflow_object_type")
-    if object_type in PHASE1_OPERATION_TYPES | {"canary_fixture"}:
+    if object_type in PHASE1_OPERATION_TYPES:
+        return audit_operation_issue(cli, issue, meta)
+    if object_type == "canary_fixture":
         return []
     status = str(issue.get("status") or "")
     findings = []
@@ -4097,8 +5133,35 @@ def parser() -> argparse.ArgumentParser:
     record_parser = sub.add_parser("record-maintenance-decision")
     record_parser.add_argument("--incident", required=True)
     record_parser.add_argument("--comment-id")
-    record_parser.add_argument("--executor")
+    record_parser.add_argument(
+        "--executor", choices=["ordinary_development_workflow"]
+    )
     record_parser.add_argument("--output", choices=["json"], default="json")
+
+    progress_parser = sub.add_parser("record-maintenance-progress")
+    progress_parser.add_argument("--incident", required=True)
+    progress_parser.add_argument(
+        "--stage",
+        choices=[
+            "in-development",
+            "fix-ready",
+            "release-recorded",
+            "deployment-recorded",
+        ],
+        required=True,
+    )
+    progress_parser.add_argument("--implementation-issue", action="append", default=[])
+    progress_parser.add_argument("--requirement-issue")
+    progress_parser.add_argument("--integration-validation-issue")
+    progress_parser.add_argument("--pr-number")
+    progress_parser.add_argument("--merge-commit-sha")
+    progress_parser.add_argument("--release-version")
+    progress_parser.add_argument("--release-source-commit")
+    progress_parser.add_argument("--release-request-digest")
+    progress_parser.add_argument("--deployment-target")
+    progress_parser.add_argument("--deployment-plan-digest")
+    progress_parser.add_argument("--deployment-journal")
+    progress_parser.add_argument("--output", choices=["json"], default="json")
 
     verify_parser = sub.add_parser("verify-fix")
     verify_parser.add_argument("--incident", required=True)
@@ -4142,14 +5205,12 @@ def main() -> int:
             result = prepare_maintenance_decision(cli, args)
         elif args.command == "record-maintenance-decision":
             result = record_maintenance_decision(cli, args)
+        elif args.command == "record-maintenance-progress":
+            result = record_maintenance_progress(cli, args)
         elif args.command == "verify-fix":
             result = verify_fix(cli, args)
         elif args.command == "audit":
-            if args.scope == "health":
-                result = external_health(
-                    cli, args.health_max_age_minutes, 1560
-                )
-            else:
+            if args.report and args.scope != "health":
                 result = scan(
                     cli,
                     argparse.Namespace(
@@ -4160,6 +5221,8 @@ def main() -> int:
                         lease_minutes=30,
                     ),
                 )
+            else:
+                result = audit(cli, args)
         else:
             result = external_health(
                 cli, args.max_age_minutes, args.full_max_age_minutes
@@ -4168,6 +5231,8 @@ def main() -> int:
         if args.command in {"report-anomaly", "report-incident"} and result.get(
             "warnings"
         ):
+            return 2
+        if args.command == "audit" and not args.report and audit_failed(result):
             return 2
         return 0
     except ObserverError as exc:

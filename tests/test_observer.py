@@ -4,6 +4,7 @@ import importlib.util
 import json
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -78,6 +79,7 @@ class IncidentCLI:
         self.incidents = []
         self.fail_incident_metadata_once = False
         self.fail_metadata_keys = set()
+        self.fail_comment_add_once = False
         self.issue_details = {}
         self.updates = []
         self.subscribers = []
@@ -164,6 +166,9 @@ class IncidentCLI:
             self.incidents.append(item)
             return item
         if args[:3] == ["issue", "comment", "add"]:
+            if self.fail_comment_add_once:
+                self.fail_comment_add_once = False
+                raise observer.ObserverError("injected comment failure")
             self.comments.append((args[3], input_text))
             return {"id": f"comment-{len(self.comments)}"}
         if args[:3] == ["issue", "comment", "list"]:
@@ -304,6 +309,9 @@ class Phase1CLI(IncidentCLI):
         if args[:3] == ["issue", "comment", "list"]:
             return self.comment_records.get(args[3], [])
         if args[:3] == ["issue", "comment", "add"]:
+            if self.fail_comment_add_once:
+                self.fail_comment_add_once = False
+                raise observer.ObserverError("injected comment failure")
             record = {
                 "id": f"comment-{len(self.comments) + 1}",
                 "content": input_text,
@@ -1693,6 +1701,85 @@ class ObserverTests(unittest.TestCase):
         )
         self.assertTrue(cli.subscribers)
 
+    def test_duplicate_incident_preserves_active_workflow_waiting_state(self):
+        cli = IncidentCLI()
+        dedupe = "development-delivery:v3:WF-REVIEW-001:T-100"
+        cli.incidents = [
+            {"id": "active", "identifier": "T-801", "status": "in_progress"}
+        ]
+        cli.metadata["T-801"] = {
+            "workflow_object_type": "incident",
+            "incident_dedupe_key": dedupe,
+            "incident_status": "in_fix",
+            "logical_status": "in_fix",
+            "waiting_on": "ordinary_development_workflow",
+            "incident_severity": "high",
+            "incident_source_requirements": '["T-100"]',
+            "incident_last_notified_at": observer.utc_now(),
+        }
+        observer.report_incident(
+            cli,
+            Namespace(
+                source_issue="T-100",
+                source_requirement="T-100",
+                rule_id="WF-REVIEW-001",
+                severity="high",
+                summary="new evidence during repair",
+                expected="repair remains active",
+                actual="same root cause reproduced",
+                evidence="new evidence",
+                entity=None,
+                dedupe_key=dedupe,
+                protocol_revision="v3",
+                reporter_agent_id="agent-reviewer",
+                reporter_role="代码审查员",
+                block_source=False,
+            ),
+        )
+        self.assertEqual(cli.metadata["T-801"]["incident_status"], "in_fix")
+        self.assertEqual(
+            cli.metadata["T-801"]["waiting_on"],
+            "ordinary_development_workflow",
+        )
+
+    def test_active_incident_with_terminal_logical_state_repairs_reopen(self):
+        cli = IncidentCLI()
+        dedupe = "development-delivery:v3:WF-REVIEW-001:T-100"
+        cli.incidents = [
+            {"id": "active", "identifier": "T-801", "status": "todo"}
+        ]
+        cli.metadata["T-801"] = {
+            "workflow_object_type": "incident",
+            "incident_dedupe_key": dedupe,
+            "incident_status": "resolved",
+            "logical_status": "resolved",
+            "incident_severity": "high",
+            "incident_source_requirements": '["T-100"]',
+            "incident_evidence_log": "[]",
+        }
+        result = observer.report_incident(
+            cli,
+            Namespace(
+                source_issue="T-100",
+                source_requirement="T-100",
+                rule_id="WF-REVIEW-001",
+                severity="high",
+                summary="reopened evidence",
+                expected="review matches",
+                actual="stale review recurred",
+                evidence="new evidence",
+                entity=None,
+                dedupe_key=dedupe,
+                protocol_revision="v3",
+                reporter_agent_id="agent-reviewer",
+                reporter_role="reviewer",
+                block_source=False,
+            ),
+        )
+        self.assertEqual(result["incident_id"], "T-801")
+        self.assertEqual(cli.metadata["T-801"]["logical_status"], "new")
+        self.assertEqual(cli.metadata["T-801"]["waiting_on"], "workflow_observer")
+
     def test_incident_lookup_paginates_before_deduplication(self):
         cli = IncidentCLI()
         dedupe = "development-delivery:v3:WF-REVIEW-001:T-100"
@@ -1838,6 +1925,7 @@ class ObserverTests(unittest.TestCase):
             "triage",
             "prepare-maintenance-decision",
             "record-maintenance-decision",
+            "record-maintenance-progress",
             "verify-fix",
         ]:
             self.assertIn(command, commands)
@@ -1858,6 +1946,216 @@ class ObserverTests(unittest.TestCase):
         self.assertEqual(result["workflow_instance_id"], "instance-1")
         self.assertEqual(cli.metadata["T-100"]["managed_by"], observer.MANAGED_BY)
         self.assertEqual(cli.metadata["T-100"]["root_requirement_id"], "T-100")
+
+    def test_bind_workflow_issue_rejects_contract_overwrite(self):
+        cli = Phase1CLI()
+        cli.add_registration()
+        observer.bind_workflow_issue(
+            cli,
+            Namespace(
+                issue="T-100",
+                object_type="requirement",
+                root_requirement_id=None,
+                created_by_role="leader",
+            ),
+        )
+        with self.assertRaisesRegex(observer.ObserverError, "created_by_role"):
+            observer.bind_workflow_issue(
+                cli,
+                Namespace(
+                    issue="T-100",
+                    object_type="requirement",
+                    root_requirement_id=None,
+                    created_by_role="developer",
+                ),
+            )
+
+    def test_partial_observation_metadata_failure_reuses_title_fingerprint(self):
+        cli = Phase1CLI()
+        cli.add_registration()
+        cli.fail_metadata_keys.add("workflow_object_type")
+        args = self.phase1_report_args()
+        with self.assertRaisesRegex(observer.ObserverError, "workflow_object_type"):
+            observer.report_anomaly(cli, args)
+        result = observer.report_anomaly(cli, args)
+        observations = [
+            item
+            for item in cli.items
+            if "[Workflow Observation]" in str(item.get("title") or "")
+        ]
+        self.assertEqual(len(observations), 1)
+        self.assertEqual(result["observation_id"], observations[0]["identifier"])
+
+    def test_same_quarantined_observation_does_not_wake_observer_again(self):
+        cli = Phase1CLI()
+        cli.add_registration()
+        args = self.phase1_report_args(severity="high")
+        args.no_wake = False
+        first = observer.report_anomaly(cli, args)
+        cli.metadata[first["observation_id"]].update(
+            {
+                "observation_status": "quarantined",
+                "status": "quarantined",
+                "attempt_count": observer.OBSERVATION_MAX_ATTEMPTS,
+            }
+        )
+        cli.triggered.clear()
+        second = observer.report_anomaly(cli, args)
+        self.assertEqual(second["status"], "quarantined")
+        self.assertFalse(second["observer_awakened"])
+        self.assertEqual(cli.triggered, [])
+
+    def test_invalid_observation_attempt_count_is_repaired_without_aborting(self):
+        cli = Phase1CLI()
+        observation = cli.add_item(
+            "WOR-BAD-COUNT",
+            "project-ops",
+            {
+                "workflow_object_type": "observation",
+                "observation_status": "failed",
+                "status": "failed",
+                "attempt_count": "invalid",
+                "observation_payload": "{}",
+            },
+        )
+        result = observer.process_observation(cli, observation)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(
+            cli.metadata[observation["identifier"]]["attempt_count"], 1
+        )
+
+    def test_scan_quarantines_permanent_observation_and_continues(self):
+        cli = Phase1CLI()
+        cli.add_registration()
+        invalid = cli.add_item(
+            "WOR-BAD",
+            "project-ops",
+            {
+                "workflow_object_type": "observation",
+                "workflow_instance_id": "instance-1",
+                "observation_status": "failed",
+                "status": "failed",
+                "attempt_count": observer.OBSERVATION_MAX_ATTEMPTS - 1,
+                "observation_payload": "{}",
+            },
+        )
+        payload = {
+            "workflow_instance_id": "instance-1",
+            "source_issue_id": "T-100",
+            "rule_id": "WF-VALID-001",
+            "severity": "medium",
+            "entity": "runtime:shared",
+            "summary": "valid observation",
+            "expected": "consistent workflow",
+            "actual": "drift",
+            "protocol_revision": "v3",
+            "reporter_agent_id": "agent-dev",
+            "reporter_role": "developer",
+            "registered": True,
+            "block_source": False,
+        }
+        valid = cli.add_item(
+            "WOR-GOOD",
+            "project-ops",
+            {
+                "workflow_object_type": "observation",
+                "workflow_instance_id": "instance-1",
+                "observation_status": "pending",
+                "status": "pending",
+                "attempt_count": 0,
+                "observation_payload": json.dumps(payload),
+            },
+        )
+        args = Namespace(
+            mode="incremental",
+            workflow_instance_id=None,
+            max_issues=5000,
+            backlog_hours=24,
+            lease_minutes=30,
+        )
+        with (
+            patch.object(observer, "audit_operation_issue", return_value=[]),
+            patch.object(observer, "audit_control_plane", return_value=[]),
+            patch.object(observer, "audit_issue", return_value=[]),
+            patch.object(observer, "parent_findings", return_value=[]),
+        ):
+            result = observer.scan(cli, args)
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(
+            cli.metadata[invalid["identifier"]]["observation_status"],
+            "quarantined",
+        )
+        self.assertEqual(
+            cli.metadata[valid["identifier"]]["observation_status"], "processed"
+        )
+        self.assertEqual(len(result["observation_failures"]), 1)
+
+    def test_scan_contains_observation_claim_failure_and_continues(self):
+        cli = Phase1CLI()
+        cli.add_registration()
+        payload = {
+            "workflow_instance_id": "instance-1",
+            "source_issue_id": "T-100",
+            "rule_id": "WF-VALID-001",
+            "severity": "medium",
+            "entity": "runtime:shared",
+            "summary": "valid observation",
+            "expected": "consistent workflow",
+            "actual": "drift",
+            "protocol_revision": "v3",
+            "reporter_agent_id": "agent-dev",
+            "reporter_role": "developer",
+            "registered": True,
+            "block_source": False,
+        }
+        failed = cli.add_item(
+            "WOR-CLAIM-FAIL",
+            "project-ops",
+            {
+                "workflow_object_type": "observation",
+                "workflow_instance_id": "instance-1",
+                "observation_status": "pending",
+                "status": "pending",
+                "attempt_count": 0,
+                "observation_payload": json.dumps(payload),
+            },
+        )
+        processed = cli.add_item(
+            "WOR-CLAIM-NEXT",
+            "project-ops",
+            {
+                "workflow_object_type": "observation",
+                "workflow_instance_id": "instance-1",
+                "observation_status": "pending",
+                "status": "pending",
+                "attempt_count": 0,
+                "observation_payload": json.dumps(payload),
+            },
+        )
+        cli.fail_metadata_keys.add("attempt_count")
+        args = Namespace(
+            mode="incremental",
+            workflow_instance_id=None,
+            max_issues=5000,
+            backlog_hours=24,
+            lease_minutes=30,
+        )
+        with (
+            patch.object(observer, "audit_operation_issue", return_value=[]),
+            patch.object(observer, "audit_control_plane", return_value=[]),
+            patch.object(observer, "audit_issue", return_value=[]),
+            patch.object(observer, "parent_findings", return_value=[]),
+        ):
+            result = observer.scan(cli, args)
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(
+            cli.metadata[failed["identifier"]]["observation_status"], "failed"
+        )
+        self.assertEqual(
+            cli.metadata[processed["identifier"]]["observation_status"],
+            "processed",
+        )
+        self.assertEqual(len(result["observation_failures"]), 1)
 
     def test_project_registration_is_idempotent(self):
         cli = Phase1CLI()
@@ -2110,6 +2408,40 @@ class ObserverTests(unittest.TestCase):
             )
         )
 
+    def test_prepare_maintenance_decision_repairs_missing_prompt_comment(self):
+        cli = Phase1CLI()
+        incident = cli.add_item(
+            "WOR-INC",
+            "project-ops",
+            {
+                "workflow_object_type": "incident",
+                "incident_status": "awaiting_maintenance_decision",
+                "logical_status": "awaiting_maintenance_decision",
+                "verdict": "CONFIRMED_WORKFLOW_BUG",
+                "incident_dedupe_key": "dedupe",
+                "incident_severity": "high",
+                "incident_source_requirements": '["T-100"]',
+                "source_issue_id": "T-100",
+                "workflow_version": "1.2.0",
+                "incident_evidence_log": "[]",
+            },
+            status="in_review",
+        )
+        cli.fail_comment_add_once = True
+        with self.assertRaisesRegex(observer.ObserverError, "comment failure"):
+            observer.prepare_maintenance_decision(
+                cli, Namespace(incident=incident["identifier"])
+            )
+        result = observer.prepare_maintenance_decision(
+            cli, Namespace(incident=incident["identifier"])
+        )
+        self.assertEqual(result["action"], "repaired")
+        self.assertEqual(len(cli.comment_records[incident["identifier"]]), 1)
+        self.assertIn(
+            result["approve"],
+            cli.comment_records[incident["identifier"]][0]["content"],
+        )
+
     def test_triage_approval_creates_one_minimal_maintenance_case(self):
         cli = Phase1CLI()
         incident = cli.add_item(
@@ -2155,6 +2487,24 @@ class ObserverTests(unittest.TestCase):
                 executor=None,
             ),
         )
+        case_metadata = cli.metadata[first["maintenance_case_id"]]
+        case_metadata.update(
+            {
+                "implementation_issue_ids": '["T-REQ", "T-VALIDATE"]',
+                "pr_number": "42",
+                "merge_commit_sha": "a" * 40,
+                "release_version": "v1.2.0",
+                "deployment_target": "workspace-canary",
+                "maintenance_case_status": "awaiting_observer_verification",
+                "logical_status": "awaiting_observer_verification",
+            }
+        )
+        cli.metadata[incident["identifier"]].update(
+            {
+                "incident_status": "awaiting_verification",
+                "logical_status": "awaiting_verification",
+            }
+        )
         second = observer.record_maintenance_decision(
             cli,
             Namespace(
@@ -2169,6 +2519,69 @@ class ObserverTests(unittest.TestCase):
         self.assertEqual(
             cli.metadata[first["maintenance_case_id"]]["human_approver_id"],
             "human-1",
+        )
+        self.assertEqual(
+            cli.metadata[first["maintenance_case_id"]]["merge_commit_sha"],
+            "a" * 40,
+        )
+        self.assertEqual(
+            cli.metadata[first["maintenance_case_id"]]["deployment_target"],
+            "workspace-canary",
+        )
+
+    def test_maintenance_decision_ignores_matching_non_approver_comment(self):
+        cli = Phase1CLI()
+        incident = cli.add_item(
+            "WOR-INC",
+            "project-ops",
+            {
+                "workflow_object_type": "incident",
+                "incident_status": "awaiting_maintenance_decision",
+                "logical_status": "awaiting_maintenance_decision",
+                "verdict": "CONFIRMED_WORKFLOW_BUG",
+                "incident_dedupe_key": "dedupe",
+                "incident_severity": "high",
+                "incident_source_requirements": '["T-100"]',
+                "source_issue_id": "T-100",
+                "workflow_version": "1.2.0",
+                "incident_evidence_log": "[]",
+                "human_approver_id": "human-1",
+            },
+            status="in_review",
+        )
+        prepared = observer.prepare_maintenance_decision(
+            cli, Namespace(incident=incident["identifier"])
+        )
+        cli.comment_records[incident["identifier"]].extend(
+            [
+                {
+                    "id": "wrong-approval",
+                    "content": prepared["approve"],
+                    "author_id": "human-2",
+                    "author_type": "member",
+                },
+                {
+                    "id": "approval-1",
+                    "content": prepared["approve"],
+                    "author_id": "human-1",
+                    "author_type": "member",
+                },
+            ]
+        )
+        result = observer.record_maintenance_decision(
+            cli,
+            Namespace(
+                incident=incident["identifier"],
+                comment_id=None,
+                executor="ordinary_development_workflow",
+            ),
+        )
+        self.assertEqual(result["decision"], "approved")
+        self.assertEqual(
+            cli.metadata[incident["identifier"]][
+                "maintenance_decision_comment_id"
+            ],
+            "approval-1",
         )
 
     def test_routed_incident_can_be_retriaged_when_new_evidence_arrives(self):
@@ -2198,6 +2611,452 @@ class ObserverTests(unittest.TestCase):
         self.assertEqual(cli.issue_details[incident["identifier"]]["status"], "done")
         self.assertEqual(cli.metadata[incident["identifier"]]["waiting_on"], "")
 
+    def test_false_positive_restores_incident_owned_source_block(self):
+        cli = Phase1CLI()
+        cli.issue_details["T-100"]["status"] = "blocked"
+        cli.metadata["T-100"].update(
+            {
+                "workflow_blocked_by_incident_id": "WOR-INC",
+                "workflow_blocked_previous_status": "in_progress",
+                "waiting_on": "workflow_fix",
+            }
+        )
+        incident = cli.add_item(
+            "WOR-INC",
+            "project-ops",
+            {
+                "workflow_object_type": "incident",
+                "incident_status": "new",
+                "logical_status": "new",
+                "incident_blocked_source_ids": '["T-100"]',
+            },
+            status="todo",
+        )
+        result = observer.triage_incident(
+            cli,
+            Namespace(
+                incident=incident["identifier"],
+                verdict="FALSE_POSITIVE",
+                reason="not reproducible",
+            ),
+        )
+        self.assertEqual(result["restored_source_issue_ids"], ["T-100"])
+        self.assertEqual(cli.issue_details["T-100"]["status"], "in_progress")
+        self.assertEqual(
+            cli.metadata["T-100"]["workflow_blocked_by_incident_id"], ""
+        )
+
+    def test_maintenance_progress_reaches_observer_verification_with_bound_journal(self):
+        cli = Phase1CLI()
+        incident = cli.add_item(
+            "WOR-INC",
+            "project-ops",
+            {
+                "workflow_object_type": "incident",
+                "incident_status": "maintenance_approved",
+                "logical_status": "maintenance_approved",
+                "maintenance_intake_digest": "approved-digest",
+                "maintenance_case_id": "WOR-CASE",
+                "observer_id": "agent-observer",
+            },
+            status="in_review",
+        )
+        case = cli.add_item(
+            "WOR-CASE",
+            "project-ops",
+            {
+                "workflow_object_type": "maintenance_case",
+                "incident_id": incident["identifier"],
+                "maintenance_intake_digest": "approved-digest",
+                "executor": "ordinary_development_workflow",
+                "maintenance_case_status": "approved",
+                "logical_status": "approved",
+                "implementation_issue_ids": "[]",
+            },
+            status="todo",
+        )
+
+        def progress(stage, **values):
+            defaults = {
+                "incident": incident["identifier"],
+                "stage": stage,
+                "implementation_issue": [],
+                "requirement_issue": None,
+                "integration_validation_issue": None,
+                "pr_number": None,
+                "merge_commit_sha": None,
+                "release_version": None,
+                "release_source_commit": None,
+                "release_request_digest": None,
+                "deployment_target": None,
+                "deployment_plan_digest": None,
+                "deployment_journal": None,
+            }
+            defaults.update(values)
+            return observer.record_maintenance_progress(cli, Namespace(**defaults))
+
+        progress("in-development", implementation_issue=["T-REQ"])
+        progress(
+            "fix-ready",
+            requirement_issue="T-REQ",
+            integration_validation_issue="T-VALIDATE",
+            pr_number="42",
+            merge_commit_sha="a" * 40,
+        )
+        progress(
+            "release-recorded",
+            release_version="v1.2.0",
+            release_source_commit="a" * 40,
+            release_request_digest="b" * 64,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            journal = Path(temporary) / "journal.json"
+            deployment_record = Path(temporary) / "deployment.json"
+            journal.write_text(
+                json.dumps(
+                    {
+                        "finished_at": "2026-07-25T00:00:00Z",
+                        "plan_digest": "c" * 64,
+                        "source_commit": "a" * 40,
+                        "applied_actor": "human_host",
+                        "deployment_record": str(deployment_record),
+                        "workspace": {
+                            "id": "workspace-canary",
+                            "slug": "workflow-canary",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            deployment_record.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "deployed_at": "2026-07-25T00:00:00Z",
+                        "plan_digest": "c" * 64,
+                        "source_commit": "a" * 40,
+                        "applied_actor": "human_host",
+                        "workspace": {
+                            "id": "workspace-canary",
+                            "slug": "workflow-canary",
+                        },
+                        "journal": str(journal),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            progress(
+                "deployment-recorded",
+                deployment_target="workflow-canary",
+                deployment_plan_digest="c" * 64,
+                deployment_journal=str(journal),
+            )
+        self.assertEqual(
+            cli.metadata[case["identifier"]]["maintenance_case_status"],
+            "awaiting_observer_verification",
+        )
+        self.assertEqual(
+            cli.metadata[incident["identifier"]]["incident_status"],
+            "awaiting_verification",
+        )
+        self.assertEqual(
+            cli.metadata[case["identifier"]]["deployment_plan_digest"], "c" * 64
+        )
+
+    def test_maintenance_progress_rejects_skipped_stage(self):
+        cli = Phase1CLI()
+        incident = cli.add_item(
+            "WOR-INC",
+            "project-ops",
+            {
+                "workflow_object_type": "incident",
+                "incident_status": "maintenance_approved",
+                "logical_status": "maintenance_approved",
+                "maintenance_intake_digest": "approved-digest",
+                "maintenance_case_id": "WOR-CASE",
+            },
+            status="in_review",
+        )
+        cli.add_item(
+            "WOR-CASE",
+            "project-ops",
+            {
+                "workflow_object_type": "maintenance_case",
+                "incident_id": incident["identifier"],
+                "maintenance_intake_digest": "approved-digest",
+                "executor": "ordinary_development_workflow",
+                "maintenance_case_status": "approved",
+                "logical_status": "approved",
+                "implementation_issue_ids": "[]",
+            },
+            status="todo",
+        )
+        with self.assertRaisesRegex(observer.ObserverError, "fix cannot be recorded"):
+            observer.record_maintenance_progress(
+                cli,
+                Namespace(
+                    incident=incident["identifier"],
+                    stage="fix-ready",
+                    implementation_issue=[],
+                    requirement_issue="T-REQ",
+                    integration_validation_issue="T-VALIDATE",
+                    pr_number="42",
+                    merge_commit_sha="a" * 40,
+                    release_version=None,
+                    release_source_commit=None,
+                    release_request_digest=None,
+                    deployment_target=None,
+                    deployment_plan_digest=None,
+                    deployment_journal=None,
+                ),
+            )
+
+    def test_maintenance_progress_retries_after_partial_status_metadata_failure(self):
+        cli = Phase1CLI()
+        incident = cli.add_item(
+            "WOR-INC",
+            "project-ops",
+            {
+                "workflow_object_type": "incident",
+                "incident_status": "in_fix",
+                "logical_status": "in_fix",
+                "maintenance_intake_digest": "approved-digest",
+                "maintenance_case_id": "WOR-CASE",
+            },
+            status="in_progress",
+        )
+        case = cli.add_item(
+            "WOR-CASE",
+            "project-ops",
+            {
+                "workflow_object_type": "maintenance_case",
+                "incident_id": incident["identifier"],
+                "maintenance_intake_digest": "approved-digest",
+                "executor": "ordinary_development_workflow",
+                "maintenance_case_status": "in_development",
+                "logical_status": "in_development",
+                "implementation_issue_ids": '["T-REQ"]',
+            },
+            status="in_progress",
+        )
+        args = Namespace(
+            incident=incident["identifier"],
+            stage="fix-ready",
+            implementation_issue=[],
+            requirement_issue="T-REQ",
+            integration_validation_issue="T-VALIDATE",
+            pr_number="42",
+            merge_commit_sha="a" * 40,
+            release_version=None,
+            release_source_commit=None,
+            release_request_digest=None,
+            deployment_target=None,
+            deployment_plan_digest=None,
+            deployment_journal=None,
+        )
+        cli.fail_metadata_keys.add("logical_status")
+        with self.assertRaisesRegex(observer.ObserverError, "logical_status"):
+            observer.record_maintenance_progress(cli, args)
+        result = observer.record_maintenance_progress(cli, args)
+        self.assertEqual(result["maintenance_case_status"], "fix_ready")
+        self.assertEqual(
+            cli.metadata[case["identifier"]]["logical_status"], "fix_ready"
+        )
+
+    def test_failed_verification_archives_attempt_and_accepts_new_fix(self):
+        cli = Phase1CLI()
+        incident = cli.add_item(
+            "WOR-INC",
+            "project-ops",
+            {
+                "workflow_object_type": "incident",
+                "incident_status": "awaiting_verification",
+                "logical_status": "awaiting_verification",
+                "maintenance_intake_digest": "approved-digest",
+                "maintenance_case_id": "WOR-CASE",
+                "observer_id": "agent-observer",
+            },
+            status="in_review",
+        )
+        case = cli.add_item(
+            "WOR-CASE",
+            "project-ops",
+            {
+                "workflow_object_type": "maintenance_case",
+                "incident_id": incident["identifier"],
+                "maintenance_intake_digest": "approved-digest",
+                "executor": "ordinary_development_workflow",
+                "maintenance_case_status": "awaiting_observer_verification",
+                "logical_status": "awaiting_observer_verification",
+                "implementation_issue_ids": '["T-REQ", "T-VALIDATE"]',
+                "requirement_issue_id": "T-REQ",
+                "review_issue_id": "T-VALIDATE",
+                "pr_number": "42",
+                "merge_commit_sha": "a" * 40,
+                "release_version": "v1.2.0",
+                "release_tag": "v1.2.0",
+                "release_source_commit": "a" * 40,
+                "release_request_digest": "b" * 64,
+                "deployment_target": "workspace-canary",
+                "deployment_plan_digest": "c" * 64,
+                "deployment_journal_sha256": "d" * 64,
+                "deployment_record_sha256": "f" * 64,
+                "deployed_version": "v1.2.0",
+            },
+            status="in_review",
+        )
+        with patch.dict(
+            observer.os.environ, {"MULTICA_AGENT_ID": "agent-observer"}, clear=True
+        ):
+            observer.verify_fix(
+                cli,
+                Namespace(
+                    incident=incident["identifier"],
+                    result="failed",
+                    evidence="regression still reproduces",
+                    deployed_version=None,
+                    deployment_target=None,
+                ),
+            )
+        result = observer.record_maintenance_progress(
+            cli,
+            Namespace(
+                incident=incident["identifier"],
+                stage="fix-ready",
+                implementation_issue=[],
+                requirement_issue="T-REQ-2",
+                integration_validation_issue="T-VALIDATE-2",
+                pr_number="43",
+                merge_commit_sha="e" * 40,
+                release_version=None,
+                release_source_commit=None,
+                release_request_digest=None,
+                deployment_target=None,
+                deployment_plan_digest=None,
+                deployment_journal=None,
+            ),
+        )
+        history = observer.parse_json_map_list(
+            cli.metadata[case["identifier"]]["maintenance_attempt_history"]
+        )
+        self.assertEqual(result["maintenance_case_status"], "fix_ready")
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["merge_commit_sha"], "a" * 40)
+        self.assertEqual(history[0]["verification_result"], "failed")
+        self.assertEqual(
+            cli.metadata[case["identifier"]]["merge_commit_sha"], "e" * 40
+        )
+        self.assertEqual(cli.metadata[case["identifier"]]["release_version"], "")
+        self.assertEqual(
+            cli.metadata[case["identifier"]]["deployment_plan_digest"], ""
+        )
+        self.assertEqual(
+            cli.metadata[case["identifier"]]["verification_result"], ""
+        )
+
+    def test_verify_fix_rejects_host_without_observer_identity(self):
+        cli = Phase1CLI()
+        incident = cli.add_item(
+            "WOR-INC",
+            "project-ops",
+            {
+                "workflow_object_type": "incident",
+                "incident_status": "awaiting_verification",
+                "maintenance_intake_digest": "approved-digest",
+                "maintenance_case_id": "WOR-CASE",
+                "observer_id": "agent-observer",
+            },
+            status="in_review",
+        )
+        cli.add_item(
+            "WOR-CASE",
+            "project-ops",
+            {
+                "workflow_object_type": "maintenance_case",
+                "incident_id": incident["identifier"],
+                "maintenance_intake_digest": "approved-digest",
+                "executor": "ordinary_development_workflow",
+                "maintenance_case_status": "awaiting_observer_verification",
+            },
+            status="in_review",
+        )
+        with (
+            patch.dict(observer.os.environ, {}, clear=True),
+            self.assertRaisesRegex(observer.ObserverError, "Observer Agent identity"),
+        ):
+            observer.verify_fix(
+                cli,
+                Namespace(
+                    incident=incident["identifier"],
+                    result="passed",
+                    evidence="passed",
+                    deployed_version="v1.2.0",
+                    deployment_target="workflow-canary",
+                ),
+            )
+
+    def test_failed_verification_requires_completed_deployment_state(self):
+        cli = Phase1CLI()
+        incident = cli.add_item(
+            "WOR-INC",
+            "project-ops",
+            {
+                "workflow_object_type": "incident",
+                "incident_status": "in_fix",
+                "logical_status": "in_fix",
+                "maintenance_intake_digest": "approved-digest",
+                "maintenance_case_id": "WOR-CASE",
+                "observer_id": "agent-observer",
+            },
+            status="in_progress",
+        )
+        cli.add_item(
+            "WOR-CASE",
+            "project-ops",
+            {
+                "workflow_object_type": "maintenance_case",
+                "incident_id": incident["identifier"],
+                "maintenance_intake_digest": "approved-digest",
+                "executor": "ordinary_development_workflow",
+                "maintenance_case_status": "in_development",
+                "logical_status": "in_development",
+            },
+            status="in_progress",
+        )
+        with (
+            patch.dict(
+                observer.os.environ,
+                {"MULTICA_AGENT_ID": "agent-observer"},
+                clear=True,
+            ),
+            self.assertRaisesRegex(observer.ObserverError, "completed deployment"),
+        ):
+            observer.verify_fix(
+                cli,
+                Namespace(
+                    incident=incident["identifier"],
+                    result="failed",
+                    evidence="not yet deployed",
+                    deployed_version=None,
+                    deployment_target=None,
+                ),
+            )
+
+    def test_main_default_audit_uses_read_only_audit_path(self):
+        args = Namespace(command="audit", report=False)
+        parser = Namespace(parse_args=lambda: args)
+        result = {"coverage_complete": True, "health_error": None}
+        with (
+            patch.object(observer, "parser", return_value=parser),
+            patch.object(observer, "build_cli", return_value=object()),
+            patch.object(observer, "audit", return_value=result) as audit_call,
+            patch.object(observer, "scan") as scan_call,
+            patch("builtins.print"),
+        ):
+            self.assertEqual(observer.main(), 0)
+        audit_call.assert_called_once()
+        scan_call.assert_not_called()
+
     def test_verify_fix_closes_case_and_incident(self):
         cli = Phase1CLI()
         incident = cli.add_item(
@@ -2208,6 +3067,7 @@ class ObserverTests(unittest.TestCase):
                 "incident_status": "awaiting_verification",
                 "maintenance_intake_digest": "approved-digest",
                 "maintenance_case_id": "WOR-CASE",
+                "observer_id": "agent-observer",
             },
             status="in_review",
         )
@@ -2219,23 +3079,129 @@ class ObserverTests(unittest.TestCase):
                 "incident_id": incident["identifier"],
                 "maintenance_intake_digest": "approved-digest",
                 "maintenance_case_status": "awaiting_observer_verification",
+                "executor": "ordinary_development_workflow",
+                "release_version": "v1.2.0-rc.1",
+                "release_source_commit": "c" * 40,
+                "release_request_digest": "d" * 64,
+                "deployment_target": "workflow-canary",
+                "deployment_plan_digest": "a" * 64,
+                "deployment_journal_sha256": "b" * 64,
+                "deployment_record_sha256": "e" * 64,
+                "deployed_version": "v1.2.0-rc.1",
             },
             status="in_review",
         )
-        result = observer.verify_fix(
-            cli,
-            Namespace(
-                incident=incident["identifier"],
-                result="passed",
-                evidence="reproduction and regression tests passed",
-                deployed_version="v1.2.0-rc.1",
-                deployment_target="workflow-canary",
-            ),
+        deployment_record_sha256 = cli.metadata[case["identifier"]].pop(
+            "deployment_record_sha256"
         )
+        with (
+            patch.dict(
+                observer.os.environ,
+                {"MULTICA_AGENT_ID": "agent-observer"},
+                clear=True,
+            ),
+            self.assertRaisesRegex(observer.ObserverError, "evidence is incomplete"),
+        ):
+            observer.verify_fix(
+                cli,
+                Namespace(
+                    incident=incident["identifier"],
+                    result="passed",
+                    evidence="reproduction and regression tests passed",
+                    deployed_version="v1.2.0-rc.1",
+                    deployment_target="workflow-canary",
+                ),
+            )
+        cli.metadata[case["identifier"]][
+            "deployment_record_sha256"
+        ] = deployment_record_sha256
+        with patch.dict(
+            observer.os.environ, {"MULTICA_AGENT_ID": "agent-observer"}, clear=True
+        ):
+            result = observer.verify_fix(
+                cli,
+                Namespace(
+                    incident=incident["identifier"],
+                    result="passed",
+                    evidence="reproduction and regression tests passed",
+                    deployed_version="v1.2.0-rc.1",
+                    deployment_target="workflow-canary",
+                ),
+            )
         self.assertEqual(result["result"], "passed")
         self.assertEqual(cli.issue_details[incident["identifier"]]["status"], "done")
         self.assertEqual(cli.issue_details[case["identifier"]]["status"], "done")
         self.assertEqual(cli.metadata[incident["identifier"]]["incident_status"], "resolved")
+
+    def test_successful_verification_repairs_partial_incident_completion(self):
+        cli = Phase1CLI()
+        incident = cli.add_item(
+            "WOR-INC",
+            "project-ops",
+            {
+                "workflow_object_type": "incident",
+                "incident_status": "awaiting_verification",
+                "logical_status": "awaiting_verification",
+                "maintenance_intake_digest": "approved-digest",
+                "maintenance_case_id": "WOR-CASE",
+                "observer_id": "agent-observer",
+            },
+            status="in_review",
+        )
+        case = cli.add_item(
+            "WOR-CASE",
+            "project-ops",
+            {
+                "workflow_object_type": "maintenance_case",
+                "incident_id": incident["identifier"],
+                "maintenance_intake_digest": "approved-digest",
+                "maintenance_case_status": "awaiting_observer_verification",
+                "logical_status": "awaiting_observer_verification",
+                "executor": "ordinary_development_workflow",
+                "release_version": "v1.2.0",
+                "release_source_commit": "c" * 40,
+                "release_request_digest": "d" * 64,
+                "deployment_target": "workflow-canary",
+                "deployment_plan_digest": "a" * 64,
+                "deployment_journal_sha256": "b" * 64,
+                "deployment_record_sha256": "e" * 64,
+                "deployed_version": "v1.2.0",
+            },
+            status="in_review",
+        )
+        args = Namespace(
+            incident=incident["identifier"],
+            result="passed",
+            evidence="regression suite passed",
+            deployed_version="v1.2.0",
+            deployment_target="workflow-canary",
+        )
+        cli.fail_metadata_keys.add("incident_status")
+        with (
+            patch.dict(
+                observer.os.environ,
+                {"MULTICA_AGENT_ID": "agent-observer"},
+                clear=True,
+            ),
+            self.assertRaisesRegex(observer.ObserverError, "incident_status"),
+        ):
+            observer.verify_fix(cli, args)
+        self.assertEqual(
+            cli.metadata[case["identifier"]]["logical_status"], "completed"
+        )
+
+        with patch.dict(
+            observer.os.environ,
+            {"MULTICA_AGENT_ID": "agent-observer"},
+            clear=True,
+        ):
+            repaired = observer.verify_fix(cli, args)
+            reused = observer.verify_fix(cli, args)
+        self.assertEqual(repaired["action"], "repaired")
+        self.assertEqual(reused["action"], "reused")
+        self.assertEqual(
+            cli.metadata[incident["identifier"]]["logical_status"], "resolved"
+        )
 
 
 if __name__ == "__main__":

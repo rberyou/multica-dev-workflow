@@ -23,7 +23,9 @@ from workflow_lib import (  # noqa: E402
     WorkflowError,
     apply_plan,
     build_plan,
+    deployment_record_path,
     install_skills,
+    load_deployment_record,
     parse_marker,
     plan_has_blockers,
     redact,
@@ -34,6 +36,11 @@ from workflow_lib import (  # noqa: E402
     write_json,
 )
 import workflow as workflow_cli  # noqa: E402
+
+CONSOLE_PATH = ROOT / "skills/multica-workflow-console/scripts/workflow_console.py"
+CONSOLE_SPEC = importlib.util.spec_from_file_location("workflow_console", CONSOLE_PATH)
+workflow_console = importlib.util.module_from_spec(CONSOLE_SPEC)
+CONSOLE_SPEC.loader.exec_module(workflow_console)
 
 
 class FakeCLI:
@@ -554,7 +561,60 @@ class ReconcileTests(unittest.TestCase):
             self.assertFalse(plan_has_blockers(plan))
             plan_path = temp_root / ".multica/plans/plan.json"
             write_json(plan_path, plan)
-            apply_plan(temp_root, cli, plan_path, plan["plan_digest"][:12])
+            with patch.dict(
+                "workflow_lib.os.environ",
+                {"MULTICA_AGENT_ID": "agent-original"},
+                clear=False,
+            ):
+                journal = apply_plan(
+                    temp_root, cli, plan_path, plan["plan_digest"][:12]
+                )
+            deployment = load_deployment_record(temp_root, cli.workspace_id)
+            self.assertIsNotNone(deployment)
+            self.assertEqual(deployment["source_commit"], plan["source_commit"])
+            self.assertEqual(deployment["plan_digest"], plan["plan_digest"])
+            self.assertEqual(deployment["workspace"]["id"], cli.workspace_id)
+            self.assertTrue(Path(journal["deployment_record"]).is_file())
+            self.assertEqual(
+                Path(journal["deployment_record"]).name,
+                f"{plan['plan_digest']}.json",
+            )
+            self.assertEqual(
+                json.loads(
+                    Path(journal["deployment_record"]).read_text(encoding="utf-8")
+                ),
+                deployment,
+            )
+            newer_deployment = {
+                **deployment,
+                "deployed_at": "9999-12-31T23:59:59Z",
+                "plan_digest": "f" * 64,
+            }
+            write_json(
+                deployment_record_path(temp_root, cli.workspace_id),
+                newer_deployment,
+            )
+            with patch.dict(
+                "workflow_lib.os.environ",
+                {"MULTICA_AGENT_ID": "agent-recovery"},
+                clear=False,
+            ):
+                recovered = apply_plan(
+                    temp_root, cli, plan_path, plan["plan_digest"][:12]
+                )
+            self.assertEqual(
+                recovered["deployment_record"], journal["deployment_record"]
+            )
+            self.assertEqual(
+                json.loads(
+                    Path(recovered["deployment_record"]).read_text(encoding="utf-8")
+                )["applied_actor"],
+                "agent-original",
+            )
+            self.assertEqual(
+                load_deployment_record(temp_root, cli.workspace_id),
+                newer_deployment,
+            )
 
             verification = build_plan(temp_root, cli, workspace, "quality", runtime_map, False, False, write_archives=False)
             remaining = [
@@ -563,6 +623,54 @@ class ReconcileTests(unittest.TestCase):
                 if action["type"] not in {"NO_CHANGE", "WARNING"}
             ]
             self.assertEqual(remaining, [])
+
+    def test_completed_legacy_journal_recovers_stable_unknown_actor(self):
+        with committed_temp_repo() as temp_root:
+            cli = MutatingCLI()
+            workspace = {"id": cli.workspace_id, "name": "Test", "slug": "test"}
+            runtime_map = temp_root / ".multica/runtime-map.local.json"
+            plan = build_plan(
+                temp_root, cli, workspace, "quality", runtime_map, False, False
+            )
+            plan_path = temp_root / ".multica/plans/legacy.json"
+            write_json(plan_path, plan)
+            journal = apply_plan(
+                temp_root, cli, plan_path, plan["plan_digest"][:12]
+            )
+            journal_path = (
+                temp_root
+                / f".multica/journals/{plan['plan_digest'][:12]}.json"
+            )
+            legacy_journal = json.loads(journal_path.read_text(encoding="utf-8"))
+            legacy_journal.pop("applied_actor", None)
+            legacy_journal.pop("deployment_record", None)
+            write_json(journal_path, legacy_journal)
+
+            recovered_from_record = apply_plan(
+                temp_root, cli, plan_path, plan["plan_digest"][:12]
+            )
+            self.assertEqual(recovered_from_record["applied_actor"], "human_host")
+
+            legacy_journal = json.loads(journal_path.read_text(encoding="utf-8"))
+            legacy_journal.pop("applied_actor", None)
+            legacy_journal.pop("deployment_record", None)
+            write_json(journal_path, legacy_journal)
+            Path(journal["deployment_record"]).unlink()
+            deployment_record_path(temp_root, cli.workspace_id).unlink()
+
+            recovered = apply_plan(
+                temp_root, cli, plan_path, plan["plan_digest"][:12]
+            )
+            recovered_record = json.loads(
+                Path(recovered["deployment_record"]).read_text(encoding="utf-8")
+            )
+            self.assertEqual(recovered["applied_actor"], "legacy_unknown")
+            self.assertEqual(recovered_record["applied_actor"], "legacy_unknown")
+
+            replayed = apply_plan(
+                temp_root, cli, plan_path, plan["plan_digest"][:12]
+            )
+            self.assertEqual(replayed["applied_actor"], "legacy_unknown")
 
     def test_real_autopilot_response_is_idempotent_and_uses_supported_commands(self):
         with committed_temp_repo() as temp_root:
@@ -1041,6 +1149,63 @@ class ReconcileTests(unittest.TestCase):
             .output,
             "json",
         )
+        self.assertEqual(
+            workflow_cli.parser()
+            .parse_args(
+                [
+                    "record-maintenance-progress",
+                    "--incident",
+                    "WOR-1",
+                    "--stage",
+                    "in-development",
+                    "--implementation-issue",
+                    "T-1",
+                    "--output",
+                    "json",
+                ]
+            )
+            .output,
+            "json",
+        )
+
+    def test_repository_audit_forwards_read_only_mode_by_default(self):
+        args = workflow_cli.parser().parse_args(["audit", "--scope", "all"])
+        fake_cli = SimpleNamespace(binary="multica", profile="test")
+        completed = SimpleNamespace(stdout="{}", stderr="", returncode=0)
+        with (
+            patch.object(
+                workflow_cli,
+                "context",
+                return_value=(fake_cli, {"id": "workspace-test"}),
+            ),
+            patch.object(
+                workflow_cli, "run_process", return_value=completed
+            ) as run_process,
+            patch.object(workflow_cli, "write_console_safe"),
+        ):
+            self.assertEqual(workflow_cli.command_observer(args, ROOT), 0)
+        command = run_process.call_args.args[0]
+        self.assertIn("audit", command)
+        self.assertNotIn("--report", command)
+
+    def test_workflow_console_status_invokes_read_only_audit(self):
+        completed = SimpleNamespace(returncode=0)
+        with (
+            patch.dict(workflow_console.os.environ, {}, clear=True),
+            patch.object(workflow_console, "locate_repo", return_value=ROOT),
+            patch.object(
+                workflow_console.subprocess, "run", return_value=completed
+            ) as run_process,
+            patch.object(
+                workflow_console.sys,
+                "argv",
+                ["workflow_console.py", "status", "--workspace", "workspace-test"],
+            ),
+        ):
+            self.assertEqual(workflow_console.main(), 0)
+        command = run_process.call_args.args[0]
+        self.assertIn("audit", command)
+        self.assertNotIn("--report", command)
         self.assertEqual(
             workflow_cli.parser()
             .parse_args(

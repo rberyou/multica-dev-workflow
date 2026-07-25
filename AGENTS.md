@@ -23,12 +23,13 @@ python -m pip install -r requirements.txt check-jsonschema
 Run the main validation loop:
 
 ```powershell
-python -m unittest discover -s tests -v
+python -m unittest tests.test_manifest tests.test_observer tests.test_package_skills tests.test_reconcile tests.test_release -v
 python scripts/generate_audit_contract.py --check
-python scripts/generate_secure_runtime_manifest.py --check
-dotnet build secure-runtime/WorkflowSecureRuntime.sln --configuration Release
-dotnet run --project secure-runtime/tests/WorkflowSecureRuntime.Tests/WorkflowSecureRuntime.Tests.csproj --configuration Release --no-build
+python -m py_compile scripts/workflow.py scripts/workflow_lib.py scripts/package_skills.py scripts/generate_audit_contract.py scripts/release.py skills/multica-workflow-observer/scripts/observer.py skills/multica-workflow-console/scripts/workflow_console.py
+check-jsonschema --schemafile workflow.schema.json workflow.json
 ```
+
+Run `generate_secure_runtime_manifest.py` and the .NET build/security tests only when a change touches `secure-runtime/`, `skills/multica-workflow-maintainer/`, or another future-component path selected by `.github/workflows/validate-future-components.yml`.
 
 Validate desired-state changes with `check-jsonschema --schemafile workflow.schema.json workflow.json`. Inspect locally with `python scripts/workflow.py doctor`, then `export`, `plan`, and `verify`. Apply only a reviewed plan with matching `APPROVE WORKFLOW PLAN <short-digest>` approval; plan changes invalidate approval.
 
@@ -38,7 +39,7 @@ Use four-space indentation. Follow Python conventions (`snake_case` functions, `
 
 ## Testing Guidelines
 
-Name Python files `test_*.py` and methods `test_<behavior>`. Add regression tests beside the affected subsystem, including failure paths for approval, digest, redaction, and policy changes. Tests must be deterministic across Windows, Linux, and macOS. Run both suites before opening a PR.
+Name Python files `test_*.py` and methods `test_<behavior>`. Add regression tests beside the affected subsystem, including failure paths for approval, digest, redaction, and policy changes. Tests must be deterministic across Windows, Linux, and macOS. Run the Phase 1 Python, contract, compile and schema checks before opening a PR. Run future-component Python/.NET checks only when the PR changes their scoped paths.
 
 ## Agent Workflow Concepts
 

@@ -15,4 +15,4 @@ Use `scripts/workflow_console.py status` to inspect workflow health and active g
 
 Mutating commands such as Plan approval, decisions, release approval and GitHub Environment approval remain manual in RC4. They are intentionally deferred until a later reviewed human-presence design.
 
-Read `docs/workflow-console.md` in the workflow repository for the automatic handoff loop and exact human gate locations.
+Read `docs/workflow-console.md` in the workflow repository for the Phase 1 status checks, ordinary-development evidence handoff and exact human gate locations.

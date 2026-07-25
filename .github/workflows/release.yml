@@ -28,9 +28,14 @@ jobs:
       tag: ${{ steps.request.outputs.tag }}
       version: ${{ steps.request.outputs.version }}
     steps:
+      - name: Require trusted dispatch ref
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "release workflow must be dispatched from refs/heads/main" >&2
+          exit 1
       - uses: actions/checkout@v5
         with:
-          ref: ${{ github.sha }}
+          ref: refs/heads/main
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@v6
@@ -41,7 +46,6 @@ jobs:
           REQUEST_B64: ${{ inputs.request_b64 }}
         shell: bash
         run: |
-          mkdir -p .multica/release-request
           python - <<'PY'
           import base64
           import os
@@ -49,10 +53,28 @@ jobs:
 
           encoded = os.environ["REQUEST_B64"]
           padding = "=" * (-len(encoded) % 4)
-          Path(".multica/release-request/request.json").write_bytes(
-              base64.urlsafe_b64decode(encoded + padding)
-          )
+          payload = base64.urlsafe_b64decode(encoded + padding)
+          Path(os.environ["RUNNER_TEMP"], "release-request.json").write_bytes(payload)
           PY
+      - name: Verify Request on trusted main
+        id: request-source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/release.py verify-request \
+            --request "${RUNNER_TEMP}/release-request.json" \
+            --github-output "${GITHUB_OUTPUT}"
+      - name: Check out approved source commit
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ steps.request-source.outputs.source_commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Restore verified Request
+        shell: bash
+        run: |
+          mkdir -p .multica/release-request
+          cp "${RUNNER_TEMP}/release-request.json" .multica/release-request/request.json
       - name: Install validation tools
         run: python -m pip install -r requirements.txt check-jsonschema
       - name: Verify release Request
@@ -62,7 +84,7 @@ jobs:
         run: |
           python scripts/release.py verify-request \
             --request .multica/release-request/request.json \
-            --expected-source "${GITHUB_SHA}" \
+            --expected-source "${{ steps.request-source.outputs.source_commit }}" \
             --github-output "${GITHUB_OUTPUT}"
       - name: Validate and test
         run: |

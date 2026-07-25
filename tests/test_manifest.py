@@ -95,7 +95,14 @@ class ManifestTests(unittest.TestCase):
         )
         self.assertIn("workflow_dispatch:", workflow)
         self.assertNotIn("push:\n    tags:", workflow)
-        self.assertIn("ref: ${{ github.sha }}", workflow)
+        self.assertIn("if: github.ref != 'refs/heads/main'", workflow)
+        self.assertIn("release workflow must be dispatched from refs/heads/main", workflow)
+        self.assertIn("ref: refs/heads/main", workflow)
+        self.assertNotIn("ref: ${{ github.sha }}", workflow)
+        self.assertLess(
+            workflow.index("Verify Request on trusted main"),
+            workflow.index("Check out approved source commit"),
+        )
         self.assertIn("environment: workflow-release", workflow)
         self.assertIn("python scripts/release.py verify-request", workflow)
         self.assertIn("python scripts/release.py verify-publish-gate", workflow)

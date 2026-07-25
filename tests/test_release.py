@@ -651,10 +651,15 @@ class ReleaseTests(unittest.TestCase):
                 "merge_commit_sha": "a" * 40,
                 "merged_at": "2026-07-18T00:00:00Z",
             },
-            "validation": {"databaseId": 123, "headSha": "a" * 40},
+            "validation": {
+                "databaseId": 123,
+                "headSha": "a" * 40,
+                "status": "completed",
+                "conclusion": "success",
+            },
             "version_files": ["VERSION"],
             "changelog_hash": "d" * 64,
-            "expected_assets": ["checksums.txt", "workflow.zip"],
+            "expected_assets": release.phase1_expected_assets("1.1.0-rc.4"),
             "release_plan_digest": "e" * 64,
             "maintenance_provenance": {
                 "maintenance_issue": "WOR-43",
@@ -662,25 +667,16 @@ class ReleaseTests(unittest.TestCase):
                 "multica_approval_comment_id": "approval-1",
                 "maintenance_evidence_sha256": "f" * 64,
                 "multica_approval_author_sha256": "1" * 64,
+                "authorization_type": "phase1_development",
             },
             "implementation_provenance": [
                 {
-                    "issue_id": "WOR-45",
-                    "maintenance_change_id": "WOR-43",
-                    "plan_revision": "v3",
-                    "review_comment_id": "review-45",
-                    "reviewed_commit_sha": "7" * 40,
-                    "github_pr_number": 9,
-                    "github_merge_commit_sha": "8" * 40,
-                    "github_merged_at": "2026-07-18T00:00:00Z",
-                },
-                {
                     "issue_id": "WOR-48",
-                    "maintenance_change_id": "WOR-44",
+                    "maintenance_change_id": "WOR-43",
                     "plan_revision": "v5",
                     "review_comment_id": "review-48",
                     "reviewed_commit_sha": "9" * 40,
-                    "github_pr_number": 10,
+                    "github_pr_number": 9,
                     "github_merge_commit_sha": "a" * 40,
                     "github_merged_at": "2026-07-19T00:00:00Z",
                 },
@@ -1713,11 +1709,72 @@ class ReleaseTests(unittest.TestCase):
             with self.assertRaisesRegex(release.ReleaseError, "digest is invalid"):
                 release.verify_release_request(ROOT, request)
 
+    def test_release_request_rejects_unprotected_tag_before_mutation(self):
+        request = self.release_request_fixture()
+        request["tag"] = "unprotected-tag"
+        request["release_request_digest"] = release.digest(
+            {key: value for key, value in request.items() if key != "release_request_digest"}
+        )
+        with self.assertRaisesRegex(release.ReleaseError, "tag must equal"):
+            release.verify_release_request_payload(request)
+
+    def test_release_request_rejects_unsafe_semantic_version_before_mutation(self):
+        request = self.release_request_fixture()
+        request["version"] = "1.2.0:refs/heads/main"
+        request["tag"] = "v1.2.0:refs/heads/main"
+        request["release_request_digest"] = release.digest(
+            {
+                key: value
+                for key, value in request.items()
+                if key != "release_request_digest"
+            }
+        )
+        with self.assertRaisesRegex(release.ReleaseError, "semantic version"):
+            release.verify_release_request_payload(request)
+
+    def test_release_request_rejects_non_phase1_asset_set_before_mutation(self):
+        request = self.release_request_fixture()
+        request["expected_assets"] = ["checksums.txt", "workflow.zip"]
+        request["release_request_digest"] = release.digest(
+            {key: value for key, value in request.items() if key != "release_request_digest"}
+        )
+        with self.assertRaisesRegex(release.ReleaseError, "exact Phase 1 asset set"):
+            release.verify_release_request_payload(request)
+
+    def test_release_request_rejects_invalid_plan_digest_before_github_output(self):
+        request = self.release_request_fixture()
+        request["release_plan_digest"] = "invalid\nsource_commit=forged"
+        request["release_request_digest"] = release.digest(
+            {
+                key: value
+                for key, value in request.items()
+                if key != "release_request_digest"
+            }
+        )
+        with self.assertRaisesRegex(release.ReleaseError, "release_plan_digest"):
+            release.verify_release_request_payload(request)
+
+    def test_release_request_rejects_non_object_implementation_provenance(self):
+        request = self.release_request_fixture()
+        request["implementation_provenance"] = ["not-an-object"]
+        request["implementation_provenance_sha256"] = release.digest(
+            request["implementation_provenance"]
+        )
+        request["release_request_digest"] = release.digest(
+            {
+                key: value
+                for key, value in request.items()
+                if key != "release_request_digest"
+            }
+        )
+        with self.assertRaisesRegex(release.ReleaseError, "integration-validation"):
+            release.verify_release_request_payload(request)
+
     def test_phase1_release_request_rejects_extra_implementation_provenance(self):
         request = self.release_request_fixture()
-        request["maintenance_provenance"][
-            "authorization_type"
-        ] = "phase1_development"
+        request["implementation_provenance"].append(
+            {**request["implementation_provenance"][0], "issue_id": "WOR-EXTRA"}
+        )
         request["implementation_provenance_sha256"] = release.digest(
             request["implementation_provenance"]
         )
@@ -1735,7 +1792,7 @@ class ReleaseTests(unittest.TestCase):
                 "release_control",
                 return_value=request["release_control"],
             ),
-            self.assertRaisesRegex(release.ReleaseError, "exactly one final"),
+            self.assertRaisesRegex(release.ReleaseError, "exactly one integration-validation"),
         ):
             release.verify_release_request(ROOT, request, verify_state=False)
 
@@ -1815,12 +1872,9 @@ class ReleaseTests(unittest.TestCase):
                 request["release_request_digest"],
             )
 
-    def test_rc4_release_request_requires_both_implementation_records(self):
+    def test_release_request_rejects_legacy_authorization_type(self):
         request = self.release_request_fixture()
-        request["implementation_provenance"] = request["implementation_provenance"][:1]
-        request["implementation_provenance_sha256"] = release.digest(
-            request["implementation_provenance"]
-        )
+        request["maintenance_provenance"]["authorization_type"] = "maintenance"
         request["release_request_digest"] = release.digest(
             {key: value for key, value in request.items() if key != "release_request_digest"}
         )
@@ -1832,7 +1886,7 @@ class ReleaseTests(unittest.TestCase):
                 "release_control",
                 return_value=request["release_control"],
             ),
-            self.assertRaisesRegex(release.ReleaseError, "bind two Implementation Issues"),
+            self.assertRaisesRegex(release.ReleaseError, "Phase 1 development flow"),
         ):
             release.verify_release_request(ROOT, request)
 
@@ -2063,6 +2117,98 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn("release_environment_sha256=" + "2" * 64, message)
         self.assertIn("release_ruleset_id=99", message)
         self.assertIn("release_ruleset_sha256=" + "3" * 64, message)
+        self.assertEqual(
+            release.embedded_release_request(message)["release_request_digest"],
+            request["release_request_digest"],
+        )
+
+    def test_release_parser_exposes_durable_recovery_entry(self):
+        args = release.parser().parse_args(["recover", "--tag", "v1.2.0"])
+        self.assertEqual(args.tag, "v1.2.0")
+
+    def test_release_recover_dispatches_exact_existing_tag_request(self):
+        request = self.release_request_fixture()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            request_path = root / "request.json"
+            request_path.write_text(json.dumps(request), encoding="utf-8")
+            args = SimpleNamespace(request=str(request_path), tag=None)
+            boundary = {
+                "repository": "rberyou/multica-dev-workflow",
+                "deployment_branch": "main",
+                "environment": "workflow-release",
+            }
+            with (
+                patch.object(
+                    release,
+                    "verify_dispatcher_installation",
+                    return_value={"app_id": self.DISPATCHER_APP_ID},
+                ),
+                patch.object(release, "verify_existing_recovery_tag") as tag_mock,
+                patch.object(
+                    release,
+                    "verify_release_environment",
+                    return_value=boundary,
+                ),
+                patch.object(
+                    release,
+                    "save_release_request",
+                    return_value=root / "saved-request.json",
+                ),
+                patch.object(release, "dispatch_release_workflow") as dispatch_mock,
+                patch("builtins.print"),
+            ):
+                self.assertEqual(release.command_recover(args, root), 0)
+        tag_mock.assert_called_once_with(root, request)
+        dispatch_mock.assert_called_once_with(
+            root,
+            boundary,
+            request,
+            recover_existing_tag=True,
+        )
+
+    def test_release_recovery_rejects_local_tag_that_differs_from_origin(self):
+        request = self.release_request_fixture()
+
+        def fake_run(args, root, check=True):
+            if args[:3] == ["git", "ls-remote", "--tags"]:
+                return SimpleNamespace(
+                    stdout=f"{'a' * 40}\trefs/tags/{request['tag']}\n",
+                    stderr="",
+                    returncode=0,
+                )
+            if args[:3] == ["git", "tag", "--list"]:
+                return SimpleNamespace(
+                    stdout=request["tag"] + "\n", stderr="", returncode=0
+                )
+            if args[:2] == ["git", "rev-parse"]:
+                return SimpleNamespace(stdout="b" * 40 + "\n", stderr="", returncode=0)
+            raise AssertionError(args)
+
+        with (
+            patch.object(release, "run", side_effect=fake_run),
+            self.assertRaisesRegex(release.ReleaseError, "differs from origin"),
+        ):
+            release.verify_existing_recovery_tag(ROOT, request)
+
+    def test_successful_validation_uses_stable_workflow_filename(self):
+        captured = []
+
+        def fake_gh(root, args):
+            captured.append(args)
+            return [
+                {
+                    "databaseId": 1,
+                    "status": "completed",
+                    "conclusion": "success",
+                    "createdAt": "2026-07-25T00:00:00Z",
+                }
+            ]
+
+        with patch.object(release, "gh_json", side_effect=fake_gh):
+            release.successful_validation(ROOT, "a" * 40)
+        workflow_index = captured[0].index("--workflow")
+        self.assertEqual(captured[0][workflow_index + 1], "validate.yml")
 
     def test_publish_checks_environment_approval_before_tag_mutation(self):
         request = self.release_request_fixture()
@@ -2429,7 +2575,7 @@ class ReleaseTests(unittest.TestCase):
             raise AssertionError(args)
 
         with (
-            patch.object(release, "verify_versions", return_value=[]),
+            patch.object(release, "verify_versions_at_ref", return_value=[]),
             patch.object(release, "run", side_effect=fake_run),
             patch.object(release, "verify_origin_main_reachability", return_value="b" * 40),
             patch.object(release, "merged_pr_for_commit", return_value={"number": 4}),
@@ -2477,7 +2623,7 @@ class ReleaseTests(unittest.TestCase):
             raise AssertionError(args)
 
         with (
-            patch.object(release, "verify_versions", return_value=[]),
+            patch.object(release, "verify_versions_at_ref", return_value=[]),
             patch.object(release, "run", side_effect=fake_run),
             patch.object(release, "verify_origin_main_reachability", return_value="b" * 40),
             patch.object(release, "merged_pr_for_commit", return_value={"number": 3}),

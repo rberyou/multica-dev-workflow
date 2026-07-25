@@ -196,7 +196,7 @@ Agent 应读取：
 
 - urgent/high Incident 可能使来源 issue blocked，`waiting_on=workflow_fix`。
 - medium/low Incident 在不影响正确性时可以继续执行。
-- 工作流观察员只分诊和验证；工作流维护员负责 Git 修复，维护审查员保持独立。
+- Phase 1 中，工作流观察员只负责分诊、跟踪和独立验证；Git 修复与代码审查由普通开发流程中的集成负责人、开发工程师和代码审查员完成。工作流维护员与维护审查员自动化尚未启用。
 - Incident 只有在修复版本部署到受影响 workspace 并完成 Observer 验证后才关闭。
 
 ## 10. 在不同电脑上使用

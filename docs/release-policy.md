@@ -19,9 +19,7 @@ For an Incident fix, the Maintenance Case must additionally bind its Incident, m
 Required sequence:
 
 ```text
-python scripts/release.py plan --version <version> \
-  --development-issue <requirement-or-maintenance-case> \
-  --implementation-provenance <integration-validation-issue>
+python scripts/release.py plan --version <version> --development-issue <requirement-or-maintenance-case> --implementation-provenance <integration-validation-issue>
 APPROVE WORKFLOW RELEASE <short-digest>
 $env:GH_TOKEN = <short-lived Dispatcher App installation token>
 python scripts/release.py doctor
@@ -55,6 +53,13 @@ Direct `v*` tag pushes do not trigger publication and are rejected by the tag ru
 
 `verify-tag` rechecks the protected Environment approval and exact provenance. Legacy RC1-RC4 maintenance annotations remain verifiable as historical evidence but do not require Phase 1 to deploy their Maintainer/Reviewer control plane.
 
-Release recovery keeps the immutable tag and its original publish-gate digest. A recovery run must reuse the exact Release Request digest and source commit, receive a new protected Environment approval, and bind its new gate before publishing missing approved assets.
+Release recovery keeps the immutable tag and its original publish-gate digest. A recovery run must reuse the exact Release Request digest and source commit, receive a new protected Environment approval, and bind its new gate before publishing missing approved assets. With the short-lived Dispatcher token set, re-dispatch the embedded Request from an existing tag or a durable local Request file:
+
+```text
+python scripts/release.py recover --tag <v-version>
+python scripts/release.py recover --request <release-request.json>
+```
+
+Recovery refuses an altered Request or unexpected Release assets. When the GitHub Release already exists, the workflow may replace only the approved Phase 1 assets so an interrupted upload can complete safely.
 
 Publishing a Release does not authorize Multica Apply. Each Workspace requires a separate digest-bound deployment Plan and approval.
