@@ -5,6 +5,7 @@
     "id": "development-delivery",
     "name": "开发交付小队",
     "version": "1.1.0-rc.4",
+    "phase": 1,
     "protocol_revision": "v3",
     "approver_role": "人工审批人"
   },
@@ -38,13 +39,6 @@
         "code-reviewer",
         "workflow-observer"
       ]
-    },
-    {
-      "key": "workflow-maintainer",
-      "name": "multica-workflow-maintainer",
-      "path": "skills/multica-workflow-maintainer",
-      "targets": ["local", "workspace"],
-      "attach_to": ["workflow-maintainer", "workflow-maintenance-reviewer"]
     },
     {
       "key": "workflow-console",
@@ -126,31 +120,13 @@
       "instruction_files": ["instructions/roles/workflow-observer.md"],
       "max_concurrent_tasks": 1,
       "permission_mode": "public_to_workspace"
-    },
-    {
-      "key": "workflow-maintainer",
-      "name": "工作流维护员",
-      "description": "根据已确认 Incident 维护工作流源码、测试、RC、发布和回滚",
-      "runtime_binding": "codex-worker",
-      "instruction_files": ["instructions/roles/workflow-maintainer.md"],
-      "max_concurrent_tasks": 1,
-      "permission_mode": "private"
-    },
-    {
-      "key": "workflow-maintenance-reviewer",
-      "name": "工作流维护审查员",
-      "description": "独立审查工作流变更 Plan、代码、发布和回滚，不修改被审查内容",
-      "runtime_binding": "opencode-review",
-      "instruction_files": ["instructions/roles/workflow-maintenance-reviewer.md"],
-      "max_concurrent_tasks": 1,
-      "permission_mode": "private"
     }
   ],
   "projects": [
     {
       "key": "workflow-operations",
       "title": "工作流运维",
-      "description": "集中记录工作流 Incident、维护变更、Canary 验证、发布与回滚证据。",
+      "description": "集中记录 Phase 1 工作流 Observation、Incident、Maintenance Case 与 Observer 验证证据。",
       "lead": "workflow-observer",
       "status": "in_progress"
     }
@@ -220,11 +196,7 @@
     "phase": "planned",
     "required": false,
     "open_code_allowed": true,
-    "agents": {
-      "workflow-maintainer": "workflow_maintainer",
-      "workflow-maintenance-reviewer": "workflow_reviewer",
-      "workflow-observer": "workflow_reviewer"
-    }
+    "agents": {}
   },
   "squad": {
     "key": "development-delivery",

@@ -79,13 +79,10 @@ EXPECTED_AGENT_KEYS = {
     "agent.developer-b",
     "agent.code-reviewer",
     "agent.workflow-observer",
-    "agent.workflow-maintainer",
-    "agent.workflow-maintenance-reviewer",
 }
 EXPECTED_SKILL_NAMES = {
     "multica-requirement-intake",
     "multica-workflow-observer",
-    "multica-workflow-maintainer",
 }
 
 
@@ -2354,6 +2351,7 @@ def record_maintenance_decision(cli: CLI, args: argparse.Namespace) -> dict[str,
             "incident_id": incident_id,
             "maintenance_intake_digest": digest,
             "approval_comment_id": comment_id,
+            "human_approver_id": str(metadata.get("human_approver_id") or ""),
             "executor": args.executor or "ordinary_development_workflow",
             "maintenance_case_status": "approved",
             "logical_status": "approved",
@@ -2994,6 +2992,11 @@ def audit_control_plane(cli: CLI, coverage_issue: str | None) -> list[dict[str, 
     )
     operations_mode_spec = (operations.get("modes") or {}).get(operations_mode) or {}
     drift = {}
+    if contract.get("workflow_phase") != 1:
+        drift["workflow_phase"] = {
+            "expected": 1,
+            "actual": contract.get("workflow_phase"),
+        }
     collisions = {}
 
     def record_collisions(

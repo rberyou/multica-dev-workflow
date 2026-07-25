@@ -1,9 +1,10 @@
 ## Summary
 
-## Plan / Incident
+## Development Source / Incident
 
 - Plan revision:
-- Incident or enhancement:
+- Requirement or Maintenance Case:
+- Incident, if applicable:
 - Protocol/version impact:
 
 ## Validation

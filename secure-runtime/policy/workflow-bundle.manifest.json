@@ -18,12 +18,12 @@
     "skills/multica-workflow-maintainer/scripts/maintenance_loop.py": "305ba421ce839e4ac229eaa31de242d8054b39034456cc3127aef3f6549e3a61",
     "skills/multica-workflow-manager/SKILL.md": "00538fbcd16f4f557b3dfceb68dd556c4126ad1911ed8688c3d352d6afd63bc7",
     "skills/multica-workflow-manager/agents/openai.yaml": "681d9b36164f2f00778e87b98246d4643ee64d86d4f7794122520e6de83dc394",
-    "skills/multica-workflow-manager/references/commands.md": "efb0acada3b81b6d80391793358458fbeafd53d4bf14828416f507a6233d2b4f",
+    "skills/multica-workflow-manager/references/commands.md": "a9bdb92b81877778db30547e8418a919df9a3f600de5c3f9b8d076cc3904f393",
     "skills/multica-workflow-observer/SKILL.md": "84eddc2a7bac638993382741e7a9389231114b264ea7ce483df518fc26bba398",
     "skills/multica-workflow-observer/agents/openai.yaml": "178ee33cbfccf66f708769d50dbc2853fe06e9f91716b3fd36396864d5fa5fec",
-    "skills/multica-workflow-observer/references/control-plane-contract.json": "8de46e0df717e12b89ec36d6c4cbe2806375543f959fa2a332caec21aecb1d0a",
+    "skills/multica-workflow-observer/references/control-plane-contract.json": "cdc9d6432cae54df8bf9d15a7608be6ef0760a2e9806503aff3ca0048d8623b3",
     "skills/multica-workflow-observer/references/incident-contract.md": "3cd607cc18c88843aaac759c9bbda7795a9f7763aa9c59d758637a6f265daa6d",
     "skills/multica-workflow-observer/references/triage-runbook.md": "a7fb2436de8f3c8983aa2a1cd89677af68b09e8b8bd724a8c75833e327afc8ff",
-    "skills/multica-workflow-observer/scripts/observer.py": "ce36d0eeb358b2319934602b1e1e908b05a347f8ef4d02485c4994a76f346139"
+    "skills/multica-workflow-observer/scripts/observer.py": "2d3db30c6d863d37bfc77c47f35a3660d40a683ce2e7db873a28563b2555fb53"
   }
 }

@@ -82,7 +82,9 @@ Never migrate Runtimes as an incidental effect of updating instructions.
 ## Release Plan
 
 ```text
-python scripts/release.py plan --version <version> --maintenance-issue <T-ID>
+python scripts/release.py plan --version <version> \
+  --development-issue <requirement-or-maintenance-case> \
+  --implementation-provenance <integration-validation-issue>
 $env:GH_TOKEN = <short-lived Dispatcher App installation token>
 python scripts/release.py doctor
 python scripts/release.py approval-block --plan <release-plan>
@@ -90,7 +92,7 @@ python scripts/release.py apply --plan <release-plan> --approve <short-digest>
 Remove-Item Env:GH_TOKEN
 ```
 
-Generate the Plan with the normal human-host read context. After Plan generation, the durable human approver must comment `APPROVE WORKFLOW RELEASE <short-digest>` on the Maintenance Issue. Then mint a short-lived, selected-repository Dispatcher App token outside Agent runtimes and expose it only through `GH_TOKEN` for `doctor`, `approval-block` and `apply`. The read-only `approval-block` prints a Release Request summary. `apply` dispatches that request but cannot mutate tags or Releases. The isolated reviewer approves the protected `workflow-release` Environment outside Agent runtimes, and the dedicated Publisher App performs publication. `verify-tag` rechecks Environment, workflow-run, PR, CI, Dispatcher, Publisher and Maintenance provenance. Bootstrap mode is historical and cannot authorize a new release.
+Generate the Plan with the normal human-host read context. Use the completed top-level Requirement for a feature release, or the approved Phase 1 Maintenance Case for an Incident fix. The linked integration-validation Issue must contain the ordinary Code Reviewer comment and exact Plan/SHA/PR bindings. After Plan generation, the durable human approver comments `APPROVE WORKFLOW RELEASE <short-digest>` on the selected development Issue. Then mint a short-lived, selected-repository Dispatcher App token outside Agent runtimes and expose it only through `GH_TOKEN` for `doctor`, `approval-block` and `apply`. The read-only `approval-block` prints a Release Request summary. `apply` dispatches that request but cannot mutate tags or Releases. The isolated reviewer approves the protected `workflow-release` Environment, and the dedicated Publisher App performs publication. `verify-tag` rechecks Environment, workflow-run, PR, CI, Dispatcher, Publisher and release provenance. Bootstrap mode is historical and cannot authorize a new release.
 
 ## Install Local Skills
 
@@ -99,3 +101,5 @@ python scripts/workflow.py install-skills
 ```
 
 Prefer links or Windows junctions. Copy only when links are unavailable, and rerun after Git updates.
+
+The default Phase 1 install contains requirement-intake, workflow-manager, workflow-observer and workflow-console. Future Maintainer and Secure Runtime components are not installed by this command.

@@ -22,9 +22,8 @@ class PackageSkillsTests(unittest.TestCase):
         )
 
     def test_archive_is_deterministic_and_contains_hash(self):
-        for skill in sorted((ROOT / "skills").iterdir()):
-            if not (skill / "SKILL.md").is_file():
-                continue
+        manifest = json.loads((ROOT / "workflow.json").read_text(encoding="utf-8"))
+        for skill in sorted(ROOT / item["path"] for item in manifest["skills"]):
             with self.subTest(skill=skill.name), tempfile.TemporaryDirectory() as temp:
                 first = Path(temp) / "first.zip"
                 second = Path(temp) / "second.zip"

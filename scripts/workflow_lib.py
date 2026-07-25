@@ -288,9 +288,10 @@ def validate_repository(root: Path, deployment_profile: str) -> tuple[dict[str, 
     if manifest.get("schema_version") != 2:
         errors.append("schema_version must be 2")
     workflow = manifest.get("workflow") or {}
-    for field in ["id", "name", "version", "protocol_revision", "approver_role"]:
+    for field in ["id", "name", "version", "phase", "protocol_revision", "approver_role"]:
         if not workflow.get(field):
             errors.append(f"workflow.{field} is required")
+    current_phase = workflow.get("phase")
     version_file = (root / "VERSION").read_text(encoding="utf-8").strip() if (root / "VERSION").is_file() else ""
     if version_file != workflow.get("version"):
         errors.append("VERSION must match workflow.version")
@@ -307,6 +308,15 @@ def validate_repository(root: Path, deployment_profile: str) -> tuple[dict[str, 
         errors.append("agent keys must be unique")
     if len(set(agent_names)) != len(agent_names):
         errors.append("agent names must be unique")
+    if current_phase == 1:
+        future_agents = {
+            "workflow-maintainer",
+            "workflow-maintenance-reviewer",
+        } & set(agent_keys)
+        if future_agents:
+            errors.append(
+                f"Phase 1 must not deploy future maintenance Agents: {sorted(future_agents)}"
+            )
     bindings = profile.get("bindings") or {}
     for agent in agents:
         if agent.get("runtime_binding") not in bindings:
@@ -330,6 +340,8 @@ def validate_repository(root: Path, deployment_profile: str) -> tuple[dict[str, 
     skill_names = [skill.get("name") for skill in manifest.get("skills") or []]
     if len(set(skill_keys)) != len(skill_keys) or len(set(skill_names)) != len(skill_names):
         errors.append("skill keys and names must be unique")
+    if current_phase == 1 and "workflow-maintainer" in set(skill_keys):
+        errors.append("Phase 1 must not deploy the workflow-maintainer Skill")
     for skill in manifest.get("skills") or []:
         directory = root / str(skill.get("path", ""))
         if not (directory / "SKILL.md").is_file():
@@ -456,8 +468,13 @@ def validate_repository(root: Path, deployment_profile: str) -> tuple[dict[str, 
             or secure_runtime.get("open_code_allowed") is not False
         ):
             errors.append("enforced secure_runtime must be required and disallow OpenCode")
-        if not isinstance(secure_agents, dict) or not secure_agents:
-            errors.append("secure_runtime.agents must define managed secure roles")
+        if not isinstance(secure_agents, dict):
+            errors.append("secure_runtime.agents must be an object")
+            secure_agents = {}
+        if secure_phase == "enforced" and not secure_agents:
+            errors.append("enforced secure_runtime.agents must define managed secure roles")
+        if current_phase == 1 and secure_agents:
+            errors.append("Phase 1 secure_runtime.agents must be empty")
         for agent_key, security_profile in secure_agents.items():
             desired_agent = next((item for item in agents if item.get("key") == agent_key), None)
             if not desired_agent:

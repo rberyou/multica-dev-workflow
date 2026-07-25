@@ -443,14 +443,14 @@ class ReconcileTests(unittest.TestCase):
             plan = build_plan(ROOT, cli, workspace, "quality", runtime_map, False, False, write_archives=False)
         self.assertFalse(plan_has_blockers(plan))
         types = [action["type"] for action in plan["actions"]]
-        self.assertEqual(types.count("CREATE_AGENT"), 10)
+        self.assertEqual(types.count("CREATE_AGENT"), 8)
         self.assertEqual(types.count("CREATE_PROJECT"), 1)
         self.assertEqual(types.count("CREATE_AUTOPILOT"), 2)
         self.assertEqual(types.count("ADD_AUTOPILOT_TRIGGER"), 2)
         self.assertEqual(types.count("CREATE_SQUAD"), 1)
         self.assertEqual(types.count("ADD_MEMBER"), 8)
-        self.assertEqual(types.count("CREATE_SKILL"), 3)
-        self.assertEqual(types.count("ATTACH_SKILL"), 10)
+        self.assertEqual(types.count("CREATE_SKILL"), 2)
+        self.assertEqual(types.count("ATTACH_SKILL"), 8)
 
     def test_repository_validation_enforces_complete_workflow_schema(self):
         cases = {
@@ -481,6 +481,9 @@ class ReconcileTests(unittest.TestCase):
             "removed autopilot priority": lambda value: value["autopilots"][0].update(
                 {"priority": "medium"}
             ),
+            "invalid workflow phase": lambda value: value["workflow"].update(
+                {"phase": 4}
+            ),
         }
         for label, mutate in cases.items():
             with self.subTest(case=label), committed_temp_repo() as temp_root:
@@ -490,6 +493,22 @@ class ReconcileTests(unittest.TestCase):
                 write_json(path, manifest)
                 with self.assertRaisesRegex(WorkflowError, "workflow.json schema"):
                     validate_repository(temp_root, "quality")
+
+    def test_phase1_repository_rejects_future_maintenance_components(self):
+        with committed_temp_repo() as temp_root:
+            path = temp_root / "workflow.json"
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+            future_agent = {
+                **manifest["agents"][0],
+                "key": "workflow-maintainer",
+                "name": "工作流维护员",
+            }
+            manifest["agents"].append(future_agent)
+            write_json(path, manifest)
+            with self.assertRaisesRegex(
+                WorkflowError, "Phase 1 must not deploy future maintenance Agents"
+            ):
+                validate_repository(temp_root, "quality")
 
     def test_redaction_handles_nested_secret_objects(self):
         value = {"token": "secret", "mcp_config": {"servers": []}, "nested": [{"password": "p"}]}
@@ -507,7 +526,6 @@ class ReconcileTests(unittest.TestCase):
                     "multica-requirement-intake",
                     "multica-workflow-manager",
                     "multica-workflow-observer",
-                    "multica-workflow-maintainer",
                     "multica-workflow-console",
                 },
             )
@@ -744,8 +762,6 @@ class ReconcileTests(unittest.TestCase):
 
             control_keys = {
                 "agent.workflow-observer",
-                "agent.workflow-maintainer",
-                "agent.workflow-maintenance-reviewer",
             }
             retained_agents = []
             for agent in cli.agents:
@@ -757,7 +773,7 @@ class ReconcileTests(unittest.TestCase):
             cli.agents = retained_agents
             cli.squads = []
             cli.members = {}
-            self.assertEqual(len(cli.skills), 3)
+            self.assertEqual(len(cli.skills), 2)
             for detail in cli.skill_details.values():
                 detail["content"] = re.sub(
                     r"(?m)^\s*package_hash:\s*\S+\s*$",
@@ -784,7 +800,7 @@ class ReconcileTests(unittest.TestCase):
             self.assertTrue(disallowed.isdisjoint({item["type"] for item in recovery["actions"]}))
             self.assertEqual(
                 len([item for item in recovery["actions"] if item["type"] == "UPDATE_SKILL"]),
-                3,
+                2,
             )
             self.assertEqual(
                 len([item for item in recovery["actions"] if item["type"] == "CREATE_AGENT"]),
@@ -1329,13 +1345,6 @@ class ReconcileTests(unittest.TestCase):
                 ):
                     workflow_cli.command_secure_bindings(args, temp_root)
 
-            reviewer = next(
-                item
-                for item in cli.agents
-                if parse_marker(item["instructions"])["object_key"]
-                == "agent.workflow-maintenance-reviewer"
-            )
-            reviewer["runtime_id"] = "runtime-opencode"
             bootstrap_output = temp_root / "agent-bindings.bootstrap.local.json"
             bootstrap_id = "11111111-1111-1111-1111-111111111111"
             args.output = str(bootstrap_output)
@@ -1347,6 +1356,7 @@ class ReconcileTests(unittest.TestCase):
             bootstrap = json.loads(bootstrap_output.read_text(encoding="utf-8"))
             self.assertIs(bootstrap["bootstrap"], True)
             self.assertEqual(bootstrap["runtime_id"], bootstrap_id)
+            self.assertEqual(bootstrap["agents"], {})
 
     def test_actual_v1_reconciler_ignores_paused_v11_control_plane(self):
         with committed_temp_repo() as temp_root, tempfile.TemporaryDirectory() as old_temp:

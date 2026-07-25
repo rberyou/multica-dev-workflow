@@ -36,9 +36,6 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: "7.0.x"
       - name: Decode release Request
         env:
           REQUEST_B64: ${{ inputs.request_b64 }}
@@ -71,13 +68,9 @@ jobs:
         run: |
           check-jsonschema --schemafile workflow.schema.json workflow.json
           check-jsonschema --schemafile docs/release-control-evidence.schema.json docs/release-control-evidence.json
-          check-jsonschema --schemafile secure-runtime/policy/security-profile.schema.json secure-runtime/policy/runtime.example.json
-          python -m py_compile scripts/workflow.py scripts/workflow_lib.py scripts/package_skills.py scripts/package_secure_runtime.py scripts/generate_audit_contract.py scripts/generate_secure_runtime_manifest.py scripts/release.py skills/multica-workflow-observer/scripts/observer.py skills/multica-workflow-maintainer/scripts/maintenance_loop.py skills/multica-workflow-console/scripts/workflow_console.py
+          python -m py_compile scripts/workflow.py scripts/workflow_lib.py scripts/package_skills.py scripts/generate_audit_contract.py scripts/release.py skills/multica-workflow-observer/scripts/observer.py skills/multica-workflow-console/scripts/workflow_console.py
           python scripts/generate_audit_contract.py --check
-          python scripts/generate_secure_runtime_manifest.py --check
-          python -m unittest discover -s tests -v
-          dotnet build secure-runtime/WorkflowSecureRuntime.sln --configuration Release
-          dotnet run --project secure-runtime/tests/WorkflowSecureRuntime.Tests/WorkflowSecureRuntime.Tests.csproj --configuration Release --no-build
+          python -m unittest tests.test_manifest tests.test_observer tests.test_package_skills tests.test_reconcile tests.test_release -v
       - uses: actions/upload-artifact@v4
         with:
           name: release-request-${{ steps.request.outputs.release_request_digest }}
@@ -102,9 +95,6 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: "7.0.x"
       - name: Install validation tools
         run: python -m pip install -r requirements.txt check-jsonschema
       - uses: actions/download-artifact@v5
@@ -157,9 +147,7 @@ jobs:
           python scripts/package_skills.py skills/multica-requirement-intake build/release/multica-requirement-intake-${{ needs.validate-request.outputs.tag }}.zip
           python scripts/package_skills.py skills/multica-workflow-manager build/release/multica-workflow-manager-${{ needs.validate-request.outputs.tag }}.zip
           python scripts/package_skills.py skills/multica-workflow-observer build/release/multica-workflow-observer-${{ needs.validate-request.outputs.tag }}.zip
-          python scripts/package_skills.py skills/multica-workflow-maintainer build/release/multica-workflow-maintainer-${{ needs.validate-request.outputs.tag }}.zip
           python scripts/package_skills.py skills/multica-workflow-console build/release/multica-workflow-console-${{ needs.validate-request.outputs.tag }}.zip
-          python scripts/package_secure_runtime.py build/release/multica-workflow-secure-runtime-win-x64-${{ needs.validate-request.outputs.tag }}.zip
           git archive --format=zip --output=build/release/multica-dev-workflow-${{ needs.validate-request.outputs.tag }}.zip "${{ needs.validate-request.outputs.tag }}"
           cd build/release
           sha256sum *.zip > checksums.txt

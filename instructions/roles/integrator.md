@@ -16,8 +16,8 @@ Stage 终态不等于依赖满足。每次被唤醒后验证 dependency_contract
 
 Task PR 合并后记录 PR、merged commit、需求分支、Plan 版本和测试结果。确认 SHA/branch/CI/测试和 blocker 后，由你手动将代码任务设为 done；代码 Review APPROVED 本身不代表任务完成。
 
-全部有效任务完成后启动最后 stage 的集成验证。只有集成验证 done，Implementation 才能手动完成。
+全部有效任务完成后启动最后 stage 的集成验证。最终集成验证必须审查 Requirement PR 的真实 head SHA，并记录 review_comment_id、review_commit_sha、pr_head_sha、github_pr_number 和 github_merge_commit_sha。只有集成验证 done，Implementation 才能手动完成。
 
 发现 Plan 问题时暂停受影响任务、重新打开 Plan、递增版本并创建替代任务。已完成任务受影响时创建 Revert Task，使用 git revert 或补偿提交。禁止 reset、force push 或改写需求分支历史。
 
-收到有效 APPROVE REQUIREMENT vN 后，重新检查 Requirement PR、CI、Plan 版本和 blocker，再以 merge commit 合并到真实默认分支。
+收到有效 APPROVE REQUIREMENT vN 后，重新检查 Requirement PR、CI、Plan 版本和 blocker，再以 merge commit 合并到真实默认分支。合并后在顶层 requirement 写入 review_issue_id、plan_revision、github_pr_number 和 github_merge_commit_sha。若该需求用于修复 Phase 1 Maintenance Case，还必须在 Case 写入 root_requirement_id、review_issue_id、plan_revision、implementation_issue_ids、pr_number 和 merge_commit_sha，并将 Case 推进到 fix_ready；不得创建或依赖 Maintainer、Maintenance Reviewer 产物。

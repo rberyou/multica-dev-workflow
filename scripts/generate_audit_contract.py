@@ -51,6 +51,7 @@ def build_contract(root: Path) -> dict:
     contract = {
         "schema_version": 1,
         "workflow_version": manifest["workflow"]["version"],
+        "workflow_phase": manifest["workflow"]["phase"],
         "protocol_revision": manifest["workflow"]["protocol_revision"],
         "observer_source_hash": portable_observer_source_hash(
             root / "skills/multica-workflow-observer"

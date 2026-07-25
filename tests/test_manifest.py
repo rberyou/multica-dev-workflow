@@ -110,13 +110,16 @@ class ManifestTests(unittest.TestCase):
         self.assertGreaterEqual(workflow.count("persist-credentials: false"), 2)
         self.assertIn("GH_TOKEN: ${{ github.token }}", workflow)
         self.assertIn("recover_existing_tag", workflow)
+        self.assertNotIn("actions/setup-dotnet", workflow)
+        self.assertNotIn("generate_secure_runtime_manifest.py", workflow)
         self.assertIn(
             'python scripts/release.py verify-assets --tag "${{ needs.validate-request.outputs.tag }}"',
             workflow,
         )
         self.assertIn("steps.publisher.outputs.token", workflow)
         self.assertIn("multica-workflow-console-${{ needs.validate-request.outputs.tag }}.zip", workflow)
-        self.assertIn("multica-workflow-secure-runtime-win-x64-${{ needs.validate-request.outputs.tag }}.zip", workflow)
+        self.assertNotIn("multica-workflow-maintainer-${{ needs.validate-request.outputs.tag }}.zip", workflow)
+        self.assertNotIn("multica-workflow-secure-runtime-win-x64-${{ needs.validate-request.outputs.tag }}.zip", workflow)
         self.assertIn(
             "release-request-${{ steps.request.outputs.release_request_digest }}",
             workflow,
@@ -125,8 +128,24 @@ class ManifestTests(unittest.TestCase):
         control = json.loads((ROOT / "docs/release-control.json").read_text(encoding="utf-8"))
         self.assertEqual(control["required_visibility"], "public")
 
+    def test_phase1_ci_is_separate_from_future_component_validation(self):
+        phase1 = (ROOT / ".github/workflows/validate.yml").read_text(
+            encoding="utf-8"
+        )
+        future = (
+            ROOT / ".github/workflows/validate-future-components.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("name: validate-phase1", phase1)
+        self.assertNotIn("actions/setup-dotnet", phase1)
+        self.assertNotIn("generate_secure_runtime_manifest.py", phase1)
+        self.assertNotIn("multica-workflow-maintainer", phase1)
+        self.assertIn("workflow_dispatch:", future)
+        self.assertIn("actions/setup-dotnet", future)
+        self.assertIn("multica-workflow-maintainer", future)
+
     def test_operations_disable_automatic_maintenance_expansion(self):
         manifest = json.loads((ROOT / "workflow.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["workflow"]["phase"], 1)
         self.assertEqual(
             manifest["operations"]["maintenance_intake_mode"], "human_gated"
         )
@@ -135,6 +154,7 @@ class ManifestTests(unittest.TestCase):
             manifest["operations"]["full_scan_autopilot"],
             "workflow-full-audit",
         )
+        self.assertEqual(manifest["secure_runtime"]["agents"], {})
 
     def test_operations_contract_is_required_for_v2(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -227,8 +227,12 @@ workflow_object_type=maintenance_case
 incident_id
 maintenance_intake_digest
 approval_comment_id
+human_approver_id
 executor
 logical_status
+root_requirement_id
+review_issue_id
+plan_revision
 implementation_issue_ids
 pr_number
 merge_commit_sha
@@ -466,6 +470,8 @@ approved -> in_development -> fix_ready -> awaiting_deployment
 
 普通开发流程完成修复后，Maintenance Case 记录：
 
+- 普通开发顶层 Requirement 和最终 integration-validation Issue。
+- Code Reviewer 的精确 review_comment_id、Plan revision 与被审查 PR head SHA。
 - 修复 commit 和 PR。
 - 测试与 CI 结果。
 - 发布或部署版本。

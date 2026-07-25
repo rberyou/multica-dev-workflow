@@ -1264,6 +1264,13 @@ class ObserverTests(unittest.TestCase):
         cli = ControlPlaneCLI()
         self.assertEqual(observer.audit_control_plane(cli, "T-audit"), [])
 
+    def test_phase1_control_contract_excludes_future_maintenance_components(self):
+        contract = observer.control_contract()
+        self.assertEqual(contract["workflow_phase"], 1)
+        self.assertNotIn("workflow-maintainer", contract["agents"])
+        self.assertNotIn("workflow-maintenance-reviewer", contract["agents"])
+        self.assertNotIn("multica-workflow-maintainer", contract["skills"])
+
     def test_control_plane_audit_accepts_schedule_cron_aliases(self):
         for alias in ["cron", "cron_expression", "schedule"]:
             with self.subTest(alias=alias):
@@ -2159,6 +2166,10 @@ class ObserverTests(unittest.TestCase):
         self.assertEqual(first["action"], "created")
         self.assertEqual(second["action"], "reused")
         self.assertEqual(first["maintenance_case_id"], second["maintenance_case_id"])
+        self.assertEqual(
+            cli.metadata[first["maintenance_case_id"]]["human_approver_id"],
+            "human-1",
+        )
 
     def test_routed_incident_can_be_retriaged_when_new_evidence_arrives(self):
         cli = Phase1CLI()
