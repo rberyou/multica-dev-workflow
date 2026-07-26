@@ -11,11 +11,12 @@
     "workflow": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "name", "version", "protocol_revision", "approver_role"],
+      "required": ["id", "name", "version", "phase", "protocol_revision", "approver_role"],
       "properties": {
         "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$"},
         "name": {"type": "string", "minLength": 1},
         "version": {"type": "string", "minLength": 1},
+        "phase": {"type": "integer", "enum": [1, 2, 3]},
         "protocol_revision": {"type": "string", "minLength": 1},
         "approver_role": {"type": "string", "minLength": 1}
       }
@@ -182,7 +183,6 @@
         "open_code_allowed": {"type": "boolean"},
         "agents": {
           "type": "object",
-          "minProperties": 1,
           "additionalProperties": {
             "enum": ["workflow_maintainer", "workflow_reviewer"]
           }
@@ -203,7 +203,8 @@
           "then": {
             "properties": {
               "required": {"const": true},
-              "open_code_allowed": {"const": false}
+              "open_code_allowed": {"const": false},
+              "agents": {"minProperties": 1}
             }
           }
         }

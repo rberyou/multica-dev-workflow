@@ -66,6 +66,29 @@ def write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def deployment_record_path(root: Path, workspace_id: str) -> Path:
+    key = hashlib.sha256(workspace_id.encode("utf-8")).hexdigest()[:16]
+    return root / f".multica/deployments/{key}.json"
+
+
+def deployment_evidence_record_path(
+    root: Path, workspace_id: str, plan_digest: str
+) -> Path:
+    key = hashlib.sha256(workspace_id.encode("utf-8")).hexdigest()[:16]
+    return root / ".multica/deployments" / key / f"{plan_digest}.json"
+
+
+def load_deployment_record(root: Path, workspace_id: str) -> dict[str, Any] | None:
+    path = deployment_record_path(root, workspace_id)
+    if not path.is_file():
+        return None
+    try:
+        value = read_json(path)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
 def run_process(args: list[str], cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(
         args,
@@ -288,9 +311,10 @@ def validate_repository(root: Path, deployment_profile: str) -> tuple[dict[str, 
     if manifest.get("schema_version") != 2:
         errors.append("schema_version must be 2")
     workflow = manifest.get("workflow") or {}
-    for field in ["id", "name", "version", "protocol_revision", "approver_role"]:
+    for field in ["id", "name", "version", "phase", "protocol_revision", "approver_role"]:
         if not workflow.get(field):
             errors.append(f"workflow.{field} is required")
+    current_phase = workflow.get("phase")
     version_file = (root / "VERSION").read_text(encoding="utf-8").strip() if (root / "VERSION").is_file() else ""
     if version_file != workflow.get("version"):
         errors.append("VERSION must match workflow.version")
@@ -307,6 +331,15 @@ def validate_repository(root: Path, deployment_profile: str) -> tuple[dict[str, 
         errors.append("agent keys must be unique")
     if len(set(agent_names)) != len(agent_names):
         errors.append("agent names must be unique")
+    if current_phase == 1:
+        future_agents = {
+            "workflow-maintainer",
+            "workflow-maintenance-reviewer",
+        } & set(agent_keys)
+        if future_agents:
+            errors.append(
+                f"Phase 1 must not deploy future maintenance Agents: {sorted(future_agents)}"
+            )
     bindings = profile.get("bindings") or {}
     for agent in agents:
         if agent.get("runtime_binding") not in bindings:
@@ -330,6 +363,8 @@ def validate_repository(root: Path, deployment_profile: str) -> tuple[dict[str, 
     skill_names = [skill.get("name") for skill in manifest.get("skills") or []]
     if len(set(skill_keys)) != len(skill_keys) or len(set(skill_names)) != len(skill_names):
         errors.append("skill keys and names must be unique")
+    if current_phase == 1 and "workflow-maintainer" in set(skill_keys):
+        errors.append("Phase 1 must not deploy the workflow-maintainer Skill")
     for skill in manifest.get("skills") or []:
         directory = root / str(skill.get("path", ""))
         if not (directory / "SKILL.md").is_file():
@@ -456,8 +491,13 @@ def validate_repository(root: Path, deployment_profile: str) -> tuple[dict[str, 
             or secure_runtime.get("open_code_allowed") is not False
         ):
             errors.append("enforced secure_runtime must be required and disallow OpenCode")
-        if not isinstance(secure_agents, dict) or not secure_agents:
-            errors.append("secure_runtime.agents must define managed secure roles")
+        if not isinstance(secure_agents, dict):
+            errors.append("secure_runtime.agents must be an object")
+            secure_agents = {}
+        if secure_phase == "enforced" and not secure_agents:
+            errors.append("enforced secure_runtime.agents must define managed secure roles")
+        if current_phase == 1 and secure_agents:
+            errors.append("Phase 1 secure_runtime.agents must be empty")
         for agent_key, security_profile in secure_agents.items():
             desired_agent = next((item for item in agents if item.get("key") == agent_key), None)
             if not desired_agent:
@@ -2073,6 +2113,66 @@ def _refresh_maps(cli: MulticaCLI, manifest: dict[str, Any]) -> tuple[dict[str, 
     return agent_ids, skill_ids, state
 
 
+def finalize_deployment_record(
+    root: Path,
+    plan: dict[str, Any],
+    journal_path: Path,
+    journal: dict[str, Any],
+    plan_digest: str,
+) -> dict[str, Any]:
+    workspace_id = str((plan.get("workspace") or {}).get("id") or "")
+    if not workspace_id:
+        raise WorkflowError("deployment Plan has no workspace ID")
+    record_path = deployment_evidence_record_path(root, workspace_id, plan_digest)
+    latest_record_path = deployment_record_path(root, workspace_id)
+    applied_actor = str(journal.get("applied_actor") or "")
+    if not applied_actor and record_path.is_file():
+        existing_record = read_json(record_path)
+        if isinstance(existing_record, dict):
+            applied_actor = str(existing_record.get("applied_actor") or "")
+    applied_actor = applied_actor or "legacy_unknown"
+    if journal.get("applied_actor") != applied_actor:
+        journal["applied_actor"] = applied_actor
+    expected_record = {
+        "schema_version": 1,
+        "deployed_at": journal["finished_at"],
+        "workflow_id": plan.get("workflow_id"),
+        "workflow_version": plan.get("workflow_version"),
+        "source_commit": plan.get("source_commit"),
+        "plan_digest": plan_digest,
+        "workspace": plan.get("workspace"),
+        "profile": plan.get("profile"),
+        "deployment_profile": plan.get("deployment_profile"),
+        "applied_actor": applied_actor,
+        "journal": str(journal_path),
+    }
+    if record_path.is_file():
+        deployment_record = read_json(record_path)
+        if not isinstance(deployment_record, dict) or any(
+            deployment_record.get(key) != value
+            for key, value in expected_record.items()
+        ):
+            raise WorkflowError(
+                "immutable deployment evidence differs from the completed apply journal"
+            )
+    else:
+        deployment_record = expected_record
+        write_json(record_path, deployment_record)
+    update_latest = True
+    if latest_record_path.is_file():
+        latest_record = read_json(latest_record_path)
+        if not isinstance(latest_record, dict):
+            raise WorkflowError("Workspace deployment pointer is invalid")
+        update_latest = str(latest_record.get("deployed_at") or "") <= str(
+            deployment_record.get("deployed_at") or ""
+        )
+    if update_latest:
+        write_json(latest_record_path, deployment_record)
+    journal["deployment_record"] = str(record_path)
+    write_json(journal_path, journal)
+    return journal
+
+
 def apply_plan(root: Path, cli: MulticaCLI, plan_path: Path, approval: str) -> dict[str, Any]:
     plan = read_json(plan_path)
     expected_digest = str(plan.get("plan_digest", ""))
@@ -2096,6 +2196,20 @@ def apply_plan(root: Path, cli: MulticaCLI, plan_path: Path, approval: str) -> d
     runtime_map = load_runtime_map(Path(plan["runtime_map_path"]))
     if sha256_value(runtime_map) != plan.get("runtime_map_hash"):
         raise WorkflowError("runtime map changed after planning")
+    journal_path = root / f".multica/journals/{expected_digest[:12]}.json"
+    if journal_path.is_file():
+        existing_journal = read_json(journal_path)
+        if isinstance(existing_journal, dict) and existing_journal.get("finished_at"):
+            if (
+                str(existing_journal.get("plan_digest") or "") != expected_digest
+                or str(existing_journal.get("source_commit") or "")
+                != str(plan.get("source_commit") or "")
+                or existing_journal.get("workspace") != plan.get("workspace")
+            ):
+                raise WorkflowError("completed apply journal differs from the deployment Plan")
+            return finalize_deployment_record(
+                root, plan, journal_path, existing_journal, expected_digest
+            )
     current_state = fetch_state(
         cli,
         include_active_v3=bool(plan.get("disable_operations", False)),
@@ -2109,9 +2223,9 @@ def apply_plan(root: Path, cli: MulticaCLI, plan_path: Path, approval: str) -> d
         "plan_digest": expected_digest,
         "source_commit": plan["source_commit"],
         "workspace": plan["workspace"],
+        "applied_actor": os.environ.get("MULTICA_AGENT_ID") or "human_host",
         "completed": [],
     }
-    journal_path = root / f".multica/journals/{expected_digest[:12]}.json"
     workflow_id = manifest["workflow"]["id"]
     reporter_agent_keys = set((manifest.get("operations") or {}).get("reporter_agents") or [])
     defer_reporter_enablement = not bool(plan.get("disable_operations", False))
@@ -2421,7 +2535,9 @@ def apply_plan(root: Path, cli: MulticaCLI, plan_path: Path, approval: str) -> d
 
     journal["finished_at"] = utc_now()
     write_json(journal_path, journal)
-    return journal
+    return finalize_deployment_record(
+        root, plan, journal_path, journal, expected_digest
+    )
 
 
 def install_skills(root: Path, target: Path, copy_mode: bool, replace_existing: bool) -> list[dict[str, str]]:

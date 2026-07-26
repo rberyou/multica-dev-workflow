@@ -5,6 +5,7 @@
     "id": "development-delivery",
     "name": "开发交付小队",
     "version": "1.1.0-rc.4",
+    "phase": 1,
     "protocol_revision": "v3",
     "approver_role": "人工审批人"
   },
@@ -38,13 +39,6 @@
         "code-reviewer",
         "workflow-observer"
       ]
-    },
-    {
-      "key": "workflow-maintainer",
-      "name": "multica-workflow-maintainer",
-      "path": "skills/multica-workflow-maintainer",
-      "targets": ["local", "workspace"],
-      "attach_to": ["workflow-maintainer", "workflow-maintenance-reviewer"]
     },
     {
       "key": "workflow-console",
@@ -126,31 +120,13 @@
       "instruction_files": ["instructions/roles/workflow-observer.md"],
       "max_concurrent_tasks": 1,
       "permission_mode": "public_to_workspace"
-    },
-    {
-      "key": "workflow-maintainer",
-      "name": "工作流维护员",
-      "description": "根据已确认 Incident 维护工作流源码、测试、RC、发布和回滚",
-      "runtime_binding": "codex-worker",
-      "instruction_files": ["instructions/roles/workflow-maintainer.md"],
-      "max_concurrent_tasks": 1,
-      "permission_mode": "private"
-    },
-    {
-      "key": "workflow-maintenance-reviewer",
-      "name": "工作流维护审查员",
-      "description": "独立审查工作流变更 Plan、代码、发布和回滚，不修改被审查内容",
-      "runtime_binding": "opencode-review",
-      "instruction_files": ["instructions/roles/workflow-maintenance-reviewer.md"],
-      "max_concurrent_tasks": 1,
-      "permission_mode": "private"
     }
   ],
   "projects": [
     {
       "key": "workflow-operations",
       "title": "工作流运维",
-      "description": "集中记录工作流 Incident、维护变更、Canary 验证、发布与回滚证据。",
+      "description": "集中记录 Phase 1 工作流 Observation、Incident、Maintenance Case 与 Observer 验证证据。",
       "lead": "workflow-observer",
       "status": "in_progress"
     }
@@ -159,7 +135,7 @@
     {
       "key": "workflow-health-audit",
       "title": "工作流增量巡检",
-      "description": "使用 multica-workflow-observer 的 Observer Mode，运行 scripts/observer.py scan --mode incremental。只扫描已启用 Project Registration，先恢复 pending/processing/failed Observation，再执行确定性规则、Incident 去重和项目独立游标提交；无法完整扫描或持久化状态时必须失败。外部操作员或调度器必须单独运行 scripts/workflow.py health。",
+      "description": "使用 multica-workflow-observer 的 Observer Mode，运行 scripts/observer.py scan --mode incremental。只扫描已启用 Project Registration，先恢复 pending/processing/failed Observation；单条失败不终止扫描，最多五次后进入 quarantined 并由运维对象巡检形成可追踪 Finding。随后巡检登记项目及 Observation、Incident、Maintenance Case、Registration、Observer Control，执行 Incident 去重和项目独立游标提交。无法持久化扫描控制状态时必须失败；外部操作员或调度器必须单独运行 scripts/workflow.py health。",
       "agent": "workflow-observer",
       "mode": "run_only",
       "project": "workflow-operations",
@@ -179,7 +155,7 @@
     {
       "key": "workflow-full-audit",
       "title": "工作流每日全量巡检",
-      "description": "使用 multica-workflow-observer 的 Observer Mode，运行 scripts/observer.py scan --mode full。重新校验所有已注册项目的工作流对象、pending/processing/failed Observation 和 Git 管理的控制面状态；不得扫描未注册项目的普通业务 Issue。",
+      "description": "使用 multica-workflow-observer 的 Observer Mode，运行 scripts/observer.py scan --mode full。重新校验所有已注册项目的工作流对象、pending/processing/failed/quarantined Observation、Incident、Maintenance Case、Registration、Observer Control 和 Git 管理的控制面状态；核验普通开发、发布、Workspace Plan、apply journal 与不可变 plan-digest Workspace deployment record 形成的修复闭环，不得扫描未注册项目的普通业务 Issue。",
       "agent": "workflow-observer",
       "mode": "run_only",
       "project": "workflow-operations",
@@ -220,11 +196,7 @@
     "phase": "planned",
     "required": false,
     "open_code_allowed": true,
-    "agents": {
-      "workflow-maintainer": "workflow_maintainer",
-      "workflow-maintenance-reviewer": "workflow_reviewer",
-      "workflow-observer": "workflow_reviewer"
-    }
+    "agents": {}
   },
   "squad": {
     "key": "development-delivery",

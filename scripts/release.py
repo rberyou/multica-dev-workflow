@@ -11,8 +11,10 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from typing import Any
 
 
@@ -40,6 +42,11 @@ RC2_RECOVERY_VERSION = "1.1.0-rc.2"
 RC2_AFFECTED_VERSION = "v1.1.0-rc.1"
 PROTECTED_ENVIRONMENT_MODE = "protected_environment"
 RELEASE_CONTROL_PATH = "docs/release-control.json"
+RELEASE_VERSION_RE = re.compile(
+    r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+    r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+)
 RELEASE_CONTROL_KEYS = [
     "repository",
     "required_visibility",
@@ -83,6 +90,26 @@ def metadata_map(value: Any) -> dict[str, Any]:
     return result
 
 
+def comment_author(comment: dict[str, Any]) -> tuple[str, str]:
+    author = comment.get("author") if isinstance(comment.get("author"), dict) else {}
+    return (
+        str(
+            comment.get("author_id")
+            or comment.get("creator_id")
+            or comment.get("user_id")
+            or author.get("id")
+            or ""
+        ),
+        str(
+            comment.get("author_type")
+            or comment.get("creator_type")
+            or comment.get("user_type")
+            or author.get("type")
+            or ""
+        ).lower(),
+    )
+
+
 def managed_match(items: list[dict[str, Any]], object_key: str, field: str) -> dict[str, Any]:
     matches = []
     for item in items:
@@ -109,13 +136,23 @@ def release_cli(
     return cli, resolved_workspace
 
 
-def control_agent_identities(cli: MulticaCLI) -> dict[str, str]:
+def managed_agent_identity(cli: MulticaCLI, object_key: str, label: str) -> str:
     agents = as_list(cli.json(["agent", "list", "--output", "json"]), "agents")
-    maintainer = managed_match(agents, "agent.workflow-maintainer", "instructions")
-    reviewer = managed_match(agents, "agent.workflow-maintenance-reviewer", "instructions")
+    agent = managed_match(agents, object_key, "instructions")
+    agent_id = str(agent.get("id") or "")
+    if not agent_id:
+        raise ReleaseError(f"managed {label} identity is incomplete")
+    return agent_id
+
+
+def control_agent_identities(cli: MulticaCLI) -> dict[str, str]:
     identities = {
-        "maintainer_id": str(maintainer.get("id") or ""),
-        "maintenance_reviewer_id": str(reviewer.get("id") or ""),
+        "maintainer_id": managed_agent_identity(
+            cli, "agent.workflow-maintainer", "Maintainer"
+        ),
+        "maintenance_reviewer_id": managed_agent_identity(
+            cli, "agent.workflow-maintenance-reviewer", "Maintenance Reviewer"
+        ),
     }
     if not all(identities.values()):
         raise ReleaseError("managed maintenance Agent identities are incomplete")
@@ -124,8 +161,7 @@ def control_agent_identities(cli: MulticaCLI) -> dict[str, str]:
     return identities
 
 
-def control_identities(root: Path, cli: MulticaCLI) -> dict[str, str]:
-    identities = control_agent_identities(cli)
+def human_approver_identity(root: Path, cli: MulticaCLI) -> str:
     squads = as_list(cli.json(["squad", "list", "--output", "json"]), "squads")
     squad = managed_match(squads, "squad.development-delivery", "instructions")
     manifest = json.loads((root / "workflow.json").read_text(encoding="utf-8"))
@@ -141,7 +177,15 @@ def control_identities(root: Path, cli: MulticaCLI) -> dict[str, str]:
     ]
     if len(approvers) != 1:
         raise ReleaseError(f"expected one human approver with role {approver_role}, found {len(approvers)}")
-    identities["human_approver_id"] = str(approvers[0].get("member_id") or "")
+    human_approver_id = str(approvers[0].get("member_id") or "")
+    if not human_approver_id:
+        raise ReleaseError("managed human approver identity is incomplete")
+    return human_approver_id
+
+
+def control_identities(root: Path, cli: MulticaCLI) -> dict[str, str]:
+    identities = control_agent_identities(cli)
+    identities["human_approver_id"] = human_approver_identity(root, cli)
     if not all(identities.values()):
         raise ReleaseError("managed maintenance identities are incomplete")
     if identities["maintainer_id"] == identities["maintenance_reviewer_id"]:
@@ -151,6 +195,396 @@ def control_identities(root: Path, cli: MulticaCLI) -> dict[str, str]:
 
 def truthy(value: Any) -> bool:
     return value is True or str(value).lower() == "true"
+
+
+def first_metadata_value(metadata: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = str(metadata.get(key) or "")
+        if value:
+            return value
+    return ""
+
+
+def metadata_issue_ids(value: Any) -> list[str]:
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return []
+        try:
+            value = json.loads(stripped)
+        except json.JSONDecodeError:
+            value = [item.strip() for item in stripped.split(",") if item.strip()]
+    if not isinstance(value, list):
+        raise ReleaseError("implementation_issue_ids must be a JSON array")
+    result = [str(item) for item in value if str(item)]
+    if len(result) != len(set(result)):
+        raise ReleaseError("implementation_issue_ids contains duplicates")
+    return result
+
+
+def exact_review_comment(
+    cli: MulticaCLI,
+    issue_id: str,
+    review_comment_id: str,
+    reviewer_id: str,
+    plan_revision: str,
+    reviewed_sha: str,
+    merged_at: str,
+    label: str,
+) -> str:
+    comments = as_list(
+        cli.json(
+            ["issue", "comment", "list", issue_id, "--full", "--output", "json"]
+        ),
+        "comments",
+    )
+    matches = [
+        item
+        for item in comments
+        if str(item.get("id") or "") == review_comment_id
+    ]
+    if len(matches) != 1:
+        raise ReleaseError(
+            f"expected one {label} comment {review_comment_id}, found {len(matches)}"
+        )
+    comment = matches[0]
+    content = str(comment.get("content") or "")
+    if (
+        comment.get("author_type") != "agent"
+        or str(comment.get("author_id") or "") != reviewer_id
+    ):
+        raise ReleaseError(f"{label} was not authored by the managed Code Reviewer")
+    first_verdict = next(
+        (line.strip() for line in content.splitlines() if line.strip()), ""
+    )
+    if first_verdict != "APPROVED":
+        raise ReleaseError(f"{label} first non-empty line is not exactly APPROVED")
+    if re.findall(r"(?m)^\s*plan_revision=([^\s]+)\s*$", content) != [
+        plan_revision
+    ]:
+        raise ReleaseError(
+            f"{label} does not bind exactly one exact plan_revision line"
+        )
+    if re.findall(r"(?m)^\s*reviewed_commit_sha=([^\s]+)\s*$", content) != [
+        reviewed_sha
+    ]:
+        raise ReleaseError(
+            f"{label} does not bind exactly one exact reviewed_commit_sha line"
+        )
+    review_created_at = str(comment.get("created_at") or comment.get("createdAt") or "")
+    if parse_iso_datetime(review_created_at, label) >= parse_iso_datetime(
+        merged_at, "merged PR"
+    ):
+        raise ReleaseError(f"{label} must be created before the PR is merged")
+    return review_created_at
+
+
+def phase1_release_evidence(
+    root: Path,
+    cli: MulticaCLI,
+    issue_id: str,
+    issue: dict[str, Any],
+    metadata: dict[str, Any],
+    pr: dict[str, Any],
+) -> dict[str, Any]:
+    object_type = str(metadata.get("workflow_object_type") or "")
+    if str(metadata.get("workflow_id") or "") != "development-delivery":
+        raise ReleaseError("Phase 1 release source workflow_id is not development-delivery")
+    if object_type == "requirement" and str(issue.get("status") or "") != "done":
+        raise ReleaseError("release Requirement must be done")
+
+    human_approver_id = str(metadata.get("human_approver_id") or "")
+    plan_revision = str(metadata.get("plan_revision") or "")
+    review_issue_id = str(metadata.get("review_issue_id") or "")
+    if not human_approver_id or not plan_revision or not review_issue_id:
+        raise ReleaseError(
+            "Phase 1 release source is missing human_approver_id, plan_revision or review_issue_id"
+        )
+    if human_approver_id != human_approver_identity(root, cli):
+        raise ReleaseError(
+            "Phase 1 release human_approver_id differs from the managed Squad approver"
+        )
+
+    selected_refs = issue_refs(issue_id, issue)
+    release_path = "requirement"
+    incident_evidence: dict[str, str] = {}
+    if object_type == "maintenance_case":
+        release_path = "incident_fix"
+        case_status = str(
+            metadata.get("logical_status")
+            or metadata.get("maintenance_case_status")
+            or ""
+        )
+        if case_status not in {
+            "fix_ready",
+            "awaiting_deployment",
+            "awaiting_observer_verification",
+        }:
+            raise ReleaseError("Maintenance Case is not ready for release")
+        if str(metadata.get("executor") or "") != "ordinary_development_workflow":
+            raise ReleaseError(
+                "Phase 1 Maintenance Case must use the ordinary development workflow"
+            )
+        linked_issues = metadata_issue_ids(metadata.get("implementation_issue_ids"))
+        if review_issue_id not in linked_issues:
+            raise ReleaseError(
+                "Maintenance Case review_issue_id is not listed in implementation_issue_ids"
+            )
+        incident_id = str(metadata.get("incident_id") or "")
+        if not incident_id:
+            raise ReleaseError("Maintenance Case incident_id is missing")
+        incident = cli.json(["issue", "get", incident_id, "--output", "json"])
+        if not isinstance(incident, dict):
+            raise ReleaseError(f"Incident is unreadable: {incident_id}")
+        incident_metadata = metadata_map(
+            cli.json(["issue", "metadata", "list", incident_id, "--output", "json"])
+        )
+        if (
+            str(incident_metadata.get("workflow_id") or "")
+            != "development-delivery"
+            or str(incident_metadata.get("workflow_object_type") or "") != "incident"
+        ):
+            raise ReleaseError(
+                "Maintenance Case incident_id is not a development-delivery Incident"
+            )
+        require_issue_ref(
+            incident_metadata.get("maintenance_case_id"),
+            selected_refs,
+            "Incident maintenance_case_id",
+        )
+        if str(incident_metadata.get("human_approver_id") or "") != human_approver_id:
+            raise ReleaseError(
+                "Maintenance Case human_approver_id differs from its Incident"
+            )
+        approval_comment_id = str(metadata.get("approval_comment_id") or "")
+        intake_digest = str(metadata.get("maintenance_intake_digest") or "")
+        if not approval_comment_id or not intake_digest:
+            raise ReleaseError(
+                "Maintenance Case approval_comment_id or maintenance_intake_digest is missing"
+            )
+        if (
+            str(incident_metadata.get("maintenance_intake_digest") or "")
+            != intake_digest
+        ):
+            raise ReleaseError(
+                "Maintenance Case maintenance_intake_digest differs from its Incident"
+            )
+        if (
+            str(incident_metadata.get("maintenance_decision_comment_id") or "")
+            != approval_comment_id
+        ):
+            raise ReleaseError(
+                "Maintenance Case approval_comment_id differs from its Incident"
+            )
+        decision_comments = as_list(
+            cli.json(
+                [
+                    "issue",
+                    "comment",
+                    "list",
+                    incident_id,
+                    "--full",
+                    "--output",
+                    "json",
+                ]
+            ),
+            "comments",
+        )
+        decision_matches = [
+            item
+            for item in decision_comments
+            if str(item.get("id") or "") == approval_comment_id
+        ]
+        expected_decision = f"APPROVE WORKFLOW MAINTENANCE {intake_digest[:16]}"
+        if len(decision_matches) != 1:
+            raise ReleaseError(
+                "Maintenance Case approval comment is missing or ambiguous"
+            )
+        decision = decision_matches[0]
+        decision_lines = [
+            line.strip()
+            for line in str(decision.get("content") or "").splitlines()
+            if line.strip()
+        ]
+        decision_author_id, decision_author_type = comment_author(decision)
+        if (
+            decision_author_type not in {"member", "user"}
+            or decision_author_id != human_approver_id
+            or decision_lines != [expected_decision]
+        ):
+            raise ReleaseError(
+                "Maintenance Case approval comment has the wrong author or digest"
+            )
+        incident_evidence = {
+            "incident_id": str(incident.get("identifier") or incident_id),
+            "maintenance_intake_digest": intake_digest,
+            "maintenance_approval_comment_id": approval_comment_id,
+        }
+
+    review_issue = cli.json(["issue", "get", review_issue_id, "--output", "json"])
+    if not isinstance(review_issue, dict):
+        raise ReleaseError(f"Phase 1 release Review issue is unreadable: {review_issue_id}")
+    if str(review_issue.get("status") or "") != "done":
+        raise ReleaseError("Phase 1 release Review issue must be done")
+    review_metadata = metadata_map(
+        cli.json(["issue", "metadata", "list", review_issue_id, "--output", "json"])
+    )
+    if str(review_metadata.get("workflow_id") or "") != "development-delivery":
+        raise ReleaseError("Phase 1 release Review issue workflow_id is not development-delivery")
+    if str(review_metadata.get("workflow_object_type") or "") != "integration_validation":
+        raise ReleaseError(
+            "Phase 1 release Review issue must be an integration_validation"
+        )
+    if str(review_metadata.get("plan_revision") or "") != plan_revision:
+        raise ReleaseError("Phase 1 release Review Plan revision differs from its source")
+
+    root_requirement_id = str(review_metadata.get("root_requirement_id") or "")
+    if not root_requirement_id:
+        raise ReleaseError("Phase 1 release Review root_requirement_id is missing")
+    if object_type == "requirement":
+        require_issue_ref(
+            root_requirement_id, selected_refs, "Phase 1 release Review root_requirement_id"
+        )
+    else:
+        source_root = str(metadata.get("root_requirement_id") or "")
+        if not source_root or source_root != root_requirement_id:
+            raise ReleaseError(
+                "Maintenance Case root_requirement_id differs from its Review issue"
+            )
+        root_requirement = cli.json(
+            ["issue", "get", root_requirement_id, "--output", "json"]
+        )
+        if not isinstance(root_requirement, dict):
+            raise ReleaseError(
+                f"Maintenance Case root Requirement is unreadable: {root_requirement_id}"
+            )
+        if str(root_requirement.get("status") or "") != "done":
+            raise ReleaseError("Maintenance Case root Requirement must be done")
+        root_metadata = metadata_map(
+            cli.json(
+                [
+                    "issue",
+                    "metadata",
+                    "list",
+                    root_requirement_id,
+                    "--output",
+                    "json",
+                ]
+            )
+        )
+        if (
+            str(root_metadata.get("workflow_id") or "") != "development-delivery"
+            or str(root_metadata.get("workflow_object_type") or "") != "requirement"
+        ):
+            raise ReleaseError(
+                "Maintenance Case root_requirement_id is not a development Requirement"
+            )
+        if str(root_metadata.get("human_approver_id") or "") != human_approver_id:
+            raise ReleaseError(
+                "Maintenance Case root Requirement human approver differs from the Case"
+            )
+        if str(root_metadata.get("plan_revision") or "") != plan_revision:
+            raise ReleaseError(
+                "Maintenance Case root Requirement Plan revision differs from the Case"
+            )
+        require_issue_ref(
+            root_metadata.get("review_issue_id"),
+            issue_refs(review_issue_id, review_issue),
+            "Maintenance Case root Requirement review_issue_id",
+        )
+        selected_number = str(pr.get("number") or "")
+        selected_merge = str((pr.get("mergeCommit") or {}).get("oid") or "")
+        if first_metadata_value(
+            root_metadata, "github_pr_number", "pr_number"
+        ) != selected_number:
+            raise ReleaseError(
+                "Maintenance Case root Requirement PR differs from the selected PR"
+            )
+        if first_metadata_value(
+            root_metadata, "github_merge_commit_sha", "merge_commit_sha"
+        ) != selected_merge:
+            raise ReleaseError(
+                "Maintenance Case root Requirement merge commit differs from the release commit"
+            )
+
+    code_reviewer_id = managed_agent_identity(
+        cli, "agent.code-reviewer", "Code Reviewer"
+    )
+    reviewer_id = str(review_metadata.get("reviewer_id") or "")
+    original_owner_id = str(review_metadata.get("original_owner_id") or "")
+    if reviewer_id != code_reviewer_id:
+        raise ReleaseError(
+            "Phase 1 release Review reviewer_id differs from the managed Code Reviewer"
+        )
+    if not original_owner_id or original_owner_id == reviewer_id:
+        raise ReleaseError("Phase 1 release Review is not independent from its owner")
+
+    reviewed_sha = first_metadata_value(
+        review_metadata, "reviewed_commit_sha", "review_commit_sha"
+    )
+    review_comment_id = str(review_metadata.get("review_comment_id") or "")
+    pr_head_sha = str(review_metadata.get("pr_head_sha") or "")
+    if not reviewed_sha or not review_comment_id or not pr_head_sha:
+        raise ReleaseError(
+            "Phase 1 release Review is missing reviewed SHA, pr_head_sha or review_comment_id"
+        )
+    selected_head = str(pr.get("headRefOid") or "")
+    if reviewed_sha != selected_head or pr_head_sha != selected_head:
+        raise ReleaseError("Phase 1 release Review is stale for the merged PR head SHA")
+
+    selected_pr_number = str(pr.get("number") or "")
+    selected_merge_sha = str((pr.get("mergeCommit") or {}).get("oid") or "")
+    source_pr_number = first_metadata_value(metadata, "github_pr_number", "pr_number")
+    source_merge_sha = first_metadata_value(
+        metadata, "github_merge_commit_sha", "merge_commit_sha"
+    )
+    review_pr_number = first_metadata_value(
+        review_metadata, "github_pr_number", "pr_number"
+    )
+    review_merge_sha = first_metadata_value(
+        review_metadata, "github_merge_commit_sha", "merge_commit_sha"
+    )
+    if not all(
+        [source_pr_number, source_merge_sha, review_pr_number, review_merge_sha]
+    ):
+        raise ReleaseError("Phase 1 release source or Review is missing merged PR evidence")
+    if source_pr_number != selected_pr_number or review_pr_number != selected_pr_number:
+        raise ReleaseError("Phase 1 release PR number differs from the selected PR")
+    if source_merge_sha != selected_merge_sha or review_merge_sha != selected_merge_sha:
+        raise ReleaseError("Phase 1 release merge commit differs from the release commit")
+
+    merged_at = str(pr.get("mergedAt") or pr.get("merged_at") or "")
+    review_created_at = exact_review_comment(
+        cli,
+        review_issue_id,
+        review_comment_id,
+        code_reviewer_id,
+        plan_revision,
+        reviewed_sha,
+        merged_at,
+        "Phase 1 Code Review comment",
+    )
+    return {
+        "mode": "maintenance",
+        "authorization_type": "phase1_development",
+        "release_path": release_path,
+        "issue_id": str(issue.get("identifier") or issue_id),
+        "workflow_object_type": object_type,
+        "workspace_id": cli.workspace_id,
+        "profile": cli.profile,
+        "human_approver_id": human_approver_id,
+        "code_reviewer_id": code_reviewer_id,
+        "plan_revision": plan_revision,
+        "review_issue_id": str(review_issue.get("identifier") or review_issue_id),
+        "root_requirement_id": root_requirement_id,
+        "review_comment_id": review_comment_id,
+        "reviewed_commit_sha": reviewed_sha,
+        "review_created_at": review_created_at,
+        "github_pr_number": int(pr["number"]),
+        "github_merge_commit_sha": selected_merge_sha,
+        "github_merged_at": merged_at,
+        **incident_evidence,
+    }
 
 
 def recovery_exception_evidence(
@@ -229,9 +663,10 @@ def recovery_exception_evidence(
     if len(decision_matches) != 1:
         raise ReleaseError("recovery decision comment is missing or ambiguous")
     decision = decision_matches[0]
+    decision_author_id, decision_author_type = comment_author(decision)
     if (
-        decision.get("author_type") != "member"
-        or str(decision.get("author_id") or "") != human_approver_id
+        decision_author_type not in {"member", "user"}
+        or decision_author_id != human_approver_id
         or str(decision.get("content") or "").strip() != RC2_RECOVERY_DECISION
     ):
         raise ReleaseError("recovery decision has the wrong author or exact content")
@@ -255,8 +690,8 @@ def recovery_exception_evidence(
         "recovery_decision_sha256": digest(
             {
                 "comment_id": decision_comment_id,
-                "author_type": decision.get("author_type"),
-                "author_id": decision.get("author_id"),
+                "author_type": decision_author_type,
+                "author_id": decision_author_id,
                 "content": str(decision.get("content") or "").strip(),
             }
         ),
@@ -277,8 +712,13 @@ def maintenance_evidence(
     metadata = metadata_map(
         cli.json(["issue", "metadata", "list", issue_id, "--output", "json"])
     )
-    if str(metadata.get("workflow_object_type") or "") != "maintenance_change":
-        raise ReleaseError("release requires a workflow_object_type=maintenance_change Issue")
+    object_type = str(metadata.get("workflow_object_type") or "")
+    if object_type in {"requirement", "maintenance_case"}:
+        return phase1_release_evidence(root, cli, issue_id, issue, metadata, pr)
+    if object_type != "maintenance_change":
+        raise ReleaseError(
+            "release requires a requirement, maintenance_case or legacy maintenance_change Issue"
+        )
     recovery_mode = str(metadata.get("recovery_mode") or "")
     recovery_evidence: dict[str, str] = {}
     if recovery_mode:
@@ -424,6 +864,111 @@ def merged_pr_by_number(root: Path, number: int) -> dict[str, Any]:
     return value
 
 
+def development_implementation_evidence(
+    root: Path,
+    cli: MulticaCLI,
+    issue_id: str,
+    issue: dict[str, Any],
+    metadata: dict[str, Any],
+    planned: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    object_type = str(metadata.get("workflow_object_type") or "")
+    if str(metadata.get("workflow_id") or "") != "development-delivery":
+        raise ReleaseError("development provenance workflow_id is not development-delivery")
+    if object_type != "integration_validation":
+        raise ReleaseError(
+            "Phase 1 release provenance Issue is not an integration_validation"
+        )
+    if str(issue.get("status") or "") != "done":
+        raise ReleaseError("development provenance Issue must be done")
+
+    reviewer_id = managed_agent_identity(cli, "agent.code-reviewer", "Code Reviewer")
+    if str(metadata.get("reviewer_id") or "") != reviewer_id:
+        raise ReleaseError(
+            "development provenance reviewer identity differs from the managed Code Reviewer"
+        )
+    original_owner_id = str(metadata.get("original_owner_id") or "")
+    if not original_owner_id or original_owner_id == reviewer_id:
+        raise ReleaseError("development provenance Review is not independent from its owner")
+
+    reviewed_sha = first_metadata_value(
+        metadata, "reviewed_commit_sha", "review_commit_sha"
+    )
+    required = {
+        "root_requirement_id": str(metadata.get("root_requirement_id") or ""),
+        "plan_revision": str(metadata.get("plan_revision") or ""),
+        "reviewed_commit_sha": reviewed_sha,
+        "pr_head_sha": str(metadata.get("pr_head_sha") or ""),
+        "review_comment_id": str(metadata.get("review_comment_id") or ""),
+        "github_pr_number": first_metadata_value(
+            metadata, "github_pr_number", "pr_number"
+        ),
+        "github_merge_commit_sha": first_metadata_value(
+            metadata, "github_merge_commit_sha", "merge_commit_sha"
+        ),
+    }
+    missing = [key for key, value in required.items() if not value]
+    if missing:
+        raise ReleaseError(f"development provenance is missing fields: {missing}")
+    if required["pr_head_sha"] != required["reviewed_commit_sha"]:
+        raise ReleaseError("development provenance pr_head_sha differs from reviewed SHA")
+    try:
+        pr_number = int(required["github_pr_number"])
+    except ValueError as exc:
+        raise ReleaseError("development provenance github_pr_number is invalid") from exc
+
+    if planned is not None:
+        refs = issue_refs(issue_id, issue)
+        if str(planned.get("issue_id") or "") not in refs:
+            raise ReleaseError(
+                "planned development provenance does not match its Multica Issue"
+            )
+        if int(planned.get("github_pr_number") or 0) != pr_number:
+            raise ReleaseError(
+                "planned development provenance PR differs from Multica metadata"
+            )
+        pr = {
+            "number": pr_number,
+            "state": "MERGED",
+            "baseRefName": "main",
+            "headRefOid": str(planned.get("reviewed_commit_sha") or ""),
+            "mergeCommit": {
+                "oid": str(planned.get("github_merge_commit_sha") or "")
+            },
+            "mergedAt": str(planned.get("github_merged_at") or ""),
+        }
+    else:
+        pr = merged_pr_by_number(root, pr_number)
+
+    merge_sha = str((pr.get("mergeCommit") or {}).get("oid") or "")
+    if required["reviewed_commit_sha"] != str(pr.get("headRefOid") or ""):
+        raise ReleaseError("development provenance Review is stale for its merged PR")
+    if required["github_merge_commit_sha"] != merge_sha:
+        raise ReleaseError("development provenance merge commit differs from its merged PR")
+    review_created_at = exact_review_comment(
+        cli,
+        issue_id,
+        required["review_comment_id"],
+        reviewer_id,
+        required["plan_revision"],
+        required["reviewed_commit_sha"],
+        str(pr.get("mergedAt") or ""),
+        "Development Review comment",
+    )
+    return {
+        "issue_id": str(issue.get("identifier") or issue_id),
+        "workflow_object_type": object_type,
+        "root_requirement_id": required["root_requirement_id"],
+        "plan_revision": required["plan_revision"],
+        "review_comment_id": required["review_comment_id"],
+        "reviewed_commit_sha": required["reviewed_commit_sha"],
+        "review_created_at": review_created_at,
+        "github_pr_number": pr_number,
+        "github_merge_commit_sha": merge_sha,
+        "github_merged_at": str(pr.get("mergedAt") or ""),
+    }
+
+
 def maintenance_implementation_evidence(
     root: Path,
     cli: MulticaCLI,
@@ -436,6 +981,13 @@ def maintenance_implementation_evidence(
     metadata = metadata_map(
         cli.json(["issue", "metadata", "list", issue_id, "--output", "json"])
     )
+    if str(metadata.get("workflow_object_type") or "") in {
+        "development_task",
+        "integration_validation",
+    }:
+        return development_implementation_evidence(
+            root, cli, issue_id, issue, metadata, planned
+        )
     if str(metadata.get("workflow_id") or "") != "development-delivery":
         raise ReleaseError("implementation provenance workflow_id is not development-delivery")
     if str(metadata.get("workflow_object_type") or "") != "maintenance_implementation":
@@ -570,7 +1122,22 @@ def implementation_provenance(
         ],
         key=lambda item: (item["github_pr_number"], item["issue_id"]),
     )
-    if version == "1.1.0-rc.4":
+    legacy_records = [
+        item
+        for item in evidence
+        if item.get("workflow_object_type") in {None, "maintenance_implementation"}
+    ]
+    development_records = [
+        item
+        for item in evidence
+        if item.get("workflow_object_type")
+        in {"development_task", "integration_validation"}
+    ]
+    if legacy_records and development_records:
+        raise ReleaseError(
+            "implementation provenance cannot mix Phase 1 and legacy maintenance Issues"
+        )
+    if version == "1.1.0-rc.4" and legacy_records:
         if len(evidence) != 2:
             raise ReleaseError("v1.1.0-rc.4 requires exactly two Implementation provenance Issues")
         source_matches = [
@@ -592,6 +1159,36 @@ def implementation_provenance(
         )
         if reachable.returncode != 0:
             raise ReleaseError("v1.1.0-rc.4 prior Implementation PR is not in release history")
+    elif development_records:
+        if len(evidence) != 1:
+            raise ReleaseError(
+                "Phase 1 provenance must bind exactly one final integration-validation Issue"
+            )
+        source_matches = [
+            item for item in evidence if item["github_merge_commit_sha"] == source_commit
+        ]
+        if len(source_matches) != 1:
+            raise ReleaseError(
+                "Phase 1 provenance must bind exactly one final release PR"
+            )
+        for item in evidence:
+            if item in source_matches:
+                continue
+            reachable = run(
+                [
+                    "git",
+                    "merge-base",
+                    "--is-ancestor",
+                    item["github_merge_commit_sha"],
+                    source_commit,
+                ],
+                root,
+                check=False,
+            )
+            if reachable.returncode != 0:
+                raise ReleaseError(
+                    "Phase 1 implementation provenance is not in release history"
+                )
     return evidence
 
 
@@ -820,7 +1417,15 @@ def maintenance_github_provenance(
             approval_author_id.encode("utf-8")
         ).hexdigest(),
     }
-    for key in ["review_issue_id", "batch_review_mappings_sha256"]:
+    for key in [
+        "authorization_type",
+        "release_path",
+        "workflow_object_type",
+        "review_issue_id",
+        "root_requirement_id",
+        "incident_id",
+        "batch_review_mappings_sha256",
+    ]:
         value = str(authorization.get(key) or "")
         if value:
             provenance[key] = value
@@ -862,6 +1467,14 @@ def parse_iso_datetime(value: str, label: str) -> datetime:
     if parsed.tzinfo is None:
         raise ReleaseError(f"{label} timestamp must include a timezone")
     return parsed.astimezone(timezone.utc)
+
+
+def canonical_iso_datetime(value: str, label: str) -> str:
+    return (
+        parse_iso_datetime(value, label)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
 
 
 def git_head(root: Path) -> str:
@@ -1161,13 +1774,11 @@ def verify_release_tag_ruleset(
             f"GitHub release tag ruleset is missing restrictions: {sorted(required_rules - rule_types)}"
         )
     publisher = evidence.get("publisher_app") or {}
-    app = gh_json(root, ["api", f"apps/{publisher['slug']}"])
-    if (
-        not isinstance(app, dict)
-        or int(app.get("id") or 0) != int(publisher["id"])
-        or str(app.get("slug") or "") != str(publisher["slug"])
-    ):
-        raise ReleaseError("GitHub Publisher App public identity differs from administrator evidence")
+    # The Publisher App is intentionally private. Its identity, installation,
+    # permissions and repository scope are bound by reviewed administrator
+    # evidence above; the live Ruleset bypass actor is checked below whenever
+    # GitHub exposes it to the read-only caller. The public App endpoint returns
+    # 404 for a private App and therefore cannot be a release prerequisite.
     observed_bypass = [item for item in detail.get("bypass_actors") or [] if isinstance(item, dict)]
     if observed_bypass and observed_bypass != expected.get("bypass_actors"):
         raise ReleaseError("GitHub release tag Ruleset bypass actors differ from administrator evidence")
@@ -1185,7 +1796,10 @@ def verify_release_tag_ruleset(
         "source": str(detail.get("source") or expected.get("source") or ""),
         "target": str(detail.get("target") or ""),
         "enforcement": str(detail.get("enforcement") or ""),
-        "updated_at": str(detail.get("updated_at") or ""),
+        "updated_at": canonical_iso_datetime(
+            str(detail.get("updated_at") or ""),
+            "GitHub release tag Ruleset updated_at",
+        ),
         "publisher_app_id": int(publisher["id"]),
         "publisher_app_slug": str(publisher["slug"]),
         "rules": sorted(normalized_rules, key=canonical),
@@ -1201,7 +1815,10 @@ def verify_release_tag_ruleset(
         "source": str(expected.get("source") or ""),
         "target": str(expected.get("target") or ""),
         "enforcement": str(expected.get("enforcement") or ""),
-        "updated_at": str(expected.get("updated_at") or ""),
+        "updated_at": canonical_iso_datetime(
+            str(expected.get("updated_at") or ""),
+            "release-control tag Ruleset updated_at",
+        ),
         "rules": sorted(
             [
                 {
@@ -1278,6 +1895,13 @@ def environment_protection_snapshot(
         if not isinstance(rule, dict):
             raise ReleaseError("GitHub release Environment contains an invalid protection rule")
         rule_type = str(rule.get("type") or "")
+        if rule_type == "branch_policy":
+            # GitHub exposes the Environment deployment branch policy both as
+            # a protection-rule marker and as the detailed
+            # deployment_branch_policy object queried below. Normalize it only
+            # from the detailed object so the evidence digest is stable across
+            # API response shapes.
+            continue
         if rule_type == "wait_timer":
             normalized_rules.append(
                 {"type": rule_type, "wait_timer": int(rule.get("wait_timer") or 0)}
@@ -1707,7 +2331,9 @@ def release_request(
 ) -> dict[str, Any]:
     authorization = plan.get("release_authorization") or {}
     if authorization.get("mode") != "maintenance":
-        raise ReleaseError("protected Environment releases require Maintenance authorization")
+        raise ReleaseError(
+            "protected Environment releases require Phase 1 development authorization"
+        )
     provenance = maintenance_github_provenance(authorization, release_approval)
     control = release_control(root)
     request = {
@@ -1738,6 +2364,90 @@ def release_request(
     return request
 
 
+def phase1_expected_assets(version: str) -> list[str]:
+    return sorted(
+        [
+            "checksums.txt",
+            f"multica-dev-workflow-v{version}.zip",
+            f"multica-requirement-intake-v{version}.zip",
+            f"multica-workflow-manager-v{version}.zip",
+            f"multica-workflow-observer-v{version}.zip",
+            f"multica-workflow-console-v{version}.zip",
+        ]
+    )
+
+
+def validate_release_version(version: str) -> str:
+    if not RELEASE_VERSION_RE.fullmatch(version):
+        raise ReleaseError("release version must be a valid semantic version")
+    return version
+
+
+def verify_release_request_payload(request: dict[str, Any]) -> str:
+    expected = str(request.get("release_request_digest") or "")
+    payload = {
+        key: value for key, value in request.items() if key != "release_request_digest"
+    }
+    if not expected or digest(payload) != expected:
+        raise ReleaseError("release Request digest is invalid or the request was modified")
+    if request.get("schema_version") != 1:
+        raise ReleaseError("unsupported release Request schema_version")
+    version = validate_release_version(str(request.get("version") or ""))
+    if str(request.get("tag") or "") != f"v{version}":
+        raise ReleaseError("release Request tag must equal v plus version")
+    source_commit = str(request.get("source_commit") or "")
+    if not re.fullmatch(r"[a-f0-9]{40,64}", source_commit):
+        raise ReleaseError("release Request source_commit is invalid")
+    if str(request.get("origin_main_sha") or "") != source_commit:
+        raise ReleaseError("release Request origin_main_sha must equal source_commit")
+    for key in [
+        "source_hash",
+        "changelog_hash",
+        "release_plan_digest",
+    ]:
+        if not re.fullmatch(r"[a-f0-9]{64}", str(request.get(key) or "")):
+            raise ReleaseError(f"release Request {key} is invalid")
+    if normalized_expected_assets(request.get("expected_assets")) != phase1_expected_assets(
+        version
+    ):
+        raise ReleaseError("release Request does not contain the exact Phase 1 asset set")
+    provenance = request.get("maintenance_provenance")
+    if not isinstance(provenance, dict):
+        raise ReleaseError("release Request Maintenance provenance must be an object")
+    if provenance.get("authorization_type") != "phase1_development":
+        raise ReleaseError("release Request is not authorized by the Phase 1 development flow")
+    implementations = request.get("implementation_provenance") or []
+    if (
+        not isinstance(implementations, list)
+        or len(implementations) != 1
+        or not isinstance(implementations[0], dict)
+    ):
+        raise ReleaseError(
+            "Phase 1 release Request must bind exactly one integration-validation Issue"
+        )
+    if str(request.get("implementation_provenance_sha256") or "") != digest(
+        implementations
+    ):
+        raise ReleaseError("release Request Implementation provenance digest is invalid")
+    if str(implementations[0].get("github_merge_commit_sha") or "") != source_commit:
+        raise ReleaseError("release Request integration-validation does not bind source_commit")
+    merged_pr = request.get("merged_pr")
+    if not isinstance(merged_pr, dict):
+        raise ReleaseError("release Request merged_pr must be an object")
+    if str(merged_pr.get("merge_commit_sha") or "") != source_commit:
+        raise ReleaseError("release Request merged PR does not bind source_commit")
+    validation = request.get("validation")
+    if not isinstance(validation, dict):
+        raise ReleaseError("release Request validation must be an object")
+    if (
+        str(validation.get("headSha") or "") != source_commit
+        or validation.get("status") != "completed"
+        or validation.get("conclusion") != "success"
+    ):
+        raise ReleaseError("release Request validation does not bind a green source commit")
+    return expected
+
+
 def verify_release_request(
     root: Path,
     request: dict[str, Any],
@@ -1745,12 +2455,7 @@ def verify_release_request(
     expected_source: str | None = None,
     verify_state: bool = True,
 ) -> str:
-    expected = str(request.get("release_request_digest") or "")
-    payload = {key: value for key, value in request.items() if key != "release_request_digest"}
-    if not expected or digest(payload) != expected:
-        raise ReleaseError("release Request digest is invalid or the request was modified")
-    if request.get("schema_version") != 1:
-        raise ReleaseError("unsupported release Request schema_version")
+    expected = verify_release_request_payload(request)
     if expected_source and str(request.get("source_commit") or "") != expected_source:
         raise ReleaseError("release Request source commit differs from the workflow commit")
     control = release_control(root)
@@ -1821,15 +2526,6 @@ def verify_release_request(
     missing = [key for key in required if not provenance.get(key)]
     if missing:
         raise ReleaseError(f"release Request is missing Maintenance provenance: {missing}")
-    implementations = request.get("implementation_provenance") or []
-    if not isinstance(implementations, list):
-        raise ReleaseError("release Request implementation_provenance must be a list")
-    if str(request.get("implementation_provenance_sha256") or "") != digest(
-        implementations
-    ):
-        raise ReleaseError("release Request Implementation provenance digest is invalid")
-    if request.get("version") == "1.1.0-rc.4" and len(implementations) != 2:
-        raise ReleaseError("v1.1.0-rc.4 release Request must bind two Implementation Issues")
     if verify_state:
         verify_current_state(root, request)
     return expected
@@ -1857,6 +2553,25 @@ def load_release_request(path: str) -> dict[str, Any]:
     return value
 
 
+def embedded_release_request(annotation: str) -> dict[str, Any]:
+    encoded = annotation_value(annotation, "release_request_b64", r"[A-Za-z0-9_-]+")
+    try:
+        padding = "=" * (-len(encoded) % 4)
+        value = json.loads(
+            base64.urlsafe_b64decode(encoded + padding).decode("utf-8")
+        )
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReleaseError("annotated tag release Request is invalid") from exc
+    if not isinstance(value, dict):
+        raise ReleaseError("annotated tag release Request must be a JSON object")
+    verify_release_request_payload(value)
+    if annotation_value(annotation, "release_request_digest", r"[a-f0-9]{64}") != str(
+        value["release_request_digest"]
+    ):
+        raise ReleaseError("annotated tag release Request digest differs from its payload")
+    return value
+
+
 def annotation_value(annotation: str, key: str, pattern: str = r"\S+") -> str:
     matches = re.findall(rf"(?m)^{re.escape(key)}=({pattern})$", annotation)
     if len(matches) != 1:
@@ -1880,7 +2595,11 @@ def verify_versions(root: Path, version: str) -> list[str]:
         "VERSION": (root / "VERSION").read_text(encoding="utf-8").strip(),
         "workflow.json": workflow["workflow"]["version"],
     }
-    for path in sorted((root / "skills").glob("*/SKILL.md")):
+    active_skill_paths = [
+        root / str(item["path"]) / "SKILL.md"
+        for item in workflow.get("skills", [])
+    ]
+    for path in sorted(active_skill_paths):
         values[path.relative_to(root).as_posix()] = frontmatter_version(path)
     mismatches = [f"{name}={value}" for name, value in values.items() if value != version]
     instruction_files = []
@@ -1896,6 +2615,18 @@ def verify_versions(root: Path, version: str) -> list[str]:
     if mismatches:
         raise ReleaseError(f"release version mismatch for {version}: {mismatches}")
     return sorted([*values, *instruction_files])
+
+
+def verify_versions_at_ref(root: Path, ref: str, version: str) -> list[str]:
+    with tempfile.TemporaryDirectory(prefix="multica-release-") as temporary:
+        snapshot = Path(temporary) / "snapshot"
+        archive = Path(temporary) / "snapshot.zip"
+        run(
+            ["git", "archive", "--format=zip", f"--output={archive}", ref],
+            root,
+        )
+        shutil.unpack_archive(str(archive), str(snapshot))
+        return verify_versions(snapshot, version)
 
 
 def normalized_expected_assets(value: Any) -> list[str]:
@@ -1996,7 +2727,7 @@ def successful_validation(root: Path, commit: str) -> dict[str, Any]:
             "--commit",
             commit,
             "--workflow",
-            "validate",
+            "validate.yml",
             "--limit",
             "20",
             "--json",
@@ -2005,7 +2736,7 @@ def successful_validation(root: Path, commit: str) -> dict[str, Any]:
     )
     matches = [item for item in runs if item.get("status") == "completed" and item.get("conclusion") == "success"]
     if not matches:
-        raise ReleaseError("release commit has no successful completed validate run")
+        raise ReleaseError("release commit has no successful completed Phase 1 validation run")
     return sorted(matches, key=lambda item: str(item.get("createdAt") or ""), reverse=True)[0]
 
 
@@ -2059,6 +2790,7 @@ def build_plan(
     multica: MulticaCLI | None = None,
     implementation_issues: list[str] | None = None,
 ) -> dict[str, Any]:
+    validate_release_version(version)
     commit = git_head(root)
     dirty = git_dirty(root)
     origin_main_sha = verify_origin_main_reachability(root, commit)
@@ -2073,12 +2805,16 @@ def build_plan(
     pr = merged_pr_for_commit(root, commit)
     validation = successful_validation(root, commit)
     if bool(bootstrap_plan) == bool(maintenance_issue):
-        raise ReleaseError("release planning requires exactly one of --maintenance-issue or --bootstrap-plan")
+        raise ReleaseError(
+            "release planning requires exactly one of --development-issue or --bootstrap-plan"
+        )
     if bootstrap_plan:
         authorization = bootstrap_evidence(root, version, bootstrap_plan, pr)
     else:
         if multica is None:
-            raise ReleaseError("Maintenance release planning requires a resolved Multica context")
+            raise ReleaseError(
+                "development release planning requires a resolved Multica context"
+            )
         authorization = maintenance_evidence(
             root, multica, str(maintenance_issue), pr, version
         )
@@ -2091,6 +2827,18 @@ def build_plan(
             commit,
             version,
         )
+        if authorization.get("authorization_type") == "phase1_development":
+            if len(implementation_records) != 1:
+                raise ReleaseError(
+                    "Phase 1 release planning requires exactly one final integration-validation provenance Issue"
+                )
+            review_issue_id = str(authorization.get("review_issue_id") or "")
+            if review_issue_id != str(
+                implementation_records[0].get("issue_id") or ""
+            ):
+                raise ReleaseError(
+                    "Phase 1 release review_issue_id is not included in implementation provenance"
+                )
     plan = {
         "schema_version": 1,
         "created_at": utc_now(),
@@ -2111,18 +2859,7 @@ def build_plan(
         "validation": validation,
         "version_files": checked_versions,
         "changelog_hash": hashlib.sha256(changelog.encode("utf-8")).hexdigest(),
-        "expected_assets": sorted(
-            [
-                "checksums.txt",
-                f"multica-dev-workflow-v{version}.zip",
-                f"multica-requirement-intake-v{version}.zip",
-                f"multica-workflow-manager-v{version}.zip",
-                f"multica-workflow-observer-v{version}.zip",
-                f"multica-workflow-maintainer-v{version}.zip",
-                f"multica-workflow-console-v{version}.zip",
-                f"multica-workflow-secure-runtime-win-x64-v{version}.zip",
-            ]
-        ),
+        "expected_assets": phase1_expected_assets(version),
         "bootstrap_plan": bootstrap_plan,
         "maintenance_issue": maintenance_issue,
         "release_authorization": authorization,
@@ -2205,7 +2942,9 @@ def verify_release_approval(
 ) -> dict[str, Any]:
     authorization = plan.get("release_authorization") or {}
     if authorization.get("mode") != "maintenance":
-        raise ReleaseError("Multica release approval is only valid for a Maintenance release")
+        raise ReleaseError(
+            "Multica release approval is only valid for a Phase 1 development release"
+        )
     current = maintenance_evidence(
         root,
         cli,
@@ -2259,16 +2998,20 @@ def verify_release_approval(
         or authorization.get("human_approver_id")
         or ""
     )
-    matches = [
-        item
-        for item in comments
-        if item.get("author_type") == "member"
-        and str(item.get("author_id") or "") == human_approver_id
-        and any(
-            line.strip() in expected_lines
+    matches = []
+    for item in comments:
+        author_id, author_type = comment_author(item)
+        lines = [
+            line.strip()
             for line in str(item.get("content") or "").splitlines()
-        )
-    ]
+            if line.strip()
+        ]
+        if (
+            author_type in {"member", "user"}
+            and author_id == human_approver_id
+            and lines in [[line] for line in expected_lines]
+        ):
+            matches.append(item)
     if len(matches) != 1:
         raise ReleaseError(
             "expected exactly one human APPROVE WORKFLOW RELEASE comment for this digest "
@@ -2276,7 +3019,7 @@ def verify_release_approval(
         )
     return {
         "comment_id": str(matches[0].get("id") or ""),
-        "author_id": str(matches[0].get("author_id") or ""),
+        "author_id": comment_author(matches[0])[0],
     }
 
 
@@ -2425,28 +3168,16 @@ def command_approval_block(args: argparse.Namespace, root: Path) -> int:
     return 0
 
 
-def command_apply(args: argparse.Namespace, root: Path) -> int:
-    plan = json.loads(Path(args.plan).read_text(encoding="utf-8"))
-    expected = verify_plan_file(plan, args.approve)
-    dispatcher = verify_dispatcher_installation(root)
-    verify_current_state(root, plan, verify_merged_pr=False)
-    authorization = plan.get("release_authorization") or {}
-    if authorization.get("mode") != "maintenance":
-        raise ReleaseError("new releases require Maintenance authorization")
-    cli, _ = release_cli(
-        args.multica_bin,
-        args.profile if args.profile is not None else authorization.get("profile"),
-        args.workspace if args.workspace is not None else authorization.get("workspace_id"),
+def dispatch_release_workflow(
+    root: Path,
+    boundary: dict[str, Any],
+    request: dict[str, Any],
+    *,
+    recover_existing_tag: bool,
+) -> None:
+    encoded = base64.urlsafe_b64encode(canonical(request).encode("utf-8")).decode(
+        "ascii"
     )
-    if cli.workspace_id != str(authorization.get("workspace_id") or ""):
-        raise ReleaseError("Multica Workspace differs from the release Plan")
-    release_approval = verify_release_approval(root, cli, plan)
-    boundary = verify_release_environment(
-        root, dispatcher_installation=dispatcher
-    )
-    request = release_request(root, plan, release_approval, boundary)
-    request_path = save_release_request(root, request)
-    encoded = base64.urlsafe_b64encode(canonical(request).encode("utf-8")).decode("ascii")
     run(
         [
             "gh",
@@ -2460,9 +3191,38 @@ def command_apply(args: argparse.Namespace, root: Path) -> int:
             "--field",
             f"request_b64={encoded}",
             "--field",
-            "recover_existing_tag=false",
+            f"recover_existing_tag={'true' if recover_existing_tag else 'false'}",
         ],
         root,
+    )
+
+
+def command_apply(args: argparse.Namespace, root: Path) -> int:
+    plan = json.loads(Path(args.plan).read_text(encoding="utf-8"))
+    expected = verify_plan_file(plan, args.approve)
+    dispatcher = verify_dispatcher_installation(root)
+    verify_current_state(root, plan, verify_merged_pr=False)
+    authorization = plan.get("release_authorization") or {}
+    if authorization.get("mode") != "maintenance":
+        raise ReleaseError("new releases require Phase 1 development authorization")
+    cli, _ = release_cli(
+        args.multica_bin,
+        args.profile if args.profile is not None else authorization.get("profile"),
+        args.workspace if args.workspace is not None else authorization.get("workspace_id"),
+    )
+    if cli.workspace_id != str(authorization.get("workspace_id") or ""):
+        raise ReleaseError("Multica Workspace differs from the release Plan")
+    release_approval = verify_release_approval(root, cli, plan)
+    boundary = verify_release_environment(
+        root, dispatcher_installation=dispatcher
+    )
+    request = release_request(root, plan, release_approval, boundary)
+    request_path = save_release_request(root, request)
+    dispatch_release_workflow(
+        root,
+        boundary,
+        request,
+        recover_existing_tag=False,
     )
     print(
         json.dumps(
@@ -2476,6 +3236,57 @@ def command_apply(args: argparse.Namespace, root: Path) -> int:
                 "protected_environment": boundary["environment"],
                 "local_tag_mutation": False,
                 "local_release_mutation": False,
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def command_recover(args: argparse.Namespace, root: Path) -> int:
+    dispatcher = verify_dispatcher_installation(root)
+    if args.request:
+        request = load_release_request(args.request)
+    else:
+        tag = str(args.tag)
+        if not tag.startswith("v"):
+            raise ReleaseError("release tag must start with v")
+        validate_release_version(tag[1:])
+        if not run(["git", "tag", "--list", tag], root).stdout.strip():
+            run(
+                [
+                    "git",
+                    "fetch",
+                    "--no-tags",
+                    "origin",
+                    f"refs/tags/{tag}:refs/tags/{tag}",
+                ],
+                root,
+            )
+        request = embedded_release_request(annotated_tag_contents(root, tag))
+        if str(request.get("tag") or "") != tag:
+            raise ReleaseError("embedded release Request belongs to a different tag")
+    verify_release_request_payload(request)
+    verify_existing_recovery_tag(root, request)
+    boundary = verify_release_environment(
+        root, dispatcher_installation=dispatcher
+    )
+    request_path = save_release_request(root, request)
+    dispatch_release_workflow(
+        root,
+        boundary,
+        request,
+        recover_existing_tag=True,
+    )
+    print(
+        json.dumps(
+            {
+                "action": "release_recovery_dispatched",
+                "tag": request["tag"],
+                "source_commit": request["source_commit"],
+                "release_request_digest": request["release_request_digest"],
+                "request_file": str(request_path),
+                "protected_environment": boundary["environment"],
             },
             indent=2,
         )
@@ -2504,6 +3315,22 @@ def command_verify_request(args: argparse.Namespace, root: Path) -> int:
     if args.github_output:
         path = Path(args.github_output)
         with path.open("a", encoding="utf-8", newline="\n") as handle:
+            for key, value in output.items():
+                handle.write(f"{key}={value}\n")
+    print(json.dumps(output, indent=2))
+    return 0
+
+
+def command_verify_request_payload(args: argparse.Namespace, root: Path) -> int:
+    request = load_release_request(args.request)
+    request_digest = verify_release_request_payload(request)
+    output = {
+        "release_request_digest": request_digest,
+        "source_commit": request["source_commit"],
+        "tag": request["tag"],
+    }
+    if args.github_output:
+        with Path(args.github_output).open("a", encoding="utf-8", newline="\n") as handle:
             for key, value in output.items():
                 handle.write(f"{key}={value}\n")
     print(json.dumps(output, indent=2))
@@ -2559,10 +3386,14 @@ def protected_tag_message(
     provenance = request.get("maintenance_provenance") or {}
     boundary = request.get("release_boundary") or {}
     approval = gate.get("environment_approval") or {}
+    encoded_request = base64.urlsafe_b64encode(
+        canonical(request).encode("utf-8")
+    ).decode("ascii").rstrip("=")
     lines = [
         f"Multica Workflow {request['tag']}",
         "",
         f"release_request_digest={request['release_request_digest']}",
+        f"release_request_b64={encoded_request}",
         f"release_plan_digest={request['release_plan_digest']}",
         f"source_commit={request['source_commit']}",
         f"merged_pr={request['merged_pr']['number']}",
@@ -2660,6 +3491,9 @@ def verify_existing_recovery_tag(
     ).stdout.strip()
     if not remote:
         raise ReleaseError(f"recovery tag does not exist on origin: {tag}")
+    remote_tag_object = remote.split()[0]
+    if not re.fullmatch(r"[a-f0-9]{40,64}", remote_tag_object):
+        raise ReleaseError("origin returned an invalid recovery tag object")
     if not run(["git", "tag", "--list", tag], root).stdout.strip():
         run(
             [
@@ -2671,6 +3505,11 @@ def verify_existing_recovery_tag(
             ],
             root,
         )
+    local_tag_object = run(
+        ["git", "rev-parse", f"refs/tags/{tag}"], root
+    ).stdout.strip()
+    if local_tag_object != remote_tag_object:
+        raise ReleaseError("local recovery tag differs from origin")
     annotation = annotated_tag_contents(root, tag)
     if annotation_value(annotation, "release_request_digest", r"[a-f0-9]{64}") != str(
         request["release_request_digest"]
@@ -2768,28 +3607,50 @@ def command_publish_release(args: argparse.Namespace, root: Path) -> int:
         raise ReleaseError("protected tag does not bind the approved publish gate")
     assets = verify_asset_directory(annotation, Path(args.directory).resolve())
     existing = run(
-        ["gh", "release", "view", tag, "--json", "id"], root, check=False
+        ["gh", "release", "view", tag, "--json", "id,assets"],
+        root,
+        check=False,
     )
+    asset_paths = [str(Path(args.directory).resolve() / name) for name in assets]
     if existing.returncode == 0:
-        raise ReleaseError(f"GitHub Release already exists: {tag}")
-    command = [
-        "gh",
-        "release",
-        "create",
-        tag,
-        *[str(Path(args.directory).resolve() / name) for name in assets],
-        "--verify-tag",
-        "--title",
-        f"Multica Workflow {tag}",
-        "--generate-notes",
-    ]
-    if "-" in tag:
-        command.append("--prerelease")
-    run(command, root)
+        if not args.recover_existing_tag:
+            raise ReleaseError(f"GitHub Release already exists: {tag}")
+        try:
+            release_record = json.loads(existing.stdout or "{}")
+        except json.JSONDecodeError as exc:
+            raise ReleaseError("existing GitHub Release response is invalid") from exc
+        existing_names = {
+            str(item.get("name") or "")
+            for item in release_record.get("assets") or []
+            if isinstance(item, dict)
+        } - {""}
+        unexpected = sorted(existing_names - set(assets))
+        if unexpected:
+            raise ReleaseError(
+                f"existing GitHub Release contains unapproved assets: {unexpected}"
+            )
+        run(["gh", "release", "upload", tag, *asset_paths, "--clobber"], root)
+        publish_action = "github_release_assets_recovered"
+    else:
+        command = [
+            "gh",
+            "release",
+            "create",
+            tag,
+            *asset_paths,
+            "--verify-tag",
+            "--title",
+            f"Multica Workflow {tag}",
+            "--generate-notes",
+        ]
+        if "-" in tag:
+            command.append("--prerelease")
+        run(command, root)
+        publish_action = "github_release_published"
     print(
         json.dumps(
             {
-                "action": "github_release_published",
+                "action": publish_action,
                 "tag": tag,
                 "assets": assets,
                 "publish_gate_digest": gate["publish_gate_digest"],
@@ -2808,11 +3669,18 @@ def command_verify_tag(args: argparse.Namespace, root: Path) -> int:
     if not tag.startswith("v"):
         raise ReleaseError("release tag must start with v")
     version = tag[1:]
-    verify_versions(root, version)
     commit = run(["git", "rev-list", "-n", "1", tag], root).stdout.strip()
     if not commit:
         raise ReleaseError(f"tag not found: {tag}")
+    verify_versions_at_ref(root, tag, version)
     annotation = annotated_tag_contents(root, tag)
+    if re.search(r"(?m)^release_request_b64=", annotation):
+        embedded = embedded_release_request(annotation)
+        if (
+            str(embedded.get("tag") or "") != tag
+            or str(embedded.get("source_commit") or "") != commit
+        ):
+            raise ReleaseError("annotated release Request does not bind this tag")
     expected_assets = expected_assets_from_annotation(annotation)
     match = re.search(r"(?m)^release_plan_digest=([a-f0-9]{64})$", annotation)
     if not match:
@@ -3063,7 +3931,12 @@ def parser() -> argparse.ArgumentParser:
     plan = sub.add_parser("plan")
     plan.add_argument("--version", required=True)
     plan.add_argument("--bootstrap-plan")
-    plan.add_argument("--maintenance-issue")
+    plan.add_argument(
+        "--development-issue",
+        "--maintenance-issue",
+        dest="maintenance_issue",
+        help="Phase 1 Requirement or Maintenance Case authorizing the release",
+    )
     plan.add_argument("--implementation-provenance", action="append", default=[])
     plan.add_argument("--multica-bin")
     plan.add_argument("--profile")
@@ -3082,11 +3955,20 @@ def parser() -> argparse.ArgumentParser:
     apply.add_argument("--profile")
     apply.add_argument("--workspace")
     apply.set_defaults(func=command_apply)
+    recover = sub.add_parser("recover")
+    recovery_source = recover.add_mutually_exclusive_group(required=True)
+    recovery_source.add_argument("--tag")
+    recovery_source.add_argument("--request")
+    recover.set_defaults(func=command_recover)
     verify_request = sub.add_parser("verify-request")
     verify_request.add_argument("--request", required=True)
     verify_request.add_argument("--expected-source")
     verify_request.add_argument("--github-output")
     verify_request.set_defaults(func=command_verify_request)
+    verify_request_payload = sub.add_parser("verify-request-payload")
+    verify_request_payload.add_argument("--request", required=True)
+    verify_request_payload.add_argument("--github-output")
+    verify_request_payload.set_defaults(func=command_verify_request_payload)
     verify_publish_gate = sub.add_parser("verify-publish-gate")
     verify_publish_gate.add_argument("--request", required=True)
     verify_publish_gate.add_argument("--workflow-run-id", required=True)

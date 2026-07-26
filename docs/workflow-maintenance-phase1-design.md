@@ -95,6 +95,8 @@ Reporter 是开发 Agent 使用的确定性上报入口。它先在工作流运�
 
 每个主动报告对应一个可去重的 Observation 记录。它不是 Incident，也不能启动维护。Observer 处理并完成 Incident 来源链接后，将 Observation 标记为已处理；失败记录保持待处理，以便后续扫描恢复。
 
+单条 Observation 失败不得中止其余项目和记录的扫描。失败记录最多自动尝试五次；达到上限后进入 `quarantined`，保留最后错误和尝试次数，由专用运行态巡检生成可追踪 Finding。相同 fingerprint 的新 payload 会重新进入 `pending`，但相同失败 payload 不会无限重试。
+
 ### Observer 扫描器
 
 扫描器按项目登记范围读取候选 Issue、相关运行记录和控制面状态，执行版本化规则集，并将 finding 交给 Incident 管理器。
@@ -129,6 +131,7 @@ Observer 无法可靠监控自己的调度器。独立健康检查负责检测 A
 | `triage` | Observer | 校验分类结论并更新 Incident |
 | `prepare-maintenance-decision` | Observer | 生成摘要绑定的人工维护决策请求 |
 | `record-maintenance-decision` | 人工宿主上下文 | 验证人工身份、评论和摘要，并创建最小 Maintenance Case |
+| `record-maintenance-progress` | 普通开发流程/人工宿主 | 按顺序记录开发启动、修复就绪、发布和部署证据；不得跳过前置状态 |
 | `verify-fix` | Observer | 执行复现场景并写入独立验证结论 |
 | `health` | 外部操作员或调度器 | 检查 Observer 调度与扫描新鲜度 |
 
@@ -196,7 +199,7 @@ rule_id
 severity
 affected_entity
 payload_digest
-status=pending|processing|processed|failed
+status=pending|processing|processed|failed|quarantined
 incident_id
 attempt_count
 last_error
@@ -227,8 +230,12 @@ workflow_object_type=maintenance_case
 incident_id
 maintenance_intake_digest
 approval_comment_id
+human_approver_id
 executor
 logical_status
+root_requirement_id
+review_issue_id
+plan_revision
 implementation_issue_ids
 pr_number
 merge_commit_sha
@@ -466,11 +473,15 @@ approved -> in_development -> fix_ready -> awaiting_deployment
 
 普通开发流程完成修复后，Maintenance Case 记录：
 
+- 普通开发顶层 Requirement 和最终 integration-validation Issue。
+- Code Reviewer 的精确 review_comment_id、Plan revision 与被审查 PR head SHA。
 - 修复 commit 和 PR。
 - 测试与 CI 结果。
 - 发布或部署版本。
 - 原问题复现场景。
 - 需要 Observer 验证的环境。
+
+这些证据通过 `record-maintenance-progress` 顺序写入：`in-development` 绑定普通开发 Issue，`fix-ready` 绑定 Requirement、integration-validation、PR 和 merge commit，`release-recorded` 绑定 `v` 前缀 tag、source commit 与 Release Request digest，`deployment-recorded` 绑定 Workspace deployment Plan digest、已完成 apply journal 及其生成的不可变 plan-digest Workspace deployment record。另有每个 Workspace 的最新部署指针供 `workflow.py verify` 展示，但它不会覆盖历史 Case 引用的证据记录。逻辑状态最后写入，使部分持久化失败后可以安全重试。
 
 Observer 验证必须独立执行原规则和复现场景，并确认：
 

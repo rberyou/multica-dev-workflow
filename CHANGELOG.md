@@ -2,18 +2,18 @@
 
 ## 1.1.0-rc.4
 
-- Add a Windows Secure Agent Runtime with a hash-verified Launcher, tokenless Reviewer, task/Runtime attestation, pre-start Job Object binding, isolated homes, strict Codex permission profiles, and allowlisted network proxy.
-- Add a repository-scoped Maintainer Token Broker that keeps the App private key and raw installation tokens outside Agent environments and exposes only bounded branch push, PR upsert, and CI read operations.
-- Move release tag and GitHub Release mutation behind the protected `workflow-release` Environment, a digest-bound publish gate, and a dedicated Publisher App as the sole tag Ruleset bypass.
-- Require a separate selected-repository Dispatcher App with only Actions write, Contents read and Metadata read; bind its reviewed installation to the Release Request and tag provenance while allowing normal host credentials to remain outside Agent runtimes.
-- Bind workflow dispatch to the reviewed Dispatcher bot actor, defer PR readback to the built-in read-only workflow token, and allow recovery publication to use a new approved gate without rewriting the immutable tag gate.
-- Push Maintainer branches only from Broker-owned bare snapshots, bind CONNECT tunnels to TLS SNI, delete task credential homes on exit, and make install and binding updates transactionally restorable.
-- Make local release apply dispatch a digest-bound Release Request without creating, deleting or pushing tags or publishing Releases; raw tag pushes no longer trigger publication.
-- Bind RC4 provenance to both stabilization Implementation PRs, the Release Request, workflow run, Environment approval actor, Publisher installation, CI and bounded Maintenance Review evidence.
-- Add the host-only workflow-console Skill, automatic Maintainer/Reviewer handoff loop, two-phase Runtime bindings Bootstrap, install/doctor/update/rollback scripts, and a self-contained `win-x64` release asset.
-- Scope Observer workflow gates to managed objects while preserving pending-Incident recovery for legacy/external intake.
-- Disable automatic maintenance-tree expansion, require human-gated maintenance intake and lazily create later stages.
-- Keep Reporter Skill available while Observer Autopilot operations are paused.
+- Align desired state, default installation, CI and release assets with Phase 1: ordinary development Agents plus Observer, without activating Maintainer, Maintenance Reviewer or enforced Secure Runtime isolation.
+- Add durable Observation intake with full-fingerprint idempotency, registered reporter checks, retry isolation, bounded quarantine and recovery of records left in processing.
+- Harden Incident deduplication, evidence retention, source blocking and restoration, human maintenance decisions, ordinary-development progress stages and Observer-only final verification.
+- Preserve failed verification attempts while allowing a corrected Requirement, PR, release and deployment evidence set to enter the next repair cycle.
+- Record immutable plan-digest deployment evidence per Workspace, keep a monotonic latest pointer, and recover evidence safely from completed Apply journals without changing the original actor.
+- Bind deployment evidence to the released source commit, Workspace, Plan digest, completed journal, deployment record and actor before Observer verification can close an Incident.
+- Run release Request validation on trusted `main`, require the exact Phase 1 asset set and bind the annotated tag to the complete digest-bound Request and protected publish gate.
+- Add durable release recovery from an existing tag or Request file, reject divergent local tags and unexpected assets, and safely replace only approved assets after interrupted publication.
+- Verify release versions from the tag snapshot and use the stable `validate.yml` workflow when binding green CI provenance.
+- Keep local release apply limited to dispatching the reviewed Request; tag and GitHub Release mutation remain behind the protected `workflow-release` Environment and Publisher App.
+- Make the default audit path read-only while retaining explicit report mode, operation-record auditing and out-of-band Observer health checks.
+- Update the workflow console, Incident runbook, release policy and role guidance to describe the Phase 1 maintenance and deployment closure path.
 
 ## 1.1.0-rc.3
 

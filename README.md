@@ -6,7 +6,7 @@ Install the reconciler runtime dependency before using repository commands:
 python -m pip install -r requirements.txt
 ```
 
-Git-managed desired state for the Multica `开发交付小队`, its workflow operations control plane, runtime policies and reusable skills.
+Git-managed desired state for the Multica `开发交付小队`, its Phase 1 Observer operations control plane and reusable skills. `workflow.json` is explicitly scoped by `workflow.phase`; the current value is `1`.
 
 The base architecture is recorded in [docs/design-plan-v5.md](docs/design-plan-v5.md). Observer and Maintainer control-plane design is recorded in [docs/design-plan-v6.md](docs/design-plan-v6.md). Multica v0.4.2 Autopilot corrections are recorded separately in [docs/rc2-compatibility-amendment.md](docs/rc2-compatibility-amendment.md) so the immutable RC1 design evidence remains unchanged.
 
@@ -18,9 +18,9 @@ The base architecture is recorded in [docs/design-plan-v5.md](docs/design-plan-v
 - Runtime, workspace, agent, squad and member UUIDs remain local.
 - Existing unrelated skills and non-conflicting roster members are preserved.
 - v1.1 does not prune, destroy or archive managed objects.
-- Observer reporting may create/update Incident data only. Maintenance intake is human-gated and later stages are created lazily.
+- Observer reporting may create/update Incident data only. Maintenance intake is human-gated; an approved Incident creates one minimal Maintenance Case that is repaired through the ordinary development workflow.
 - Local release tooling can validate and dispatch a request but cannot create tags or Releases. Publication runs only behind the protected `workflow-release` GitHub Environment.
-- Workflow Maintainer, Maintenance Reviewer, and Observer run through the dedicated Secure Agent Runtime. The host user's normal `gh`, SSH, Git, browser, and Codex state are not inherited.
+- Phase 1 does not deploy Workflow Maintainer or Maintenance Reviewer Agents and does not enforce the Secure Agent Runtime. Those components remain future-phase source and are validated only in separately reviewed future-component changes.
 
 ## Quick Start
 
@@ -58,9 +58,9 @@ python scripts/workflow.py plan --workspace <id-or-slug> --disable-operations
 
 See `skills/multica-workflow-manager/SKILL.md` for the external Agent workflow.
 
-Tagged releases publish requirement-intake, workflow-manager, workflow-observer, workflow-maintainer and workflow-console Skills, the self-contained Windows Secure Agent Runtime, the complete repository bundle and SHA256 checksums.
+Tagged Phase 1 releases publish requirement-intake, workflow-manager, workflow-observer and workflow-console Skills, the complete repository bundle and SHA256 checksums. They do not publish a Maintainer Skill or Secure Runtime binary asset.
 
-Secure Runtime architecture, Bootstrap, rollback, and daily operation are documented in [docs/secure-runtime.md](docs/secure-runtime.md), [docs/bootstrap-rc4.md](docs/bootstrap-rc4.md), and [docs/workflow-console.md](docs/workflow-console.md).
+The future Secure Runtime architecture and historical bootstrap material remain documented in [docs/secure-runtime.md](docs/secure-runtime.md) and [docs/bootstrap-rc4.md](docs/bootstrap-rc4.md); neither is an active Phase 1 deployment requirement. Current host operations are summarized in [docs/workflow-console.md](docs/workflow-console.md).
 
 Release control is configured in `docs/release-control.json`. RC4 requires the repository to be public and to provide the protected Environment plus the main-only deployment policy and a `refs/tags/v*` ruleset whose only bypass is the dedicated Publisher App. Before dispatching an approved release, run:
 
@@ -70,4 +70,4 @@ python scripts/release.py doctor
 Remove-Item Env:GH_TOKEN
 ```
 
-The Dispatcher App is selected-repository only with Actions write, Contents read and Metadata read. Its short-lived token is minted by the human outside Agent runtimes and verified exactly by `doctor`, `approval-block` and `apply`. The required GitHub Environment reviewer must use a credential unavailable to Agent runtimes. The host user may keep normal GitHub credentials because managed Agents run inside the isolated service. `release.py apply` dispatches the request; after Environment approval, the workflow verifies a digest-bound publish gate and mints a separate short-lived Publisher App token for tag and Release mutation.
+The Dispatcher App is selected-repository only with Actions write, Contents read and Metadata read. Its short-lived token is minted by the human outside Agent runtimes and verified exactly by `doctor`, `approval-block` and `apply`. The required GitHub Environment reviewer must use a credential unavailable to Agent runtimes. Phase 1 requires the host to keep `GH_TOKEN` and other release credentials out of Agent tasks; it does not claim enforced Secure Runtime isolation. `release.py apply` dispatches the request; after Environment approval, the workflow verifies a digest-bound publish gate and mints a separate short-lived Publisher App token for tag and Release mutation.

@@ -1,8 +1,9 @@
 {
   "schema_version": 1,
   "workflow_version": "1.1.0-rc.4",
+  "workflow_phase": 1,
   "protocol_revision": "v3",
-  "observer_source_hash": "6e0c942719d77ed51cdb3d6fa0e496965fef5f737e1608b96fa7df365ce54e5c",
+  "observer_source_hash": "d2a991121bdee864a573d096ad762de7ff2eb13661e491ff7240b902e7fda0be",
   "agents": {
     "leader": {
       "name": "开发队长",
@@ -49,11 +50,11 @@
       "runtime_binding": "codex-orchestrator",
       "max_concurrent_tasks": 1,
       "permission_mode": "public_to_workspace",
-      "instructions_sha256": "7452abf69576cd23014941a501f6b3ed673755eb0a9f383ef0a4a35fbd2be456",
+      "instructions_sha256": "b88248033815a0004e7ea2e6b114443e87fc983d4d1b2eb8d651d8113d147edb",
       "spec_hashes": {
-        "codex-only": "3eb86f885f5322f1ab52685ac77bdd98bfc63b1f8b90c1d6ff466815fda849f1",
-        "opencode-only": "936983023f825d46908b7b35e83c9cbde3dda6b285bd5db2b2583dd9d0db7df5",
-        "quality": "3eb86f885f5322f1ab52685ac77bdd98bfc63b1f8b90c1d6ff466815fda849f1"
+        "codex-only": "a309a5bdbf8424a1d04743d3479718c8f950cdb01b6b723894839dfc563d1aec",
+        "opencode-only": "b642d3d8406130c27fed5f6fefe7c6e62616d9160836d0225c5732e2cb060844",
+        "quality": "a309a5bdbf8424a1d04743d3479718c8f950cdb01b6b723894839dfc563d1aec"
       }
     },
     "developer-a": {
@@ -88,11 +89,11 @@
       "runtime_binding": "opencode-review",
       "max_concurrent_tasks": 1,
       "permission_mode": "public_to_workspace",
-      "instructions_sha256": "d859fecfd020d4cb279ed8d1498db1aba332f34bfb6543d97ad03bb29d61bd3f",
+      "instructions_sha256": "fa95300ffe871f500f50a528bd8191f0345f0ffaeb482b7d4abc1f19b17e68d3",
       "spec_hashes": {
-        "codex-only": "bdb2cfd9c65a187c44131d8e56cb8528ff338bcdf0ef124819ace49f2f8f6ae1",
-        "opencode-only": "6239179c71e29f10a88f03dc4b12c0536e417199222dc1fe5a168e37a7b93d71",
-        "quality": "6239179c71e29f10a88f03dc4b12c0536e417199222dc1fe5a168e37a7b93d71"
+        "codex-only": "c9977bc48e100c468fd9f22c3fb013fbe891275688374c39b877e7ac9b94c923",
+        "opencode-only": "b4972c4a99bcbade71a3b1e32d253ff2585a58b6c71b09ef2dcdc8931fe3fad7",
+        "quality": "b4972c4a99bcbade71a3b1e32d253ff2585a58b6c71b09ef2dcdc8931fe3fad7"
       }
     },
     "workflow-observer": {
@@ -106,32 +107,6 @@
         "codex-only": "0aecdea35660d935fca48885ccfa8a11925e4029e19704845d453ae23ff7610c",
         "opencode-only": "ddd3a4ff1ce32efd1ec43b0f8a2d841eef2c2f227eaf2756bb6451314d7dc786",
         "quality": "ddd3a4ff1ce32efd1ec43b0f8a2d841eef2c2f227eaf2756bb6451314d7dc786"
-      }
-    },
-    "workflow-maintainer": {
-      "name": "工作流维护员",
-      "description": "根据已确认 Incident 维护工作流源码、测试、RC、发布和回滚",
-      "runtime_binding": "codex-worker",
-      "max_concurrent_tasks": 1,
-      "permission_mode": "private",
-      "instructions_sha256": "1bddc133dff67c9f48f3fe4006a842c9a361b45930ec63830ba50f675ca2370a",
-      "spec_hashes": {
-        "codex-only": "0f4df556a739ab586206a0ac981a27b841b6815d72249409378b3d52fa2c895e",
-        "opencode-only": "4cc5284495c167ce4db9555d506b0b78db3386b14cbaee4dab77e24a1b4ff509",
-        "quality": "0f4df556a739ab586206a0ac981a27b841b6815d72249409378b3d52fa2c895e"
-      }
-    },
-    "workflow-maintenance-reviewer": {
-      "name": "工作流维护审查员",
-      "description": "独立审查工作流变更 Plan、代码、发布和回滚，不修改被审查内容",
-      "runtime_binding": "opencode-review",
-      "max_concurrent_tasks": 1,
-      "permission_mode": "private",
-      "instructions_sha256": "65d59897fb6c499c94fbac09e4ee7aa1db3dd5b4d541fde0f91f1080e0376508",
-      "spec_hashes": {
-        "codex-only": "5a92de119a01dcf0b69872ef7e0d9cc8cf67317f114962f8f3723830c0e54bdf",
-        "opencode-only": "a3b87ee7b3be421cf855a546ed98a3bc96dc59d68b60048dcb77a2fb4e77a22a",
-        "quality": "a3b87ee7b3be421cf855a546ed98a3bc96dc59d68b60048dcb77a2fb4e77a22a"
       }
     }
   },
@@ -150,18 +125,6 @@
         "required_status": "online"
       },
       "opencode-review": {
-        "provider": "codex",
-        "model": "gpt-5.5",
-        "thinking_level": "high",
-        "required_status": "online"
-      },
-      "codex-secure-maintainer": {
-        "provider": "codex",
-        "model": "gpt-5.5",
-        "thinking_level": "xhigh",
-        "required_status": "online"
-      },
-      "codex-secure-review": {
         "provider": "codex",
         "model": "gpt-5.5",
         "thinking_level": "high",
@@ -186,18 +149,6 @@
         "model": "team-litellm/gpt-5.5",
         "thinking_level": "",
         "required_status": "online"
-      },
-      "codex-secure-maintainer": {
-        "provider": "codex",
-        "model": "gpt-5.5",
-        "thinking_level": "xhigh",
-        "required_status": "online"
-      },
-      "codex-secure-review": {
-        "provider": "codex",
-        "model": "gpt-5.5",
-        "thinking_level": "high",
-        "required_status": "online"
       }
     },
     "quality": {
@@ -218,18 +169,6 @@
         "model": "team-litellm/gpt-5.5",
         "thinking_level": "",
         "required_status": "online"
-      },
-      "codex-secure-maintainer": {
-        "provider": "codex",
-        "model": "gpt-5.5",
-        "thinking_level": "xhigh",
-        "required_status": "online"
-      },
-      "codex-secure-review": {
-        "provider": "codex",
-        "model": "gpt-5.5",
-        "thinking_level": "high",
-        "required_status": "online"
       }
     }
   },
@@ -237,7 +176,7 @@
     "multica-requirement-intake": {
       "key": "requirement-intake",
       "attach_to": [],
-      "package_hash": "83114d8f0c531112f3ae1e951850685f323818955a95368d57fa16506289fbb1"
+      "package_hash": "ca5f98aad91598e354243147fdcd50179b8768ed5935237405b2648f7cb7c866"
     },
     "multica-workflow-observer": {
       "key": "workflow-observer",
@@ -252,14 +191,6 @@
         "workflow-observer"
       ],
       "package_hash": null
-    },
-    "multica-workflow-maintainer": {
-      "key": "workflow-maintainer",
-      "attach_to": [
-        "workflow-maintainer",
-        "workflow-maintenance-reviewer"
-      ],
-      "package_hash": "3f603ad408bd69d5fcd13db4619022f4224ddb12e60292bb2dc6c1a7b960639e"
     }
   },
   "squad": {
@@ -267,8 +198,8 @@
     "name": "开发交付小队",
     "description": "跨项目复用的阶段门禁开发小队，由 Git 管理工作流与指令",
     "leader": "leader",
-    "instructions_sha256": "f30df3d7a8d9f708fcbb5acf8bda463d23168f6089642d6b253934384a1fb244",
-    "spec_hash": "c740dd54c77ea84f92372e7cfedf8b262ff67e9cb811cc0675b76b136db4efe7",
+    "instructions_sha256": "001293a288eaf0e26ec8fbe403b1311d247e200f4437ba30ca6b76ac68969b23",
+    "spec_hash": "11888a6a9f93866276dbfc34f90008f498ef0104c177585312ddbcbc034ebea0",
     "agent_members": [
       {
         "agent": "leader",
@@ -309,17 +240,17 @@
   "projects": {
     "workflow-operations": {
       "title": "工作流运维",
-      "description": "集中记录工作流 Incident、维护变更、Canary 验证、发布与回滚证据。",
+      "description": "集中记录 Phase 1 工作流 Observation、Incident、Maintenance Case 与 Observer 验证证据。",
       "lead": "workflow-observer",
       "status": "in_progress",
       "icon": "",
-      "spec_hash": "aa118cbb8cba402ce8da90de62e942633b53293c488dbd1a8a6090e02663062f"
+      "spec_hash": "dbbab7d74a756c2ae4d0e55165aedb6f5a08b5ab5de7c3fdab02107321740fcd"
     }
   },
   "autopilots": {
     "workflow-health-audit": {
       "title": "工作流增量巡检",
-      "description": "使用 multica-workflow-observer 的 Observer Mode，运行 scripts/observer.py scan --mode incremental。只扫描已启用 Project Registration，先恢复 pending/processing/failed Observation，再执行确定性规则、Incident 去重和项目独立游标提交；无法完整扫描或持久化状态时必须失败。外部操作员或调度器必须单独运行 scripts/workflow.py health。",
+      "description": "使用 multica-workflow-observer 的 Observer Mode，运行 scripts/observer.py scan --mode incremental。只扫描已启用 Project Registration，先恢复 pending/processing/failed Observation；单条失败不终止扫描，最多五次后进入 quarantined 并由运维对象巡检形成可追踪 Finding。随后巡检登记项目及 Observation、Incident、Maintenance Case、Registration、Observer Control，执行 Incident 去重和项目独立游标提交。无法持久化扫描控制状态时必须失败；外部操作员或调度器必须单独运行 scripts/workflow.py health。",
       "agent": "workflow-observer",
       "mode": "run_only",
       "project": "workflow-operations",
@@ -341,7 +272,7 @@
     },
     "workflow-full-audit": {
       "title": "工作流每日全量巡检",
-      "description": "使用 multica-workflow-observer 的 Observer Mode，运行 scripts/observer.py scan --mode full。重新校验所有已注册项目的工作流对象、pending/processing/failed Observation 和 Git 管理的控制面状态；不得扫描未注册项目的普通业务 Issue。",
+      "description": "使用 multica-workflow-observer 的 Observer Mode，运行 scripts/observer.py scan --mode full。重新校验所有已注册项目的工作流对象、pending/processing/failed/quarantined Observation、Incident、Maintenance Case、Registration、Observer Control 和 Git 管理的控制面状态；核验普通开发、发布、Workspace Plan、apply journal 与不可变 plan-digest Workspace deployment record 形成的修复闭环，不得扫描未注册项目的普通业务 Issue。",
       "agent": "workflow-observer",
       "mode": "run_only",
       "project": "workflow-operations",

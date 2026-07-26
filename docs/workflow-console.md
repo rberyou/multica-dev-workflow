@@ -1,76 +1,45 @@
 # Workflow Console and Daily Operation
 
-RC4 reduces normal human interaction to decision-bearing gates. Maintainer and
-Reviewer handoffs, changes requested, reimplementation, retesting, rereview, and
-CI polling run through the original Maintenance Issue without repeated user
-acknowledgements.
+Status: Phase 1 host tooling.
+
+The current console is host-only and read-only. Phase 1 does not deploy Workflow Maintainer or Maintenance Reviewer Agents, does not run their automatic loop, and does not require a Secure Runtime binding.
 
 ## Host Status
 
-The console is host-only and read-only:
-
 ```text
-python skills/multica-workflow-console/scripts/workflow_console.py status \
-  --repo <checkout> \
-  --workspace <workspace>
+python skills/multica-workflow-console/scripts/workflow_console.py status --repo <checkout> --workspace <workspace>
 ```
 
-The packaged `workflow-console.exe` exposes the same `status` operation. It
-refuses to run when Multica Agent task variables are present. Agent sandboxes do
-not receive host `gh`, SSH, Git, browser, or Credential Manager state.
+The console refuses to run when Multica Agent task variables are present. It reports repository, release and workflow state but does not approve, merge, publish, deploy or mutate a Maintenance Case.
 
-## Automatic Loop
+## Phase 1 Human Actions
 
-Maintainer requests review with:
+Human participation is limited to decision-bearing gates:
 
-```text
-python skills/multica-workflow-maintainer/scripts/maintenance_loop.py \
-  request-review --issue <issue> --kind <plan|implementation|rollback|release> \
-  --plan-revision <revision> --commit <full-sha>
-```
+1. Approve or defer Incident maintenance with the exact digest-bound comment produced by Observer.
+2. Approve the ordinary development Plan and final Requirement according to the normal development workflow.
+3. Approve a release with `APPROVE WORKFLOW RELEASE <digest>` on the selected completed Requirement or approved Maintenance Case.
+4. Approve the waiting `workflow-release` Environment deployment in GitHub.
+5. Approve each separate Workspace deployment Plan.
 
-Reviewer records `APPROVED`, `CHANGES_REQUESTED`, or `DECISION_REQUIRED` with:
+The implementation and review loop uses the ordinary Integrator, Developer and Code Reviewer roles. For an Incident fix, the Integrator writes the final Requirement and integration-validation evidence back to the minimal Maintenance Case. Observer remains responsible for independent post-deployment verification and Incident closure.
 
-```text
-python skills/multica-workflow-maintainer/scripts/maintenance_loop.py \
-  review --issue <issue> --verdict <verdict> \
-  --plan-revision <revision> --commit <full-sha>
-```
+## Incident Fix Handoff
 
-`CHANGES_REQUESTED` automatically returns the Issue to the Maintainer.
-`APPROVED` advances to the next configured gate. `DECISION_REQUIRED` blocks and
-assigns the durable human approver.
-
-## Human Actions
-
-Only these actions require the user:
-
-1. Decision: comment `DECISION: <decision>` on the blocked Maintenance Change.
-2. Plan approval: comment `APPROVE WORKFLOW PLAN <revision-or-digest>` at the
-   Plan gate specified by the Issue.
-3. Release approval: comment `APPROVE WORKFLOW RELEASE <digest>` on the selected
-   Maintenance Change.
-4. GitHub release approval: approve the waiting `workflow-release` Environment
-   deployment in GitHub.
-
-RC4 deliberately does not implement mutating `workflow approve-plan`,
-`workflow decide`, or `workflow approve-release` host commands. Human approval
-credentials remain outside Agent and service runtimes. A later release may add
-those commands only with an independently reviewed human-presence and credential
-boundary.
-
-## Maintainer GitHub Commands
-
-The Maintainer never runs `gh` for writes and never receives a raw token. From
-its current task branch it may use:
+After the human approves maintenance, record the ordinary-development handoff and advance evidence in order. Each command is idempotent for matching evidence and rejects skipped stages or conflicting evidence.
 
 ```text
-workflow-token-broker push-task-branch --branch <current-branch>
-workflow-token-broker upsert-pr --branch <current-branch> --base main \
-  --title-file <file> --body-file <file>
-workflow-token-broker read-ci --branch <current-branch>
+python skills/multica-workflow-observer/scripts/observer.py record-maintenance-decision --incident <incident> --comment-id <approval-comment> --executor ordinary_development_workflow
+python skills/multica-workflow-observer/scripts/observer.py record-maintenance-progress --incident <incident> --stage in-development --implementation-issue <requirement>
+python skills/multica-workflow-observer/scripts/observer.py record-maintenance-progress --incident <incident> --stage fix-ready --requirement-issue <requirement> --integration-validation-issue <validation-issue> --pr-number <number> --merge-commit-sha <sha>
+python skills/multica-workflow-observer/scripts/observer.py record-maintenance-progress --incident <incident> --stage release-recorded --release-version <v-version> --release-source-commit <sha> --release-request-digest <digest>
+python skills/multica-workflow-observer/scripts/observer.py record-maintenance-progress --incident <incident> --stage deployment-recorded --deployment-target <workspace-id-or-slug> --deployment-plan-digest <digest> --deployment-journal <apply-journal.json>
 ```
 
-The Broker rejects non-current branches, main, tag-like refs, out-of-profile
-prefixes, dangerous Git configuration, and Git metadata outside the secure
-workspaces root.
+The deployment journal must be the completed journal produced by `workflow.py apply` and must reference its immutable plan-digest Workspace deployment record. Only the assigned Observer identity may then run `verify-fix`. A failed verification keeps the Case open for correction; a passed verification closes the Case and Incident and restores any source Issues that were blocked by that Incident.
+
+## Future Components
+
+`skills/multica-workflow-maintainer/`, the Maintainer/Reviewer instructions and `secure-runtime/` remain source for Phase 2 and Phase 3 development. They are not part of `workflow.json` desired state, default Skill installation, Phase 1 CI or Phase 1 release assets. Their validation must be performed in a separate future-component change.
+
+The historical `maintenance_loop.py`, Broker and Secure Runtime commands must not be used as active Phase 1 operating instructions.

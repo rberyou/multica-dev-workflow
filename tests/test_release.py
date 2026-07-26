@@ -1,4 +1,5 @@
 import importlib.util
+from contextlib import ExitStack
 import json
 from pathlib import Path
 import shutil
@@ -126,6 +127,105 @@ def bounded_batch_cli():
     return cli
 
 
+def phase1_cli(object_type="requirement"):
+    cli = FakeMultica()
+    cli.metadata = {
+        "workflow_id": "development-delivery",
+        "workflow_object_type": object_type,
+        "human_approver_id": "human-1",
+        "plan_revision": "v4",
+        "review_issue_id": "WOR-VAL",
+        "root_requirement_id": "T-200",
+        "github_pr_number": "3",
+        "github_merge_commit_sha": "merge-sha",
+    }
+    cli.issues["T-200"] = {
+        "id": "requirement-internal",
+        "identifier": "T-200",
+        "status": "done" if object_type == "requirement" else "in_review",
+    }
+    cli.issues["WOR-VAL"] = {
+        "id": "validation-internal",
+        "identifier": "WOR-VAL",
+        "status": "done",
+    }
+    cli.metadata_by_issue["WOR-VAL"] = {
+        "workflow_id": "development-delivery",
+        "workflow_object_type": "integration_validation",
+        "root_requirement_id": "T-200",
+        "original_owner_id": "agent-integrator",
+        "reviewer_id": "agent-code-reviewer",
+        "plan_revision": "v4",
+        "review_comment_id": "code-review-1",
+        "review_commit_sha": "head-sha",
+        "pr_head_sha": "head-sha",
+        "github_pr_number": "3",
+        "github_merge_commit_sha": "merge-sha",
+    }
+    cli.comments_by_issue["WOR-VAL"] = [
+        {
+            "id": "code-review-1",
+            "author_type": "agent",
+            "author_id": "agent-code-reviewer",
+            "created_at": "2026-07-15T11:00:00Z",
+            "content": (
+                "APPROVED\n"
+                "plan_revision=v4\n"
+                "reviewed_commit_sha=head-sha"
+            ),
+        }
+    ]
+    if object_type == "maintenance_case":
+        cli.metadata.update(
+            {
+                "incident_id": "WOR-INC",
+                "root_requirement_id": "WOR-REQ",
+                "maintenance_intake_digest": "intake-digest",
+                "approval_comment_id": "maintenance-approval-1",
+                "executor": "ordinary_development_workflow",
+                "maintenance_case_status": "fix_ready",
+                "implementation_issue_ids": json.dumps(["WOR-VAL"]),
+            }
+        )
+        cli.metadata_by_issue["WOR-VAL"]["root_requirement_id"] = "WOR-REQ"
+        cli.issues["WOR-INC"] = {
+            "id": "incident-internal",
+            "identifier": "WOR-INC",
+            "status": "in_review",
+        }
+        cli.metadata_by_issue["WOR-INC"] = {
+            "workflow_id": "development-delivery",
+            "workflow_object_type": "incident",
+            "maintenance_case_id": "T-200",
+            "human_approver_id": "human-1",
+            "maintenance_intake_digest": "intake-digest",
+            "maintenance_decision_comment_id": "maintenance-approval-1",
+        }
+        cli.comments_by_issue["WOR-INC"] = [
+            {
+                "id": "maintenance-approval-1",
+                "author_type": "member",
+                "author_id": "human-1",
+                "content": "APPROVE WORKFLOW MAINTENANCE intake-digest",
+            }
+        ]
+        cli.issues["WOR-REQ"] = {
+            "id": "root-requirement-internal",
+            "identifier": "WOR-REQ",
+            "status": "done",
+        }
+        cli.metadata_by_issue["WOR-REQ"] = {
+            "workflow_id": "development-delivery",
+            "workflow_object_type": "requirement",
+            "human_approver_id": "human-1",
+            "plan_revision": "v4",
+            "review_issue_id": "WOR-VAL",
+            "github_pr_number": "3",
+            "github_merge_commit_sha": "merge-sha",
+        }
+    return cli
+
+
 class FakeMultica:
     def __init__(self):
         self.profile = "test-profile"
@@ -180,6 +280,10 @@ class FakeMultica:
                 {
                     "id": "agent-reviewer",
                     "instructions": marker("agent.workflow-maintenance-reviewer"),
+                },
+                {
+                    "id": "agent-code-reviewer",
+                    "instructions": marker("agent.code-reviewer"),
                 },
             ]
         if args[:2] == ["squad", "list"]:
@@ -474,6 +578,7 @@ class ReleaseTests(unittest.TestCase):
                 "id": 42,
                 "name": "workflow-release",
                 "protection_rules": [
+                    {"type": "branch_policy"},
                     {
                         "type": "required_reviewers",
                         "prevent_self_review": True,
@@ -531,6 +636,35 @@ class ReleaseTests(unittest.TestCase):
             }
         raise AssertionError(args)
 
+    def test_environment_snapshot_accepts_github_branch_policy_marker(self):
+        detail = self.protected_environment_gh(
+            [
+                "api",
+                "repos/rberyou/multica-dev-workflow/environments/workflow-release",
+            ]
+        )
+        rules, reviewers, prevent_self_review = (
+            release.environment_protection_snapshot(detail)
+        )
+        self.assertEqual(
+            rules,
+            [
+                {
+                    "type": "required_reviewers",
+                    "prevent_self_review": True,
+                    "reviewers": [
+                        {
+                            "type": "User",
+                            "id": 7,
+                            "login": "isolated-reviewer",
+                        }
+                    ],
+                }
+            ],
+        )
+        self.assertEqual(reviewers, {"isolated-reviewer"})
+        self.assertIs(prevent_self_review, True)
+
     @staticmethod
     def release_request_fixture():
         request = {
@@ -547,10 +681,15 @@ class ReleaseTests(unittest.TestCase):
                 "merge_commit_sha": "a" * 40,
                 "merged_at": "2026-07-18T00:00:00Z",
             },
-            "validation": {"databaseId": 123, "headSha": "a" * 40},
+            "validation": {
+                "databaseId": 123,
+                "headSha": "a" * 40,
+                "status": "completed",
+                "conclusion": "success",
+            },
             "version_files": ["VERSION"],
             "changelog_hash": "d" * 64,
-            "expected_assets": ["checksums.txt", "workflow.zip"],
+            "expected_assets": release.phase1_expected_assets("1.1.0-rc.4"),
             "release_plan_digest": "e" * 64,
             "maintenance_provenance": {
                 "maintenance_issue": "WOR-43",
@@ -558,25 +697,16 @@ class ReleaseTests(unittest.TestCase):
                 "multica_approval_comment_id": "approval-1",
                 "maintenance_evidence_sha256": "f" * 64,
                 "multica_approval_author_sha256": "1" * 64,
+                "authorization_type": "phase1_development",
             },
             "implementation_provenance": [
                 {
-                    "issue_id": "WOR-45",
-                    "maintenance_change_id": "WOR-43",
-                    "plan_revision": "v3",
-                    "review_comment_id": "review-45",
-                    "reviewed_commit_sha": "7" * 40,
-                    "github_pr_number": 9,
-                    "github_merge_commit_sha": "8" * 40,
-                    "github_merged_at": "2026-07-18T00:00:00Z",
-                },
-                {
                     "issue_id": "WOR-48",
-                    "maintenance_change_id": "WOR-44",
+                    "maintenance_change_id": "WOR-43",
                     "plan_revision": "v5",
                     "review_comment_id": "review-48",
                     "reviewed_commit_sha": "9" * 40,
-                    "github_pr_number": 10,
+                    "github_pr_number": 9,
                     "github_merge_commit_sha": "a" * 40,
                     "github_merged_at": "2026-07-19T00:00:00Z",
                 },
@@ -609,6 +739,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn("VERSION", checked)
         self.assertIn("skills/multica-workflow-observer/SKILL.md", checked)
         self.assertIn("instructions/roles/leader.md", checked)
+        self.assertNotIn("skills/multica-workflow-maintainer/SKILL.md", checked)
 
     def test_stale_runtime_instruction_version_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -675,7 +806,11 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(len(plan["release_plan_digest"]), 64)
         self.assertIn("multica-workflow-observer-v1.1.0-rc.1.zip", plan["expected_assets"])
         self.assertIn("multica-workflow-console-v1.1.0-rc.1.zip", plan["expected_assets"])
-        self.assertIn(
+        self.assertNotIn(
+            "multica-workflow-maintainer-v1.1.0-rc.1.zip",
+            plan["expected_assets"],
+        )
+        self.assertNotIn(
             "multica-workflow-secure-runtime-win-x64-v1.1.0-rc.1.zip",
             plan["expected_assets"],
         )
@@ -685,6 +820,116 @@ class ReleaseTests(unittest.TestCase):
             plan["release_authorization"]["plan_approval_comment_id"],
             BOOTSTRAP_RECORD["approval_comment_id"],
         )
+
+    def test_phase1_release_plan_requires_linked_integration_provenance(self):
+        pr = {
+            "number": 3,
+            "url": "https://example.test/pr/3",
+            "title": "phase1 release",
+            "headRefOid": "head-sha",
+            "baseRefName": "main",
+            "mergeCommit": {"oid": "merge-sha"},
+            "mergedAt": "2026-07-15T12:00:00Z",
+        }
+        validation = {
+            "databaseId": 10,
+            "status": "completed",
+            "conclusion": "success",
+            "url": "https://example.test/run/10",
+            "headSha": "merge-sha",
+        }
+        authorization = {
+            "mode": "maintenance",
+            "authorization_type": "phase1_development",
+            "review_issue_id": "WOR-VAL",
+        }
+        implementation = [
+            {
+                "issue_id": "WOR-VAL",
+                "workflow_object_type": "integration_validation",
+                "github_merge_commit_sha": "merge-sha",
+            }
+        ]
+        def enter_common(stack):
+            stack.enter_context(patch.object(release, "git_head", return_value="merge-sha"))
+            stack.enter_context(patch.object(release, "git_dirty", return_value=False))
+            stack.enter_context(
+                patch.object(
+                    release,
+                    "verify_origin_main_reachability",
+                    return_value="merge-sha",
+                )
+            )
+            stack.enter_context(patch.object(release, "merged_pr_for_commit", return_value=pr))
+            stack.enter_context(patch.object(release, "successful_validation", return_value=validation))
+            stack.enter_context(
+                patch.object(release, "tracked_source_hash", return_value="source-hash")
+            )
+            stack.enter_context(patch.object(release, "verify_versions", return_value=[]))
+            stack.enter_context(
+                patch.object(release, "maintenance_evidence", return_value=authorization)
+            )
+
+        with ExitStack() as stack:
+            enter_common(stack)
+            stack.enter_context(
+                patch.object(
+                    release, "implementation_provenance", return_value=implementation
+                )
+            )
+            plan = release.build_plan(
+                ROOT,
+                "1.1.0-rc.4",
+                None,
+                "T-200",
+                FakeMultica(),
+                ["WOR-VAL"],
+            )
+        self.assertEqual(plan["implementation_provenance"], implementation)
+
+        with ExitStack() as stack:
+            enter_common(stack)
+            stack.enter_context(
+                patch.object(release, "implementation_provenance", return_value=[])
+            )
+            stack.enter_context(
+                self.assertRaisesRegex(
+                    release.ReleaseError, "requires exactly one"
+                )
+            )
+            release.build_plan(
+                ROOT, "1.1.0-rc.4", None, "T-200", FakeMultica(), []
+            )
+
+        with ExitStack() as stack:
+            enter_common(stack)
+            stack.enter_context(
+                patch.object(
+                    release,
+                    "implementation_provenance",
+                    return_value=[
+                        implementation[0],
+                        {
+                            **implementation[0],
+                            "issue_id": "WOR-OTHER",
+                            "github_merge_commit_sha": "prior-merge-sha",
+                        },
+                    ],
+                )
+            )
+            stack.enter_context(
+                self.assertRaisesRegex(
+                    release.ReleaseError, "requires exactly one"
+                )
+            )
+            release.build_plan(
+                ROOT,
+                "1.1.0-rc.4",
+                None,
+                "T-200",
+                FakeMultica(),
+                ["WOR-VAL", "WOR-OTHER"],
+            )
 
     def test_bootstrap_exception_is_limited_to_first_rc(self):
         with self.assertRaisesRegex(release.ReleaseError, "limited to v1.1.0-rc.1"):
@@ -823,6 +1068,89 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(evidence["reviewed_commit_sha"], "head-sha")
         self.assertEqual(evidence["review_comment_id"], "review-1")
         self.assertEqual(evidence["github_merged_at"], pr["mergedAt"])
+
+    def test_phase1_requirement_release_uses_ordinary_code_review(self):
+        evidence = release.maintenance_evidence(
+            ROOT, phase1_cli(), "T-200", maintenance_pr()
+        )
+        self.assertEqual(evidence["authorization_type"], "phase1_development")
+        self.assertEqual(evidence["release_path"], "requirement")
+        self.assertEqual(evidence["code_reviewer_id"], "agent-code-reviewer")
+        self.assertEqual(evidence["review_issue_id"], "WOR-VAL")
+        self.assertNotIn("maintainer_id", evidence)
+        self.assertNotIn("maintenance_reviewer_id", evidence)
+
+    def test_phase1_release_requires_current_managed_human_approver(self):
+        cli = phase1_cli()
+        cli.metadata["human_approver_id"] = "human-2"
+        with self.assertRaisesRegex(release.ReleaseError, "managed Squad approver"):
+            release.maintenance_evidence(ROOT, cli, "T-200", maintenance_pr())
+
+    def test_phase1_incident_release_uses_linked_ordinary_development_review(self):
+        evidence = release.maintenance_evidence(
+            ROOT, phase1_cli("maintenance_case"), "T-200", maintenance_pr()
+        )
+        self.assertEqual(evidence["release_path"], "incident_fix")
+        self.assertEqual(evidence["incident_id"], "WOR-INC")
+        self.assertEqual(
+            evidence["maintenance_approval_comment_id"],
+            "maintenance-approval-1",
+        )
+
+    def test_phase1_release_rejects_future_reviewer_or_stale_evidence(self):
+        cases = {
+            "maintenance reviewer": lambda cli: cli.comments_by_issue["WOR-VAL"][0].update(
+                {"author_id": "agent-reviewer"}
+            ),
+            "wrong reviewer metadata": lambda cli: cli.metadata_by_issue["WOR-VAL"].update(
+                {"reviewer_id": "agent-reviewer"}
+            ),
+            "stale SHA": lambda cli: cli.metadata_by_issue["WOR-VAL"].update(
+                {"review_commit_sha": "old-head"}
+            ),
+            "changed intake digest": lambda cli: cli.metadata.update(
+                {"maintenance_intake_digest": "changed"}
+            ),
+            "wrong maintenance approval": lambda cli: cli.comments_by_issue[
+                "WOR-INC"
+            ][0].update({"content": "APPROVE WORKFLOW MAINTENANCE changed"}),
+            "wrong incident workflow": lambda cli: cli.metadata_by_issue[
+                "WOR-INC"
+            ].update({"workflow_id": "another-workflow"}),
+            "unlinked root requirement": lambda cli: cli.metadata_by_issue[
+                "WOR-REQ"
+            ].update({"review_issue_id": "WOR-OTHER"}),
+        }
+        for label, mutate in cases.items():
+            with self.subTest(case=label):
+                cli = phase1_cli("maintenance_case")
+                mutate(cli)
+                with self.assertRaises(release.ReleaseError):
+                    release.maintenance_evidence(
+                        ROOT, cli, "T-200", maintenance_pr()
+                    )
+
+    def test_phase1_development_provenance_binds_code_reviewer(self):
+        cli = phase1_cli()
+        evidence = release.maintenance_implementation_evidence(
+            ROOT,
+            cli,
+            "WOR-VAL",
+            {
+                "issue_id": "WOR-VAL",
+                "workflow_object_type": "integration_validation",
+                "root_requirement_id": "T-200",
+                "plan_revision": "v4",
+                "review_comment_id": "code-review-1",
+                "reviewed_commit_sha": "head-sha",
+                "review_created_at": "2026-07-15T11:00:00Z",
+                "github_pr_number": 3,
+                "github_merge_commit_sha": "merge-sha",
+                "github_merged_at": "2026-07-15T12:00:00Z",
+            },
+        )
+        self.assertEqual(evidence["workflow_object_type"], "integration_validation")
+        self.assertEqual(evidence["review_comment_id"], "code-review-1")
 
     def test_maintenance_evidence_resolves_bounded_implementation_review(self):
         cli = bounded_batch_cli()
@@ -1120,6 +1448,35 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(release.ReleaseError, "found 0"):
             release.verify_release_approval(ROOT, cli, plan)
 
+    def test_release_approval_comment_must_contain_only_the_exact_command(self):
+        cli = FakeMultica()
+        authorization = release.maintenance_evidence(
+            ROOT, cli, "T-200", maintenance_pr()
+        )
+        plan = {
+            "release_plan_digest": "a" * 64,
+            "merged_pr": {
+                "number": 3,
+                "head_sha": "head-sha",
+                "merge_commit_sha": "merge-sha",
+                "merged_at": maintenance_pr()["mergedAt"],
+            },
+            "release_authorization": authorization,
+        }
+        cli.comments.append(
+            {
+                "id": "approval-extra",
+                "author_type": "member",
+                "author_id": "human-1",
+                "content": (
+                    f"APPROVE WORKFLOW RELEASE {plan['release_plan_digest'][:12]}\n"
+                    "extra"
+                ),
+            }
+        )
+        with self.assertRaisesRegex(release.ReleaseError, "found 0"):
+            release.verify_release_approval(ROOT, cli, plan)
+
     def test_modified_release_plan_is_rejected(self):
         plan = {"schema_version": 1, "draft": False, "version": "1.1.0-rc.1"}
         plan["release_plan_digest"] = release.digest(plan)
@@ -1142,6 +1499,48 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(boundary["dispatcher_app_id"], self.DISPATCHER_APP_ID)
         self.assertTrue(boundary["dispatcher_token_verified"])
         self.assertEqual(boundary["publisher_app_id"], self.PUBLISHER_APP_ID)
+
+    def test_release_environment_does_not_require_public_publisher_app(self):
+        calls = []
+
+        def private_publisher_gh(root, args):
+            calls.append(args)
+            if args[:2] == ["api", "apps/multica-workflow-publisher"]:
+                raise AssertionError("private Publisher App must not require public readback")
+            return self.protected_environment_gh(args)
+
+        with (
+            patch.dict(release.os.environ, {"GH_TOKEN": "dispatcher-token"}, clear=True),
+            patch.object(release, "gh_json", side_effect=private_publisher_gh),
+        ):
+            boundary = release.verify_release_environment(ROOT)
+        self.assertEqual(boundary["publisher_app_id"], self.PUBLISHER_APP_ID)
+        self.assertFalse(
+            any(
+                args[:2] == ["api", "apps/multica-workflow-publisher"]
+                for args in calls
+            )
+        )
+
+    def test_release_environment_normalizes_ruleset_timestamp_timezone(self):
+        def offset_timestamp_gh(root, args):
+            value = self.protected_environment_gh(args)
+            if args[:2] == [
+                "api",
+                "repos/rberyou/multica-dev-workflow/rulesets/99",
+            ]:
+                value["updated_at"] = "2026-07-19T08:00:00+08:00"
+            return value
+
+        with (
+            patch.dict(release.os.environ, {"GH_TOKEN": "dispatcher-token"}, clear=True),
+            patch.object(release, "gh_json", side_effect=offset_timestamp_gh),
+        ):
+            boundary = release.verify_release_environment(ROOT)
+        self.assertEqual(
+            boundary["tag_ruleset"]["updated_at"],
+            "2026-07-19T00:00:00.000000Z",
+        )
 
     def test_release_environment_requires_public_repository(self):
         with (
@@ -1382,6 +1781,93 @@ class ReleaseTests(unittest.TestCase):
             with self.assertRaisesRegex(release.ReleaseError, "digest is invalid"):
                 release.verify_release_request(ROOT, request)
 
+    def test_release_request_rejects_unprotected_tag_before_mutation(self):
+        request = self.release_request_fixture()
+        request["tag"] = "unprotected-tag"
+        request["release_request_digest"] = release.digest(
+            {key: value for key, value in request.items() if key != "release_request_digest"}
+        )
+        with self.assertRaisesRegex(release.ReleaseError, "tag must equal"):
+            release.verify_release_request_payload(request)
+
+    def test_release_request_rejects_unsafe_semantic_version_before_mutation(self):
+        request = self.release_request_fixture()
+        request["version"] = "1.2.0:refs/heads/main"
+        request["tag"] = "v1.2.0:refs/heads/main"
+        request["release_request_digest"] = release.digest(
+            {
+                key: value
+                for key, value in request.items()
+                if key != "release_request_digest"
+            }
+        )
+        with self.assertRaisesRegex(release.ReleaseError, "semantic version"):
+            release.verify_release_request_payload(request)
+
+    def test_release_request_rejects_non_phase1_asset_set_before_mutation(self):
+        request = self.release_request_fixture()
+        request["expected_assets"] = ["checksums.txt", "workflow.zip"]
+        request["release_request_digest"] = release.digest(
+            {key: value for key, value in request.items() if key != "release_request_digest"}
+        )
+        with self.assertRaisesRegex(release.ReleaseError, "exact Phase 1 asset set"):
+            release.verify_release_request_payload(request)
+
+    def test_release_request_rejects_invalid_plan_digest_before_github_output(self):
+        request = self.release_request_fixture()
+        request["release_plan_digest"] = "invalid\nsource_commit=forged"
+        request["release_request_digest"] = release.digest(
+            {
+                key: value
+                for key, value in request.items()
+                if key != "release_request_digest"
+            }
+        )
+        with self.assertRaisesRegex(release.ReleaseError, "release_plan_digest"):
+            release.verify_release_request_payload(request)
+
+    def test_release_request_rejects_non_object_implementation_provenance(self):
+        request = self.release_request_fixture()
+        request["implementation_provenance"] = ["not-an-object"]
+        request["implementation_provenance_sha256"] = release.digest(
+            request["implementation_provenance"]
+        )
+        request["release_request_digest"] = release.digest(
+            {
+                key: value
+                for key, value in request.items()
+                if key != "release_request_digest"
+            }
+        )
+        with self.assertRaisesRegex(release.ReleaseError, "integration-validation"):
+            release.verify_release_request_payload(request)
+
+    def test_phase1_release_request_rejects_extra_implementation_provenance(self):
+        request = self.release_request_fixture()
+        request["implementation_provenance"].append(
+            {**request["implementation_provenance"][0], "issue_id": "WOR-EXTRA"}
+        )
+        request["implementation_provenance_sha256"] = release.digest(
+            request["implementation_provenance"]
+        )
+        request["release_request_digest"] = release.digest(
+            {
+                key: value
+                for key, value in request.items()
+                if key != "release_request_digest"
+            }
+        )
+        with (
+            patch.dict(release.os.environ, {}, clear=True),
+            patch.object(
+                release,
+                "release_control",
+                return_value=request["release_control"],
+            ),
+            self.assertRaisesRegex(release.ReleaseError, "exactly one integration-validation"),
+        ):
+            release.verify_release_request(ROOT, request, verify_state=False)
+
     def test_release_request_requires_reviewed_dispatcher_actor_in_actions(self):
         request = self.release_request_fixture()
         with (
@@ -1458,12 +1944,9 @@ class ReleaseTests(unittest.TestCase):
                 request["release_request_digest"],
             )
 
-    def test_rc4_release_request_requires_both_implementation_records(self):
+    def test_release_request_rejects_legacy_authorization_type(self):
         request = self.release_request_fixture()
-        request["implementation_provenance"] = request["implementation_provenance"][:1]
-        request["implementation_provenance_sha256"] = release.digest(
-            request["implementation_provenance"]
-        )
+        request["maintenance_provenance"]["authorization_type"] = "maintenance"
         request["release_request_digest"] = release.digest(
             {key: value for key, value in request.items() if key != "release_request_digest"}
         )
@@ -1475,7 +1958,7 @@ class ReleaseTests(unittest.TestCase):
                 "release_control",
                 return_value=request["release_control"],
             ),
-            self.assertRaisesRegex(release.ReleaseError, "bind two Implementation Issues"),
+            self.assertRaisesRegex(release.ReleaseError, "Phase 1 development flow"),
         ):
             release.verify_release_request(ROOT, request)
 
@@ -1706,6 +2189,98 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn("release_environment_sha256=" + "2" * 64, message)
         self.assertIn("release_ruleset_id=99", message)
         self.assertIn("release_ruleset_sha256=" + "3" * 64, message)
+        self.assertEqual(
+            release.embedded_release_request(message)["release_request_digest"],
+            request["release_request_digest"],
+        )
+
+    def test_release_parser_exposes_durable_recovery_entry(self):
+        args = release.parser().parse_args(["recover", "--tag", "v1.2.0"])
+        self.assertEqual(args.tag, "v1.2.0")
+
+    def test_release_recover_dispatches_exact_existing_tag_request(self):
+        request = self.release_request_fixture()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            request_path = root / "request.json"
+            request_path.write_text(json.dumps(request), encoding="utf-8")
+            args = SimpleNamespace(request=str(request_path), tag=None)
+            boundary = {
+                "repository": "rberyou/multica-dev-workflow",
+                "deployment_branch": "main",
+                "environment": "workflow-release",
+            }
+            with (
+                patch.object(
+                    release,
+                    "verify_dispatcher_installation",
+                    return_value={"app_id": self.DISPATCHER_APP_ID},
+                ),
+                patch.object(release, "verify_existing_recovery_tag") as tag_mock,
+                patch.object(
+                    release,
+                    "verify_release_environment",
+                    return_value=boundary,
+                ),
+                patch.object(
+                    release,
+                    "save_release_request",
+                    return_value=root / "saved-request.json",
+                ),
+                patch.object(release, "dispatch_release_workflow") as dispatch_mock,
+                patch("builtins.print"),
+            ):
+                self.assertEqual(release.command_recover(args, root), 0)
+        tag_mock.assert_called_once_with(root, request)
+        dispatch_mock.assert_called_once_with(
+            root,
+            boundary,
+            request,
+            recover_existing_tag=True,
+        )
+
+    def test_release_recovery_rejects_local_tag_that_differs_from_origin(self):
+        request = self.release_request_fixture()
+
+        def fake_run(args, root, check=True):
+            if args[:3] == ["git", "ls-remote", "--tags"]:
+                return SimpleNamespace(
+                    stdout=f"{'a' * 40}\trefs/tags/{request['tag']}\n",
+                    stderr="",
+                    returncode=0,
+                )
+            if args[:3] == ["git", "tag", "--list"]:
+                return SimpleNamespace(
+                    stdout=request["tag"] + "\n", stderr="", returncode=0
+                )
+            if args[:2] == ["git", "rev-parse"]:
+                return SimpleNamespace(stdout="b" * 40 + "\n", stderr="", returncode=0)
+            raise AssertionError(args)
+
+        with (
+            patch.object(release, "run", side_effect=fake_run),
+            self.assertRaisesRegex(release.ReleaseError, "differs from origin"),
+        ):
+            release.verify_existing_recovery_tag(ROOT, request)
+
+    def test_successful_validation_uses_stable_workflow_filename(self):
+        captured = []
+
+        def fake_gh(root, args):
+            captured.append(args)
+            return [
+                {
+                    "databaseId": 1,
+                    "status": "completed",
+                    "conclusion": "success",
+                    "createdAt": "2026-07-25T00:00:00Z",
+                }
+            ]
+
+        with patch.object(release, "gh_json", side_effect=fake_gh):
+            release.successful_validation(ROOT, "a" * 40)
+        workflow_index = captured[0].index("--workflow")
+        self.assertEqual(captured[0][workflow_index + 1], "validate.yml")
 
     def test_publish_checks_environment_approval_before_tag_mutation(self):
         request = self.release_request_fixture()
@@ -2072,7 +2647,7 @@ class ReleaseTests(unittest.TestCase):
             raise AssertionError(args)
 
         with (
-            patch.object(release, "verify_versions", return_value=[]),
+            patch.object(release, "verify_versions_at_ref", return_value=[]),
             patch.object(release, "run", side_effect=fake_run),
             patch.object(release, "verify_origin_main_reachability", return_value="b" * 40),
             patch.object(release, "merged_pr_for_commit", return_value={"number": 4}),
@@ -2120,7 +2695,7 @@ class ReleaseTests(unittest.TestCase):
             raise AssertionError(args)
 
         with (
-            patch.object(release, "verify_versions", return_value=[]),
+            patch.object(release, "verify_versions_at_ref", return_value=[]),
             patch.object(release, "run", side_effect=fake_run),
             patch.object(release, "verify_origin_main_reachability", return_value="b" * 40),
             patch.object(release, "merged_pr_for_commit", return_value={"number": 3}),

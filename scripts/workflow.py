@@ -20,6 +20,7 @@ from workflow_lib import (
     git_dirty,
     git_head,
     install_skills,
+    load_deployment_record,
     match_managed,
     mutation_actions,
     plan_has_blockers,
@@ -261,6 +262,14 @@ def command_drift(args: argparse.Namespace, root: Path) -> int:
 def command_verify(args: argparse.Namespace, root: Path) -> int:
     plan, _, _ = build_from_args(args, root, write_archives=False)
     print_plan(plan)
+    deployment_record = load_deployment_record(
+        root, str((plan.get("workspace") or {}).get("id") or "")
+    )
+    if deployment_record:
+        print(
+            "Deployment record: "
+            + json.dumps(deployment_record, ensure_ascii=False, sort_keys=True)
+        )
     if plan_has_blockers(plan):
         print("Verify: BLOCKED")
         return 2
@@ -434,6 +443,24 @@ def command_observer(args: argparse.Namespace, root: Path) -> int:
             command.extend(["--comment-id", args.comment_id])
         if args.executor:
             command.extend(["--executor", args.executor])
+    elif args.command == "record-maintenance-progress":
+        command.extend(["--incident", args.incident, "--stage", args.stage])
+        for issue_id in args.implementation_issue:
+            command.extend(["--implementation-issue", issue_id])
+        for option, value in [
+            ("--requirement-issue", args.requirement_issue),
+            ("--integration-validation-issue", args.integration_validation_issue),
+            ("--pr-number", args.pr_number),
+            ("--merge-commit-sha", args.merge_commit_sha),
+            ("--release-version", args.release_version),
+            ("--release-source-commit", args.release_source_commit),
+            ("--release-request-digest", args.release_request_digest),
+            ("--deployment-target", args.deployment_target),
+            ("--deployment-plan-digest", args.deployment_plan_digest),
+            ("--deployment-journal", args.deployment_journal),
+        ]:
+            if value:
+                command.extend([option, value])
     elif args.command == "verify-fix":
         command.extend(
             [
@@ -616,9 +643,38 @@ def parser() -> argparse.ArgumentParser:
     add_context_args(record_decision)
     record_decision.add_argument("--incident", required=True)
     record_decision.add_argument("--comment-id")
-    record_decision.add_argument("--executor")
+    record_decision.add_argument(
+        "--executor", choices=["ordinary_development_workflow"]
+    )
     record_decision.add_argument("--output", choices=["json"], default="json")
     record_decision.set_defaults(func=command_observer)
+
+    progress = subparsers.add_parser("record-maintenance-progress")
+    add_context_args(progress)
+    progress.add_argument("--incident", required=True)
+    progress.add_argument(
+        "--stage",
+        choices=[
+            "in-development",
+            "fix-ready",
+            "release-recorded",
+            "deployment-recorded",
+        ],
+        required=True,
+    )
+    progress.add_argument("--implementation-issue", action="append", default=[])
+    progress.add_argument("--requirement-issue")
+    progress.add_argument("--integration-validation-issue")
+    progress.add_argument("--pr-number")
+    progress.add_argument("--merge-commit-sha")
+    progress.add_argument("--release-version")
+    progress.add_argument("--release-source-commit")
+    progress.add_argument("--release-request-digest")
+    progress.add_argument("--deployment-target")
+    progress.add_argument("--deployment-plan-digest")
+    progress.add_argument("--deployment-journal")
+    progress.add_argument("--output", choices=["json"], default="json")
+    progress.set_defaults(func=command_observer)
 
     verify_fix_parser = subparsers.add_parser("verify-fix")
     add_context_args(verify_fix_parser)

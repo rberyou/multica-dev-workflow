@@ -40,10 +40,11 @@ The command creates or reuses a durable Observation Inbox record. It does not cr
 
 Observer Mode is authorized only by the managed Workflow Observer instructions or its Autopilot.
 
-- Run `scripts/observer.py scan --mode incremental` hourly and `scan --mode full` daily. Scans process pending/processing/failed Observations, inspect only enabled Project Registrations, maintain per-project cursors, and serialize each run with an expiring lease. `audit --scope issues --report` remains an incremental-scan compatibility alias.
+- Run `scripts/observer.py scan --mode incremental` hourly and `scan --mode full` daily. Scans process pending/processing/failed Observations, inspect only enabled Project Registrations, maintain per-project cursors, and serialize each run with an expiring lease. One failed Observation is recorded without aborting the rest of the scan; after five attempts it is quarantined for operator review. `audit --scope issues --report` remains an incremental-scan compatibility alias, while `audit` without `--report` is strictly read-only.
 - Use `scripts/observer.py health` from an external operator context to check Autopilot freshness.
 - Triage Incidents into only the verdicts in [triage-runbook.md](references/triage-runbook.md), prepare a digest-bound maintenance decision, and record only an exact human approval or defer comment.
-- After ordinary development deploys a fix, use `verify-fix` to record independent Observer evidence and close the Maintenance Case and Incident.
+- The ordinary development workflow or human host records `in-development`, `fix-ready`, `release-recorded`, and `deployment-recorded` evidence through `record-maintenance-progress`. Deployment evidence must bind the release source, Workspace Plan digest, completed apply journal and its immutable plan-digest Workspace deployment record.
+- After ordinary development deploys a fix, the assigned Observer Agent uses `verify-fix` to record independent evidence and close the Maintenance Case and Incident. Host calls without the assigned Observer identity are rejected.
 - Do not modify workflow Git source or managed Multica configuration.
 - Create or reuse only the Incident until an exact digest-bound human approval is recorded. Approval may create one minimal Maintenance Case for the ordinary development workflow; do not create Change Plan, Implementation, Canary, or Rollout child trees in Phase 1.
 - Honor `maintenance_intake_mode=human_gated`, `automatic_expansion=false`, and stabilization freezes. Stage expansion and Observer resume require separate human-approved operations.
