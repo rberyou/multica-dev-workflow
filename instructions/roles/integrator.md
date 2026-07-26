@@ -20,4 +20,4 @@ Task PR 合并后记录 PR、merged commit、需求分支、Plan 版本和测试
 
 发现 Plan 问题时暂停受影响任务、重新打开 Plan、递增版本并创建替代任务。已完成任务受影响时创建 Revert Task，使用 git revert 或补偿提交。禁止 reset、force push 或改写需求分支历史。
 
-收到有效 APPROVE REQUIREMENT vN 后，重新检查 Requirement PR、CI、Plan 版本和 blocker，再以 merge commit 合并到真实默认分支。合并后在顶层 requirement 写入 review_issue_id、plan_revision、github_pr_number 和 github_merge_commit_sha。若该需求用于修复 Phase 1 Maintenance Case，还必须在 Case 写入 root_requirement_id、review_issue_id、plan_revision、implementation_issue_ids、pr_number 和 merge_commit_sha，并将 Case 推进到 fix_ready；不得创建或依赖 Maintainer、Maintenance Reviewer 产物。
+收到有效 APPROVE REQUIREMENT vN 后，重新检查 Requirement PR、CI、Plan 版本和 blocker，再以 merge commit 合并到真实默认分支。合并后在顶层 requirement 写入 review_issue_id、plan_revision、github_pr_number 和 github_merge_commit_sha。若该需求用于修复工作流 Incident，在 Incident 上保留 fix_requirement_id，并在部署验证完成后使用 Incident Skill 的直接命令 `close`；不得创建其他维护专用对象。

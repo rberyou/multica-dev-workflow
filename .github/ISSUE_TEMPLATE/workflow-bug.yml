@@ -7,7 +7,7 @@ body:
     id: version
     attributes:
       label: Affected workflow version/protocol
-      placeholder: 1.1.0-rc.1 / v3
+      placeholder: 2.0.0-dev.1 / v4
     validations:
       required: true
   - type: textarea

@@ -4,20 +4,19 @@
   "title": "Multica Development Workflow",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "workflow", "skills", "agents", "projects", "autopilots", "operations", "secure_runtime", "squad"],
+  "required": ["schema_version", "workflow", "skills", "agents", "projects", "incidents", "squad"],
   "properties": {
     "$schema": {"type": "string"},
-    "schema_version": {"const": 2},
+    "schema_version": {"const": 3},
     "workflow": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "name", "version", "phase", "protocol_revision", "approver_role"],
+      "required": ["id", "name", "version", "protocol_revision", "approver_role"],
       "properties": {
-        "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$"},
+        "id": {"$ref": "#/$defs/key"},
         "name": {"type": "string", "minLength": 1},
         "version": {"type": "string", "minLength": 1},
-        "phase": {"type": "integer", "enum": [1, 2, 3]},
-        "protocol_revision": {"type": "string", "minLength": 1},
+        "protocol_revision": {"const": "v4"},
         "approver_role": {"type": "string", "minLength": 1}
       }
     },
@@ -31,16 +30,8 @@
           "key": {"$ref": "#/$defs/key"},
           "name": {"type": "string", "minLength": 1},
           "path": {"type": "string", "minLength": 1},
-          "targets": {
-            "type": "array",
-            "uniqueItems": true,
-            "items": {"enum": ["local", "workspace"]}
-          },
-          "attach_to": {
-            "type": "array",
-            "uniqueItems": true,
-            "items": {"$ref": "#/$defs/key"}
-          }
+          "targets": {"type": "array", "uniqueItems": true, "items": {"enum": ["local", "workspace"]}},
+          "attach_to": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/key"}}
         }
       }
     },
@@ -56,28 +47,13 @@
           "name": {"type": "string", "minLength": 1},
           "description": {"type": "string"},
           "runtime_binding": {"$ref": "#/$defs/key"},
-          "instruction_files": {
-            "type": "array",
-            "minItems": 1,
-            "items": {"type": "string", "minLength": 1}
-          },
+          "instruction_files": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
           "max_concurrent_tasks": {"type": "integer", "minimum": 1},
           "permission_mode": {"enum": ["private", "public_to_workspace"]},
-          "custom_args": {
-            "type": "array",
-            "items": {"type": "string"}
-          },
-          "mcp_config": {
-            "type": "object"
-          },
-          "runtime_config": {
-            "type": "object"
-          },
-          "previous_names": {
-            "type": "array",
-            "uniqueItems": true,
-            "items": {"type": "string", "minLength": 1}
-          }
+          "custom_args": {"type": "array", "items": {"type": "string"}},
+          "mcp_config": {"type": "object"},
+          "runtime_config": {"type": "object"},
+          "previous_names": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
         }
       }
     },
@@ -94,121 +70,19 @@
           "lead": {"$ref": "#/$defs/key"},
           "status": {"type": "string", "minLength": 1},
           "icon": {"type": "string"},
-          "previous_titles": {
-            "type": "array",
-            "uniqueItems": true,
-            "items": {"type": "string", "minLength": 1}
-          }
+          "previous_titles": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
         }
       }
     },
-    "autopilots": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["key", "title", "description", "agent", "mode", "project", "status", "subscribers", "triggers"],
-        "properties": {
-          "key": {"$ref": "#/$defs/key"},
-          "title": {"type": "string", "minLength": 1},
-          "description": {"type": "string"},
-          "agent": {"$ref": "#/$defs/key"},
-          "mode": {"enum": ["create_issue", "run_only"]},
-          "project": {"$ref": "#/$defs/key"},
-          "status": {"enum": ["active", "paused"]},
-          "issue_title_template": {"type": "string"},
-          "subscribers": {
-            "type": "array",
-            "uniqueItems": true,
-            "items": {"enum": ["current_user", "human_approver"]}
-          },
-          "triggers": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["key", "kind", "label", "enabled"],
-              "properties": {
-                "key": {"$ref": "#/$defs/key"},
-                "kind": {"enum": ["schedule", "webhook"]},
-                "label": {"type": "string", "minLength": 1},
-                "enabled": {"type": "boolean"},
-                "cron": {"type": "string", "minLength": 1},
-                "timezone": {"type": "string", "minLength": 1}
-              },
-              "allOf": [
-                {
-                  "if": {"properties": {"kind": {"const": "schedule"}}},
-                  "then": {"required": ["cron", "timezone"]}
-                }
-              ]
-            }
-          },
-          "previous_titles": {
-            "type": "array",
-            "uniqueItems": true,
-            "items": {"type": "string", "minLength": 1}
-          }
-        }
-      }
-    },
-    "operations": {
+    "incidents": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["project", "observer_agent", "observer_skill", "reporter_agents", "autopilot", "full_scan_autopilot", "maintenance_intake_mode", "automatic_expansion"],
+      "required": ["project", "skill", "reporter_agents"],
       "properties": {
         "project": {"$ref": "#/$defs/key"},
-        "observer_agent": {"$ref": "#/$defs/key"},
-        "observer_skill": {"$ref": "#/$defs/key"},
-        "reporter_agents": {
-          "type": "array",
-          "minItems": 1,
-          "uniqueItems": true,
-          "items": {"$ref": "#/$defs/key"}
-        },
-        "autopilot": {"$ref": "#/$defs/key"},
-        "full_scan_autopilot": {"$ref": "#/$defs/key"},
-        "maintenance_intake_mode": {"const": "human_gated"},
-        "automatic_expansion": {"const": false}
+        "skill": {"$ref": "#/$defs/key"},
+        "reporter_agents": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/key"}}
       }
-    },
-    "secure_runtime": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["schema_version", "phase", "required", "open_code_allowed", "agents"],
-      "properties": {
-        "schema_version": {"const": 1},
-        "phase": {"enum": ["planned", "enforced"]},
-        "required": {"type": "boolean"},
-        "open_code_allowed": {"type": "boolean"},
-        "agents": {
-          "type": "object",
-          "additionalProperties": {
-            "enum": ["workflow_maintainer", "workflow_reviewer"]
-          }
-        }
-      },
-      "allOf": [
-        {
-          "if": {"properties": {"phase": {"const": "planned"}}},
-          "then": {
-            "properties": {
-              "required": {"const": false},
-              "open_code_allowed": {"const": true}
-            }
-          }
-        },
-        {
-          "if": {"properties": {"phase": {"const": "enforced"}}},
-          "then": {
-            "properties": {
-              "required": {"const": true},
-              "open_code_allowed": {"const": false},
-              "agents": {"minProperties": 1}
-            }
-          }
-        }
-      ]
     },
     "squad": {
       "type": "object",
@@ -219,11 +93,7 @@
         "name": {"type": "string", "minLength": 1},
         "description": {"type": "string"},
         "leader": {"$ref": "#/$defs/key"},
-        "instruction_files": {
-          "type": "array",
-          "minItems": 1,
-          "items": {"type": "string", "minLength": 1}
-        },
+        "instruction_files": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
         "agent_members": {
           "type": "array",
           "minItems": 1,
@@ -231,10 +101,7 @@
             "type": "object",
             "additionalProperties": false,
             "required": ["agent", "role"],
-            "properties": {
-              "agent": {"$ref": "#/$defs/key"},
-              "role": {"type": "string", "minLength": 1}
-            }
+            "properties": {"agent": {"$ref": "#/$defs/key"}, "role": {"type": "string", "minLength": 1}}
           }
         },
         "human_members": {
@@ -245,16 +112,11 @@
             "type": "object",
             "additionalProperties": false,
             "required": ["selector", "role"],
-            "properties": {
-              "selector": {"enum": ["current_user", "existing_unique_role"]},
-              "role": {"type": "string", "minLength": 1}
-            }
+            "properties": {"selector": {"enum": ["current_user", "existing_unique_role"]}, "role": {"type": "string", "minLength": 1}}
           }
         }
       }
     }
   },
-  "$defs": {
-    "key": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$"}
-  }
+  "$defs": {"key": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$"}}
 }

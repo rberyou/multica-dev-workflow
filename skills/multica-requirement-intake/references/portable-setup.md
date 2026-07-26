@@ -28,6 +28,8 @@ multica-requirement-intake/
 
 不要只复制 `SKILL.md`。引用文档也是执行规则的一部分。
 
+创建或实质更新受管需求时，还必须在同一 Skill 根目录安装同版本的 `multica-workflow-incidents/`。Requirement Intake 不手工复制它的 metadata 逻辑。
+
 ## 2. CLI 发现顺序
 
 Skill 按以下顺序寻找 CLI：
@@ -55,7 +57,7 @@ Skill 按以下顺序寻找 CLI：
 multica version --output json
 ```
 
-如果 CLI 不可用但 Agent 能控制已登录的 Multica 浏览器，可以走 UI。两者都不可用时只能生成草稿。
+如果 CLI 不可用但 Agent 能控制已登录的 Multica 浏览器，只能执行只读发现和跟踪。创建或实质更新受管需求还必须执行 `multica-workflow-incidents` 的确定性 v4 绑定，因此 CLI 或绑定 Skill 不可用时只能生成草稿。
 
 ## 3. 可选环境变量
 
@@ -80,6 +82,7 @@ multica version --output json
 4. 选定 workspace 后，`squad list --output json` 中存在唯一目标小队。
 5. `squad member list <squad-id> --output json` 中存在队长，并且恰好有一个 `member_type=member`、`role=人工审批人` 的成员。
 6. `project list --output json` 能看到目标项目。
+7. 同一 Skill 根目录中存在同版本的 `multica-workflow-incidents/scripts/incidents.py`，并且其 `--help` 可以运行。
 
 首次验证不得创建测试 issue，除非用户明确要求。
 

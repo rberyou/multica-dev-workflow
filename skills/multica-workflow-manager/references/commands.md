@@ -1,98 +1,72 @@
 # Workflow Manager Commands
 
-Install the repository runtime dependency once per Python environment:
-
 ```text
 python -m pip install -r requirements.txt
 ```
 
-## First Check
+## Inspect and Plan
 
 ```text
 python scripts/workflow.py doctor --deployment-profile quality
-```
-
-Stop on missing CLI, authentication, workspace ambiguity, Runtime ambiguity or invalid approver roster.
-
-## Export Existing State
-
-```text
 python scripts/workflow.py export --workspace <id-or-slug>
-```
-
-Exports are local, redacted and gitignored.
-
-## Adoption Plan
-
-```text
 python scripts/workflow.py plan --workspace <id-or-slug> --deployment-profile quality --adopt
 ```
 
-Present every CREATE, ADOPT, UPDATE, ATTACH_SKILL, DETACH_SKILL, ADD_MEMBER, SET_ROLE, WARNING and BLOCKED action.
+Add `--allow-dirty` only to inspect a draft Plan from an uncommitted checkout. Draft Plans cannot be applied.
 
-## Apply an Approved Plan
+Stop on a missing CLI, authentication failure, workspace ambiguity, Runtime ambiguity, invalid approver roster, an unmarked same-name object without `--adopt`, or any `BLOCKED` action.
+
+## Apply and Verify
 
 ```text
 python scripts/workflow.py apply --plan .multica/plans/<plan>.json --approve <short-digest>
-```
-
-Apply must fail when Git HEAD, manifest hash, Runtime map or observed Multica preconditions changed after planning.
-
-`apply` performs an immediate post-mutation reconciliation check. Before advancing to a release, deployment or Canary gate, run a separate explicit `verify` as a fresh read and retain its operator result.
-
-## Verify and Drift
-
-```text
 python scripts/workflow.py verify --workspace <id-or-slug>
 python scripts/workflow.py drift --workspace <id-or-slug>
 ```
 
-## Audit and Observer Health
+Apply rechecks the exact clean Git commit, desired-source hash, Runtime map, workspace, and observed Multica state. `verify` performs a fresh read after mutation.
 
-```text
-python scripts/workflow.py audit --workspace <id-or-slug> --output json
-python scripts/workflow.py health --workspace <id-or-slug> --output json
-```
+Apply refuses `MULTICA_AGENT_ID` or `MULTICA_TASK_ID` by default. `--allow-agent-identity` is a break-glass override that requires explicit review; it is not part of the normal deployment flow.
 
-`audit` is read-only unless `--report` is explicitly supplied. `health` must fail clearly when the managed Autopilot or readable run history is unavailable.
+If Apply stops after a partial mutation, inspect the journal, generate a fresh Plan from the new observed state, and review that Plan before continuing. Do not reuse the stale Plan; retirement actions are ordered and idempotently converge across a fresh Plan.
 
-The portable Observer validates the generated full desired-state contract. Workflow source changes must run:
+The Plan also shows retirement actions for previously managed Agents, Skills, and scheduled automations that no longer exist in `workflow.json`. Apply removes retired Agents from the managed Squad roster, removes their Skill attachments, deletes dependent automations, reassigns preserved Projects to the current development leader, archives the Agents, and deletes retired Skills. It preserves retired Projects and their Issue history with a warning.
 
-```text
-python scripts/generate_audit_contract.py
-python scripts/generate_audit_contract.py --check
-```
+## Deploy an Unreleased Checkout
 
-## Disable Operations Before Rollback
+Commit and review the desired changes on any branch, then run the ordinary workspace Plan/Apply flow. Do not create a temporary version tag merely to deploy the checkout. The deployment record binds the source commit and Plan digest.
 
-```text
-python scripts/workflow.py plan --workspace <id-or-slug> --disable-operations
-```
-
-Review and approve this Plan before checking out an older release. It pauses the managed Observer Autopilot while retaining Reporter capability and Incident history.
-
-## Runtime Migration
+## Runtime Provider Change
 
 ```text
 python scripts/workflow.py plan --workspace <id-or-slug> --deployment-profile codex-only --rebind-runtimes
 ```
 
-Never migrate Runtimes as an incidental effect of updating instructions.
+Review every binding change. Do not rebind Runtimes as an incidental effect of instruction or Skill updates.
 
-## Release Plan
+## Incident Commands
 
 ```text
-python scripts/release.py plan --version <version> \
-  --development-issue <requirement-or-maintenance-case> \
-  --implementation-provenance <integration-validation-issue>
-$env:GH_TOKEN = <short-lived Dispatcher App installation token>
-python scripts/release.py doctor
-python scripts/release.py approval-block --plan <release-plan>
-python scripts/release.py apply --plan <release-plan> --approve <short-digest>
-Remove-Item Env:GH_TOKEN
+python scripts/workflow.py bind-workflow-issue --workspace <workspace> --issue <issue> --object-type <type> --created-by-role <role>
+python scripts/workflow.py report-incident --workspace <workspace> --source-issue <issue> --rule-id <stable-rule-id> --severity <low|medium|high|urgent> --summary <text> --expected <text> --actual <text> --evidence <redacted-evidence>
+python scripts/workflow.py link-incident-fix --workspace <workspace> --incident <incident> --requirement <requirement>
+python scripts/workflow.py close-incident --workspace <workspace> --incident <incident> --result failed --evidence <text>
+python scripts/workflow.py close-incident --workspace <workspace> --incident <incident> --result passed --evidence <text> --source-commit <40-char-commit> --deployment-plan-digest <64-char-digest>
 ```
 
-Generate the Plan with the normal human-host read context. Use the completed top-level Requirement for a feature release, or the approved Phase 1 Maintenance Case for an Incident fix. The linked integration-validation Issue must contain the ordinary Code Reviewer comment and exact Plan/SHA/PR bindings. After Plan generation, the durable human approver comments `APPROVE WORKFLOW RELEASE <short-digest>` on the selected development Issue. Then mint a short-lived, selected-repository Dispatcher App token outside Agent runtimes and expose it only through `GH_TOKEN` for `doctor`, `approval-block` and `apply`. The read-only `approval-block` prints a Release Request summary. `apply` dispatches that request but cannot mutate tags or Releases. The isolated reviewer approves the protected `workflow-release` Environment, and the dedicated Publisher App performs publication. `verify-tag` rechecks Environment, workflow-run, PR, CI, Dispatcher, Publisher and release provenance. Bootstrap mode is historical and cannot authorize a new release.
+These repository wrappers are event-driven human-host commands; nothing invokes them on a schedule. Managed Agents use the attached Incident Skill's direct `bind-workflow-issue`, `report`, `link-fix`, and `close` commands because product repositories do not contain this workflow repository's `scripts/workflow.py`.
+
+## Formal Release
+
+```text
+python scripts/release.py doctor
+python scripts/release.py plan --version <version>
+python scripts/release.py publish --plan <release-plan>
+git fetch --tags
+python scripts/release.py verify-tag --tag <v-version>
+```
+
+Formal release planning requires a clean `main` checkout whose VERSION, workflow version, active Skill versions, and Changelog section match. Run `package` with the same Plan only when a local asset preview is useful; `publish` rebuilds the assets and uses the authenticated human host's `gh release create`.
 
 ## Install Local Skills
 
@@ -100,6 +74,6 @@ Generate the Plan with the normal human-host read context. Use the completed top
 python scripts/workflow.py install-skills
 ```
 
-Prefer links or Windows junctions. Copy only when links are unavailable, and rerun after Git updates.
+The default target is `~/.agents/skills`. Prefer links or Windows junctions. Use `--copy` only when links are unavailable, `--target` for another local Skill root, and `--replace-existing` only after reviewing an existing same-name destination.
 
-The default Phase 1 install contains requirement-intake, workflow-manager, workflow-observer and workflow-console. Future Maintainer and Secure Runtime components are not installed by this command.
+The command removes only known retired Observer/Maintainer Skill destinations whose metadata confirms that they belong to this workflow; it refuses to delete an unowned same-name directory.

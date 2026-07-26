@@ -12,14 +12,14 @@
 <问题、复现方式、期望结果、日志或截图>
 ```
 
-Agent 应先通过只读检查解析 Workspace、项目、小队和可能的重复 Issue，再给出完整的 `Requirement Draft v<N>`。你确认当前版本后，Agent 才能创建一个顶层需求。Plan、Implementation 和开发任务由小队内部创建。小队名称默认是“开发交付小队”，也可以在提示词中明确指定另一支兼容小队。
+Agent 应先通过只读检查解析 Workspace、项目、小队、v4 协议绑定能力和可能的重复 Issue，再给出完整的 `Requirement Draft v<N>`。你确认当前版本后，Agent 才能创建一个顶层需求。创建后必须先通过 `multica-workflow-incidents` 绑定并读回 protocol v4 metadata，验证成功后才能启动。Plan、Implementation 和开发任务由小队内部创建。小队名称默认是“开发交付小队”，也可以在提示词中明确指定另一支兼容小队。
 
 ## 2. 确认后创建
 
 所有创建方式都使用同一个确认门禁：
 
 1. Agent 澄清用户可见行为、验收条件、范围、非目标、兼容性和风险。
-2. Agent 展示完整标题、描述、Workspace、项目、小队、启动状态和重复 Issue 处理方式，并明确说明“尚未创建”。
+2. Agent 展示完整标题、描述、Workspace、项目、小队、启动状态、v4 绑定动作和重复 Issue 处理方式，并明确说明“尚未创建”。
 3. 草案标记为 `Requirement Draft v<N>`。推荐使用以下回复确认：
 
 ```text
@@ -54,7 +54,7 @@ CONFIRM REQUIREMENT v1
 把下面的需求提交到 Multica 的 <项目名>，分配给开发交付小队并启动：<内容>
 ```
 
-Agent 获得当前草案确认后，会先以 `backlog` 创建并校验，然后转成 `todo`。切换完成后还必须通过服务端返回的 canonical ID 再次读回最终状态；读回失败时不能声称创建成功。`todo` 才会触发小队长执行。启动后，Agent 默认继续跟踪，不应只返回 Issue 编号就结束。
+Agent 获得当前草案确认后，会先以 `backlog` 创建并校验，执行确定性的 v4 metadata 绑定并读回验证，然后才转成 `todo`。切换完成后还必须通过服务端返回的 canonical ID 再次读回最终状态和协议 metadata；读回失败时不能声称创建成功。`todo` 才会触发小队长执行。启动后，Agent 默认继续跟踪，不应只返回 Issue 编号就结束。
 
 ## 4. 完整工作流
 
@@ -207,12 +207,12 @@ Agent 应读取：
 
 ## 9. 创建失败时怎么办
 
-- 找不到 `multica` CLI，但 Agent 能控制已登录的 Multica 浏览器：允许使用 UI 创建。
-- CLI 和浏览器都不可用：Agent 只能输出需求草稿，必须明确说明“未创建”。
+- 找不到 `multica` CLI：浏览器只能用于只读发现和跟踪；因为无法执行确定性的 v4 绑定，不能通过 UI 创建或实质更新受管需求。
+- CLI 不可用：Agent 只能输出需求草稿或执行只读跟踪，必须明确说明“未创建”。
 - 项目不明确：先让你选择，不能猜测后创建。
 - 发现重复 issue：Agent 必须在草案中显示是原样复用、补充已有 Issue 还是经你明确允许后创建重复项；确认后才能执行。
-- 创建成功但后续校验失败：保留在 `backlog`，修复原 issue，不能重新创建副本。
-- 最终 canonical ID 读回失败或 Workspace、内容、状态不匹配：只能报告“未验证”或“部分成功”，不能把 Issue 编号当成创建成功证明。
+- 创建成功但内容或协议绑定校验失败：保留在 `backlog`，修复原 issue，不能重新创建副本。
+- 最终 canonical ID 读回失败，或 Workspace、内容、状态、protocol v4 metadata 不匹配：只能报告“未验证”或“部分成功”，不能把 Issue 编号当成创建成功证明。
 - 小队中没有或存在多个“人工审批人”：队长会阻塞需求，等待 roster 配置修复。
 
 ## 10. 规则在哪里看
@@ -225,23 +225,22 @@ Agent 应读取：
 
 需要判断“这次为什么没有继续”时，优先查看当前 issue 的状态、负责人、最新评论、`waiting_on` 和 `blocked_reason`。
 
-## 工作流异常
+## 11. 工作流异常
 
-当 Agent 发现审批、Review、依赖、状态、角色、Runtime、Skill 或平台能力与工作流合同不一致时，会通过 `multica-workflow-observer` 创建或复用 Observation。Observer 再将有效 Observation 分类并汇聚为独立 Incident。Observation 与 Incident 位于“工作流运维”项目，不是业务需求子 issue。
+当 Agent 发现审批、Review、依赖、状态、角色、Runtime、Skill 或平台能力与工作流合同不一致时，先尝试在当前任务内安全修复。只有问题需要跨任务保留、可能复发、需要其他负责人或人工决定，或需要部署后验证时，才通过 `multica-workflow-incidents` 创建或复用独立 Incident。不存在后台扫描或中间 Observation。
 
-- urgent/high Incident 可能使来源 issue blocked，`waiting_on=workflow_fix`。
-- medium/low Incident 在不影响正确性时可以继续执行。
-- Phase 1 中，工作流观察员只负责分诊、跟踪和独立验证；Git 修复与代码审查由普通开发流程中的集成负责人、开发工程师和代码审查员完成。工作流维护员与维护审查员自动化尚未启用。
-- Incident 只有在修复版本部署到受影响 workspace 并完成 Observer 验证后才关闭。
+- 只有继续执行会影响正确性、审批完整性、安全、隐私或 Git 历史时，Incident 才阻塞来源 issue 并写入 `waiting_on=workflow_fix`。
+- Incident 修复直接创建普通 Requirement，完整经过 Plan、独立 Review、Implementation、集成验证和人工批准。
+- 修复部署到受影响 workspace 并验证后关闭 Incident；验证失败则保持 `in_fix`。
 
-## 11. 在不同电脑上使用
+## 12. 在不同电脑上使用
 
 Skill 本身不保存用户名、安装目录、profile、workspace ID、小队 UUID、项目 ID、Token 或人工审批人 UUID。
 
 在另一台电脑上：
 
 1. 把完整的 `multica-requirement-intake` 目录安装到该 Agent 能发现的 Skill 目录。
-2. 登录 Multica，并确保 CLI 或已登录的浏览器界面可用。
+2. 登录 Multica，并确保 CLI 可用，同时安装同版本的 `multica-workflow-incidents` Skill。浏览器只能作为只读发现和跟踪回退。
 3. 使用同一个云端 workspace 时，小队和 issue 都是服务器端数据，不需要重建。
 4. 使用另一个 workspace 时，其中必须先存在符合相同工作流契约的小队，并有唯一的“人工审批人”成员。
 5. 新建 Codex/OpenCode 会话，让工具重新加载 Skill。

@@ -1,50 +1,45 @@
 # Repository Guidelines
 
-## Project Structure & Module Organization
+## Project Structure
 
-- `scripts/` contains the Python 3.11 reconciler, release tools, contract generators, and packaging; `tests/` contains `unittest` coverage.
-- `secure-runtime/` contains the .NET 7 runtime, policies, and security tests.
-- `skills/` packages Codex skills. Keep each skill's `SKILL.md`, `agents/`, `references/`, and optional `scripts/` together.
-- `instructions/`, `deployment-profiles/`, and `docs/` define roles, deployments, architecture, operations, and release evidence.
+- `scripts/` contains the Python 3.11 reconciler, release tooling, and Skill packaging.
+- `tests/` contains deterministic `unittest` coverage.
+- `skills/` packages Codex Skills. Keep each Skill's `SKILL.md`, `agents/`, `references/`, and optional `scripts/` together.
+- `instructions/`, `deployment-profiles/`, and `docs/` define the development workflow and host operations.
 - `workflow.json` is desired state and must remain valid against `workflow.schema.json`.
 
-## Current Development Boundary
+## Current Design Boundary
 
-Phase 1 is the current scope: development Agents report anomalies; Observer scans registered projects, deduplicates findings, manages Incidents, and verifies fixes. Maintainer/Reviewer automation and enforced Secure Runtime isolation belong to later phases; do not activate them without approved scope. See `docs/workflow-maintenance-roadmap.md` and `docs/workflow-maintenance-phase1-design.md`.
+Protocol v4 manages the seven ordinary development Agents, their Squad, reusable Skills, and one workflow Incident project. There is no Observer, workflow Maintainer, maintenance-specific Reviewer, scheduled scan, maintenance case, or secure execution environment. Workflow problems are reported only when discovered during real work and are fixed through an ordinary Requirement.
 
 ## Build, Test, and Development Commands
 
-Install Python dependencies first:
+Install dependencies:
 
 ```powershell
 python -m pip install -r requirements.txt check-jsonschema
 ```
 
-Run the main validation loop:
+Run the validation loop:
 
 ```powershell
-python -m unittest tests.test_manifest tests.test_observer tests.test_package_skills tests.test_reconcile tests.test_release -v
-python scripts/generate_audit_contract.py --check
-python -m py_compile scripts/workflow.py scripts/workflow_lib.py scripts/package_skills.py scripts/generate_audit_contract.py scripts/release.py skills/multica-workflow-observer/scripts/observer.py skills/multica-workflow-console/scripts/workflow_console.py
+python -m unittest tests.test_manifest tests.test_docs tests.test_incidents tests.test_package_skills tests.test_reconcile tests.test_release -v
+python -m py_compile scripts/workflow.py scripts/workflow_lib.py scripts/package_skills.py scripts/release.py skills/multica-workflow-incidents/scripts/incidents.py skills/multica-workflow-console/scripts/workflow_console.py
 check-jsonschema --schemafile workflow.schema.json workflow.json
 ```
 
-Run `generate_secure_runtime_manifest.py` and the .NET build/security tests only in a separately reviewed future-component change that intentionally touches `secure-runtime/`, `skills/multica-workflow-maintainer/`, or their packaging and tests. Do not couple those checks to a Phase 1 PR.
+Inspect a checkout with `python scripts/workflow.py doctor`, then `export`, `plan`, `drift`, and `verify`. Deploy a reviewed checkout with `apply` only after the exact `APPROVE WORKFLOW PLAN <short-digest>` approval. Any source, runtime-map, or observed-state change invalidates the Plan.
 
-Validate desired-state changes with `check-jsonschema --schemafile workflow.schema.json workflow.json`. Inspect locally with `python scripts/workflow.py doctor`, then `export`, `plan`, and `verify`. Apply only a reviewed plan with matching `APPROVE WORKFLOW PLAN <short-digest>` approval; plan changes invalidate approval.
+## Coding and Testing
 
-## Coding Style & Naming Conventions
+Use four-space indentation and normal Python conventions. Match surrounding code, keep JSON deterministic, and never embed credentials, tokens, concrete UUIDs, or user-specific paths in portable files.
 
-Use four-space indentation. Follow Python conventions (`snake_case` functions, `PascalCase` classes, explicit imports) and C# conventions (`PascalCase` public members, nullable-aware code). .NET warnings are errors. Match surrounding code, keep JSON deterministic, and never embed local UUIDs, credentials, tokens, or user-specific paths in portable files.
+Name tests `test_*.py` and methods `test_<behavior>`. Add regression coverage for approval, digest, redaction, state transitions, and failure paths. Tests must be deterministic across Windows, Linux, and macOS.
 
-## Testing Guidelines
+## Review Loop
 
-Name Python files `test_*.py` and methods `test_<behavior>`. Add regression tests beside the affected subsystem, including failure paths for approval, digest, redaction, and policy changes. Tests must be deterministic across Windows, Linux, and macOS. Run the Phase 1 Python, contract, compile and schema checks before opening a PR. Keep future-component Python/.NET validation in its own explicitly scoped change.
+Review a design or code change, fix every logical flaw, and repeat until no issue remains or human judgment is required. Return ordinary findings to the author automatically; never request confirmation between cycles.
 
-## Agent Workflow Concepts
+## Commit and Pull Requests
 
-**Review Loop:** Review a design or code change, fix every logical flaw, and repeat until no issue remains or human judgment is required. Return ordinary findings to the author automatically; never request user confirmation between cycles.
-
-## Commit & Pull Request Guidelines
-
-Prefer short, imperative Conventional Commit subjects such as `fix: harden release verification` or `docs: record evidence`. Complete `.github/pull_request_template.md`: summarize the change, identify plan/Incident and protocol impact, list validation, bind independent review to the current head SHA, and document risk, canary, and rollback. Link issues; add screenshots only for UI or console-output changes.
+Prefer short imperative Conventional Commit subjects. Complete `.github/pull_request_template.md`, bind independent review to the current head SHA, list validation, and document risk and rollback.

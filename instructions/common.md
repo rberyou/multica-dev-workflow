@@ -1,4 +1,4 @@
-工作流协议版本：v3。顶层需求 metadata 缺少 protocol_revision 时按 v2 核心语义处理；子 issue 缺失时继承顶层值，显式冲突必须 blocked 并上报。
+工作流协议版本：v4。所有工作流 Issue 必须显式绑定 v4；缺失或冲突的协议 metadata 不做旧版本推断，直接阻塞并修复当前对象。
 
 每次行动前读取当前 issue、完整父 issue 链、最新评论、验收条件、metadata、子 issue stage 和当前 plan_revision。
 
@@ -6,9 +6,11 @@
 
 Review Loop 默认保持 original owner 为 assignee，不通过反复更换 assignee 路由。交接使用有效完整 mention，并依据 metadata 中的 original_owner_id、reviewer_id、integrator_id 和 human_approver_id，不得依据显示名或记忆猜测身份。
 
-创建 issue 后必须立即运行 `multica-workflow-observer` Skill 随附的 `observer.py bind-workflow-issue`，从当前项目的 Project Registration 写入 `managed_by`、`workflow_instance_id`、`workflow_object_type`、`root_requirement_id`、`created_by_role` 和协议版本；随后写入 workflow_stage。创建可审查 issue 时写入适用的 durable metadata：original_owner_id、reviewer_id、integrator_id、human_approver_id、plan_revision，并继承顶层 workflow_id、workflow_version、protocol_revision，同时写入 top_protocol_revision 作为继承证据。不得在子 issue 写入与顶层冲突的协议值。development_task 和 integration_validation 还必须维护 dependencies_satisfied；进入代码审查前写入 pr_head_sha 和 reviewed_commit_sha。
+创建工作流 Issue 后必须立即使用已附加的 `multica-workflow-incidents` Skill 执行直接命令 `bind-workflow-issue`，写入 managed_by、workflow_instance_id、workflow_object_type、root_requirement_id、created_by_role、workflow_version、protocol_revision 和 top_protocol_revision；随后写入 workflow_stage。不要假设当前产品仓库包含工作流仓库的 `scripts/workflow.py`。子 issue 的协议和 root_requirement_id 必须与父链一致。development_task 和 integration_validation 还必须维护 dependencies_satisfied；进入代码审查前写入 pr_head_sha 和 reviewed_commit_sha。
 
-发现工作流规则冲突、门禁失效、平台能力与指令假设不一致、必需角色/Runtime/Skill/metadata 缺失、重复或孤立 issue、错误状态流转时，不得静默绕过。调用 multica-workflow-observer 的 Reporter Mode 创建或复用 Observation；只有 Observer 可以把 Observation 转换为去重 Incident。只有影响正确性、审批完整性、安全、隐私或 Git 历史时才阻塞当前 issue；低风险效率/文档问题可继续但仍须上报。普通代码缺陷、业务需求不清和已由 Plan revision 正常处理的问题不属于工作流 Incident。
+发现工作流规则冲突、门禁失效、平台能力与指令假设不一致、必需角色、Runtime、Skill 或 metadata 缺失、重复或孤立 issue、错误状态流转时，先判断能否在当前任务内立即、安全、完整地修复。只有问题需要跨任务保留、可能复发、需要其他负责人或人工决定、阻塞正确性，或需要部署后验证时，才使用 Incident Skill 的直接命令 `report` 创建或复用持久 Incident。普通代码缺陷、需求澄清和当前任务内已经修复的问题不创建 Incident。
+
+只有继续执行会危及正确性、审批完整性、安全、隐私或 Git 历史时，才使用 `--block-source`。Incident 修复必须创建普通 Requirement，并用直接命令 `link-fix` 关联；不存在 Maintenance Case 或专用维护角色。修复部署并验证后，用直接命令 `close` 记录结果。不得把凭据、Cookie、私钥、Authorization header 或原始环境变量写入 Incident。
 
 人工批准只有同时满足以下条件才有效：评论 author_type=member；author_id 精确等于 human_approver_id；评论包含当前版本的 APPROVE PLAN vN、DECISION: ... 或 APPROVE REQUIREMENT vN。Squad roster role 只用于发现审批人和生成有效 mention，不是审批凭证。
 

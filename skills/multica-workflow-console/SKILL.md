@@ -1,18 +1,22 @@
 ---
 name: multica-workflow-console
-description: Read-only host console for inspecting Multica workflow health, blocked decisions, Plan gates, release gates, and Observer state without exposing host credentials to managed Agent runtimes.
+description: Check repository validity and current Multica workflow drift through a read-only host console. Use when the user asks for workflow status, drift, deployment readiness, or a non-mutating health check from a workflow checkout.
 metadata:
   managed_by: multica-dev-workflow
   workflow_id: development-delivery
-  version: 1.1.0-rc.4
+  version: 2.0.0-dev.1
 ---
 
 # Multica Workflow Console
 
-This RC4 Skill is host-only and read-only. It is not attached to any managed Multica Agent.
+This Skill is host-only, read-only, and is not attached to managed Agents.
 
-Use `scripts/workflow_console.py status` to inspect workflow health and active gates. The command refuses to run inside a Multica Agent task.
+Run from the Skill directory or pass the script by absolute path:
 
-Mutating commands such as Plan approval, decisions, release approval and GitHub Environment approval remain manual in RC4. They are intentionally deferred until a later reviewed human-presence design.
+```text
+python scripts/workflow_console.py status --repo <workflow-checkout> --workspace <workspace>
+```
 
-Read `docs/workflow-console.md` in the workflow repository for the Phase 1 status checks, ordinary-development evidence handoff and exact human gate locations.
+The command locates the repository from `--repo`, the current directory and its parents, or `MULTICA_WORKFLOW_REPO`. It accepts optional `--multica-bin` and `--profile` overrides, runs `workflow.py doctor`, then returns the exit status from a fresh `workflow.py drift` call.
+
+Exit `0` means the checkout is valid and no mutation remains, `1` means drift remains, and `2` means validation or reconciliation is blocked. The command refuses daemon-managed Agent tasks and never approves, applies, publishes, or manages Incidents.

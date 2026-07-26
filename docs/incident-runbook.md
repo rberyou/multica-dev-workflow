@@ -1,18 +1,37 @@
 # Workflow Incident Runbook
 
-1. Determine whether the defect is workflow-level rather than product code or requirement ambiguity.
-2. Choose severity and block the source only when correctness, approval, security, privacy or Git history is at risk.
-3. Use `multica-workflow-observer` Reporter Mode to create or reuse one durable Observation.
-4. Preserve links and compact redacted evidence; never copy secrets or unredacted user content.
-5. Observer processes pending Observations, applies deterministic rules, and creates or reuses one Incident per root cause.
-6. Confirmed defects receive a digest-bound maintenance decision request. Only the registered human approver may approve or defer it.
-7. Approval creates one minimal Maintenance Case. In Phase 1, the ordinary development workflow performs the fix; Maintainer and Reviewer automation remain disabled.
-8. Record Maintenance Case progress in order: `in-development`, `fix-ready`, `release-recorded`, then `deployment-recorded`. The deployment record must bind the released source commit, approved Workspace Plan digest and completed apply journal.
-9. Keep the Incident open through deployment and independent Observer verification. Only the assigned Observer identity may record `verify-fix`; a host call does not substitute for independent verification.
-10. Same-release unresolved recurrence reuses the Incident; later/post-fix recurrence links with `recurrence_of`.
+Workflow Incidents are durable exception records, not a monitoring subsystem.
 
-Observer scheduler outage requires an external `workflow.py health` check; the scheduler cannot fully monitor itself.
+## When to Persist
 
-The Observation Inbox is authoritative even when source metadata cannot be written. Incremental and full scans retry failed Observations without aborting the rest of the scan, maintain per-project cursors, and serialize runs with an expiring lease. After five failed attempts an Observation enters `quarantined`; it remains durable and produces a trackable operations finding instead of retrying forever. A new payload with the same fingerprint may re-enter `pending` for another bounded attempt cycle.
+Create or reuse an Incident only when at least one condition holds:
 
-Every Incident keeps a bounded, fingerprinted evidence log. Human-facing comments and escalation observe the 24-hour cooldown, bypassed for urgency, severity increases, newly affected requirements, first deterministic confirmation, or expanded blocked scope.
+- the problem cannot be completely and safely fixed in the current task;
+- it affects multiple Issues, tasks, projects, or future executions;
+- it may recur and needs a stable deduplication key and evidence history;
+- another owner or a human decision is required;
+- continuing would risk correctness, approval integrity, security, privacy, or Git history;
+- the fix must be deployed and checked later before the problem can be considered resolved.
+
+Do not create an Incident for an ordinary code defect, requirement ambiguity, expected Plan revision, transient tool retry, or a workflow mistake already fixed and verified inside the current task.
+
+## Who Calls the Script
+
+`multica-workflow-incidents` is attached to every ordinary development Agent. The active Agent calls its deterministic script immediately after creating a managed Issue and when it discovers a durable workflow problem. A human-hosted Codex session may call the same commands. There is no scheduler, polling loop, dedicated role, or fallback patrol.
+
+The script exists for operations that must behave identically every time: protocol binding, secret redaction, deduplication, metadata transitions, source blocking/restoration, fix linking, and closure evidence. Reasoning about whether a problem is worth recording remains with the active Agent or human.
+
+Managed Agents call the attached Skill directly with `bind-workflow-issue`, `report`, `link-fix`, and `close`. A human working from this repository may use the equivalent `workflow.py` wrappers: `bind-workflow-issue`, `report-incident`, `link-incident-fix`, and `close-incident`.
+
+## Lifecycle
+
+The durable `incident_status` metadata lifecycle is `open -> in_fix -> closed`. The corresponding Multica Issue statuses are `todo`, `in_progress`, and `done`.
+
+1. Start from a protocol-v4 non-Incident source Issue. Report a redacted Incident. Reuse an active Incident with the same workspace/rule/entity dedupe key; after closure, create a new Incident with `recurrence_of`.
+2. Use `--block-source` only for material correctness or integrity risk.
+3. Create an ordinary protocol-v4 Requirement for the fix and link it with the direct `link-fix` command or host wrapper `link-incident-fix`. An existing Incident cannot be switched to another fix Requirement.
+4. Run the normal Plan, independent review, implementation, Code Review, integration validation, and final approval flow.
+5. Deploy the reviewed clean checkout to the affected workspace with a digest-approved workflow Plan.
+6. Record the direct `close --result passed` command or host wrapper `close-incident --result passed` with concise redacted verification evidence, a full 40-character source commit, and a 64-character deployment Plan digest. A failed check keeps the Incident in `in_fix`; passed verification restores only source Issues still blocked by this Incident.
+
+Never persist credentials, cookies, private keys, Authorization headers, raw environment values, or unnecessary user data.

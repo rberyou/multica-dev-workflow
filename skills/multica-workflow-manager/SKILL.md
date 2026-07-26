@@ -1,54 +1,37 @@
 ---
 name: multica-workflow-manager
-description: Plan, rebuild, update, verify, audit, disable, and release a Git-managed Multica workflow control plane. Use when the user asks Codex or OpenCode to “重建小队”, “同步小队配置”, “更新工作流”, “从 Git 获取最新 Skill”, inspect drift or Observer health, prepare rollback, migrate runtimes, or apply a reviewed Multica workflow plan.
+description: Plan, deploy, verify, and inspect a Git-managed Multica development workflow from the current checkout. Use when the user asks to rebuild or update the squad, sync workflow configuration, install current Skills, inspect drift, deploy a reviewed checkout, change Runtime providers, or create a formal release.
 metadata:
   managed_by: multica-dev-workflow
   workflow_id: development-delivery
-  version: 1.1.0-rc.4
+  version: 2.0.0-dev.1
 ---
 
 # Multica Workflow Manager
 
-Manage Multica through the repository reconciler. Git is desired state; Multica is runtime state.
+Git is desired state and Multica is runtime state. A clean reviewed checkout may be deployed directly; a tag or formal Release is not required.
 
-## Locate the Repository
+## Required Workspace Flow
 
-Use the repository explicitly provided by the user. Otherwise search the current directory and parents for `workflow.json` plus `scripts/workflow.py`.
+1. Use the repository explicitly provided by the user, or locate `workflow.json` and `scripts/workflow.py` in the current directory or its parents.
+2. Run `python scripts/workflow.py doctor` for the intended profile, workspace, and deployment profile.
+3. Resolve workspace, Runtime, approver, and adoption ambiguity. Do not guess.
+4. Run `python scripts/workflow.py plan` and present all mutation actions and the short digest.
+5. Wait for the exact approval `APPROVE WORKFLOW PLAN <short-digest>`.
+6. Apply the exact Plan and run a fresh `verify`.
 
-Do not edit Multica objects directly when the reconciler manages them.
-
-## Select a Release
-
-- Stable release: fetch tags and checkout the requested or latest reviewed SemVer tag.
-- Main channel: checkout `main` and pull with fast-forward only.
-- Show the relevant Git diff or changelog before planning an upgrade.
-
-Never apply a different checkout without generating a new plan.
-
-## Required Flow
-
-1. Run `python scripts/workflow.py doctor` with the intended profile, workspace and deployment profile.
-2. Resolve every ambiguity. Do not guess Runtime, workspace, approver or adoption choices.
-3. Run `python scripts/workflow.py plan` and present the action summary and short digest.
-4. Wait for the exact user response `APPROVE WORKFLOW PLAN <short-digest>`.
-5. Run `apply` using the exact plan file and digest.
-6. Run `verify` and report the deployment record and residual warnings.
-
-Use `audit` and `health` for workflow Issue and Observer diagnostics. Before rollback, generate and approve `plan --disable-operations` while still on the newer release. Active v3 top-level requirements block that Plan unless they are frozen or the reviewed Plan explicitly uses `--allow-active-v3-degraded`.
-
-The repository-level design approval such as `APPROVE WORKFLOW PLAN v5` authorizes implementation of this system. It does not authorize a later workspace mutation plan with a different digest.
+Any checkout, source, Runtime-map, or observed-state change invalidates the Plan. A dirty checkout may produce a draft Plan with `--allow-dirty`, but a draft cannot be applied.
 
 ## Safety Rules
 
-- Never bypass `doctor`, Plan approval, stale-state checks or `verify`.
-- Never use undocumented HTTP APIs or invent CLI flags.
-- Never commit Runtime, Workspace, Agent, Squad or Member UUIDs into portable files.
-- Never commit tokens, cookies, MCP secrets or custom environment values.
-- Preserve unrelated Agent Skill assignments and non-conflicting extra roster members.
-- Do not run destructive pruning or archiving; v1.1 does not implement it.
-- Runtime rebinding requires `--rebind-runtimes` and explicit review of every old/new binding.
-- Existing unmarked objects require `--adopt`; same-name objects are not overwritten implicitly.
+- Never bypass doctor, Plan approval, stale-state checks, or verify.
+- Apply refuses daemon-managed Agent identities by default. Use `--allow-agent-identity` only as an explicitly reviewed break-glass action.
+- Never invent CLI flags or use undocumented HTTP APIs.
+- Never commit Runtime, Workspace, Agent, Squad, or Member UUIDs, credentials, cookies, or environment secrets.
+- Preserve unrelated objects and non-conflicting extra roster members.
+- Existing unmarked same-name objects require `--adopt`.
+- A reviewed Plan removes retired Agents from the managed Squad, deletes dependent automations, reassigns preserved Projects, archives the Agents, and deletes retired Skills. Retired Projects are preserved because they may contain durable history.
+- Runtime rebinding requires `--rebind-runtimes` and explicit review; Runtime profiles are provider selection, not an isolation boundary.
+- Do not add scheduled scans or maintenance-specific roles.
 
-## Common Commands
-
-Read [commands.md](references/commands.md) for command examples and expected stop conditions.
+Read [commands.md](references/commands.md) for examples and stop conditions.

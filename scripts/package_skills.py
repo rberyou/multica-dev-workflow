@@ -5,16 +5,67 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import os
 from pathlib import Path
 import re
+import subprocess
 import zipfile
 
 
 FIXED_ZIP_TIME = (2020, 1, 1, 0, 0, 0)
 
 
+def repository_source_files(skill_dir: Path) -> list[Path] | None:
+    resolved_skill_dir = skill_dir.resolve()
+    root_result = subprocess.run(
+        ["git", "-C", str(resolved_skill_dir), "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if root_result.returncode != 0:
+        return None
+    repository_root = Path(root_result.stdout.strip()).resolve()
+    try:
+        relative_skill = resolved_skill_dir.relative_to(repository_root)
+    except ValueError:
+        return None
+    list_result = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository_root),
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "--",
+            relative_skill.as_posix(),
+        ],
+        capture_output=True,
+        check=False,
+    )
+    if list_result.returncode != 0:
+        return None
+    files = []
+    for raw_path in list_result.stdout.split(b"\0"):
+        if not raw_path:
+            continue
+        path = repository_root / raw_path.decode("utf-8")
+        if path.is_file():
+            files.append(path)
+    return sorted(
+        files, key=lambda item: item.relative_to(resolved_skill_dir).as_posix()
+    )
+
+
 def source_files(skill_dir: Path) -> list[Path]:
+    skill_dir = skill_dir.resolve()
+    repository_files = repository_source_files(skill_dir)
+    if repository_files is not None:
+        return repository_files
     files = []
     for path in skill_dir.rglob("*"):
         if not path.is_file():
@@ -26,6 +77,7 @@ def source_files(skill_dir: Path) -> list[Path]:
 
 
 def package_hash(skill_dir: Path) -> str:
+    skill_dir = skill_dir.resolve()
     digest = hashlib.sha256()
     for path in source_files(skill_dir):
         relative = path.relative_to(skill_dir).as_posix().encode("utf-8")

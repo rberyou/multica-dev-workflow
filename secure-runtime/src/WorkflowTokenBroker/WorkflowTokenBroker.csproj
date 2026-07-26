@@ -1,9 +1,0 @@
-<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <OutputType>Exe</OutputType>
-    <AssemblyName>workflow-token-broker</AssemblyName>
-  </PropertyGroup>
-  <ItemGroup>
-    <ProjectReference Include="..\WorkflowSecureRuntime.Core\WorkflowSecureRuntime.Core.csproj" />
-  </ItemGroup>
-</Project>

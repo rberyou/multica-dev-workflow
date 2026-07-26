@@ -4,7 +4,7 @@ description: Clarify, confirm, create, submit, and continuously follow top-level
 metadata:
   managed_by: multica-dev-workflow
   workflow_id: development-delivery
-  version: 1.1.0-rc.4
+  version: 2.0.0-dev.1
 ---
 
 # Multica Requirement Intake
@@ -14,6 +14,7 @@ Use this skill as the portable entry point between the user and a Multica develo
 ## Fixed Workflow Contract
 
 - Create only the top-level requirement issue. Never create Plan, Implementation, design, split, or development task issues from outside the squad.
+- Before a new or reused top-level requirement can enter `todo`, bind and verify its protocol-v4 metadata through the deterministic `multica-workflow-incidents` Skill. A conflicting older or foreign binding blocks submission.
 - Never create, start, or materially update a requirement from the user's initial description alone. Clarify the requirement, present the complete current draft and duplicate disposition, and obtain explicit confirmation bound to that draft revision before the corresponding create, start, or material-update mutation.
 - Assign the top-level issue to the resolved development squad, not to the leader or an individual agent.
 - Create safely in `backlog`, verify the result, then move it to `todo` only when the user asked to submit or start it.
@@ -58,12 +59,20 @@ Limit filesystem searches to Multica-specific standard directories. Do not scan 
 
 If no CLI is available:
 
-1. Use an authenticated Multica browser UI when browser control is available.
+1. Use an authenticated Multica browser UI only for read-only discovery or Follow mode when browser control is available.
 2. Otherwise produce a ready-to-submit draft and state clearly that no issue was created.
+
+Do not create or materially update a managed requirement through the browser alone. Protocol binding is part of the same submission operation and requires the deterministic Incident Skill plus a working CLI.
 
 Do not call undocumented HTTP endpoints with `curl` as a fallback.
 
 Read [portable-setup.md](references/portable-setup.md) for provider paths, CLI discovery examples, and first-use checks on a new computer.
+
+## Resolve the Protocol Binder
+
+Locate `multica-workflow-incidents/scripts/incidents.py` in the same installed Skill root, an explicitly supplied Skill root, or the current workflow repository. Verify its `--help` output before mutation. Pass it the resolved CLI path, profile, and workspace explicitly.
+
+If the binder is unavailable, do not create, update, reuse-and-start, or approve a managed workflow Issue. Draft and read-only Follow modes remain available. Do not reproduce its metadata writes manually.
 
 ## Resolve Profile and Workspace
 
@@ -124,12 +133,12 @@ For Prepare to submit and Prepare to queue modes:
 
 1. Use read-only discovery to resolve the workspace, project, squad, roster, repository, and likely duplicates before asking for confirmation. Read each proposed reuse/update target in full and require it to be a top-level issue in the resolved project. Do not mutate Multica.
 2. Ask focused questions about missing or conflicting user-visible behavior, acceptance criteria, scope, non-goals, compatibility, risk, or target environment. Do not move implementation choices that belong in Plan into the requirement.
-3. Present the complete proposed title and description, plus the resolved workspace, project, squad, intended final/start status, and duplicate disposition. A reuse or update disposition must name the existing issue's canonical identifier and link when available.
+3. Present the complete proposed title and description, plus the resolved workspace, project, squad, intended final/start status, protocol-v4 binding disposition, and duplicate disposition. A reuse or update disposition must name the existing issue's canonical identifier and link when available.
 4. Label the draft `Requirement Draft v<N>` and state explicitly that no issue has been created yet.
 5. Request explicit confirmation of the current revision. The preferred confirmation is `CONFIRM REQUIREMENT v<N>`; an equally explicit natural-language confirmation is valid only when it names the same revision and unambiguously authorizes creation.
 6. If the user changes any material requirement content or target after confirmation, increment the draft revision, show the complete revised draft, and obtain confirmation again.
 
-Requirement-intake confirmation authorizes only the displayed top-level action (create new, reuse unchanged, or update existing) with the displayed target and start mode. It is not Plan approval, final requirement approval, release approval, deployment approval, or permission to create child issues.
+Requirement-intake confirmation authorizes only the displayed top-level action (create new, reuse unchanged, or update existing) with the displayed target and start mode. It is not Plan approval, final requirement approval, authorization to publish or deploy, or permission to create child issues.
 
 ## Create Through the CLI
 
@@ -139,21 +148,23 @@ Before using a command, inspect `--help`. Use structured `--output json` wheneve
 <multica> [--profile <profile>] --workspace-id <workspace-id> <command> ...
 ```
 
-If the installed CLI does not expose a required command or cannot preserve the safe `backlog`-then-verify flow, use the authenticated browser path or Draft mode. Do not approximate missing commands with undocumented flags or direct API calls.
+If the installed CLI does not expose a required command or cannot preserve the safe `backlog-bind-verify-then-start` flow, use Draft or read-only Follow mode. Do not approximate missing commands with browser mutation, undocumented flags, manual metadata writes, or direct API calls.
 
 Then:
 
 1. Verify authentication with a read-only command.
 2. Resolve workspace, squad, roster, and project as described above.
 3. Search active issues using distinctive title keywords. Read any candidate before proposing reuse or update, and require it to be a top-level issue in the resolved project. Propose reuse of an equivalent issue, a bounded update to it, or creation of a duplicate only when the user explicitly permits one.
-4. Immediately before mutation, re-read the resolved project, squad, roster, and proposed existing target. Reconfirm that the current target, complete content, start mode, and duplicate disposition exactly match the confirmed draft revision. Stop and issue a revised draft if confirmation is missing, stale, or no longer matches current state.
+4. Immediately before mutation, re-read the resolved project, squad, roster, proposed existing target, and its metadata. Reconfirm that the current target, complete content, start mode, protocol binding, and duplicate disposition exactly match the confirmed draft revision. Reject a conflicting `workflow_id`, `protocol_revision`, `workflow_object_type`, or root binding before changing content. Stop and issue a revised draft if confirmation is missing, stale, or no longer matches current state.
 5. When creation or the confirmed update needs a multiline description, write it to one temporary UTF-8 file and use `--description-file`. This is required on Windows and preferred on every OS. Do not create a temporary file for unchanged reuse.
 6. Carry out the confirmed disposition. Reuse an unchanged equivalent issue without creating a copy; update only the confirmed fields of an existing issue; otherwise create one new issue in `backlog`, with project and squad assignment in the create call when supported.
 7. Read the target issue back and verify title, description, project, assignee, parent, and status. The parent must be empty.
-8. For confirmed Prepare to submit mode, change `backlog` to `todo` only after verification; never regress an already-active reused issue. For confirmed Prepare to queue mode, leave a new issue in `backlog` and do not downgrade an already-active reused issue.
-9. After all mutations, perform a fresh read using the canonical issue ID returned by the service. Verify the final identifier, workspace, project, assignee, content, parent, and status before reporting success or beginning Follow mode.
-10. In a finally-style cleanup that runs after success or failure, remove only the temporary description file created for this operation, if one was created.
-11. If creation or update partially succeeds, do not create a second copy. Leave a new issue in `backlog` when possible, report the canonical target ID only if known, and repair the same issue.
+8. Run the Incident Skill's direct `bind-workflow-issue` command with `--object-type requirement` and an accurate external creator role. This operation is idempotent for an identical v4 binding and rejects conflicts.
+9. Read the target metadata back and verify `managed_by`, `workflow_id`, `workflow_version`, `workflow_instance_id`, `workflow_object_type=requirement`, `root_requirement_id`, `created_by_role`, `protocol_revision=v4`, and `top_protocol_revision=v4`.
+10. For confirmed Prepare to submit mode, change `backlog` to `todo` only after content and protocol verification; never regress an already-active reused issue. For confirmed Prepare to queue mode, leave a new issue in `backlog` and do not downgrade an already-active reused issue.
+11. After all mutations, perform a fresh read using the canonical issue ID returned by the service. Verify the final identifier, workspace, project, assignee, content, parent, status, and protocol metadata before reporting success or beginning Follow mode.
+12. In a finally-style cleanup that runs after success or failure, remove only the temporary description file created for this operation, if one was created.
+13. If creation, update, or binding partially succeeds, do not create a second copy. Leave a new issue in `backlog` when possible, report the canonical target ID only if known, and repair the same issue.
 
 Current CLI shape, subject to help verification:
 
@@ -165,26 +176,18 @@ Current CLI shape, subject to help verification:
 <cli> [profile] --workspace-id <workspace-id> issue search "<keywords>" --output json
 <cli> [profile] --workspace-id <workspace-id> issue create --title "<title>" --description-file "<utf8-file>" --status backlog --project "<project-id>" --assignee-id "<squad-id>" --output json
 <cli> [profile] --workspace-id <workspace-id> issue get "<issue-key>" --output json
+python <incidents-skill>/scripts/incidents.py --multica-bin <cli> [--profile <profile>] --workspace <workspace-id> bind-workflow-issue --issue "<issue-key>" --object-type requirement --created-by-role <role>
+<cli> [profile] --workspace-id <workspace-id> issue metadata list "<issue-key>" --output json
 <cli> [profile] --workspace-id <workspace-id> issue status "<issue-key>" todo --output json
 ```
 
-## Create Through the Browser
+## Browser Read-Only Fallback
 
-1. Select the intended workspace and project explicitly.
-2. Resolve and verify the exact squad and its approver roster.
-3. Search for an equivalent active issue, open each candidate to verify it is a top-level issue in the resolved project, and propose a duplicate disposition.
-4. Immediately before mutation, reload the resolved project, squad, roster, and proposed existing target. Reconfirm that the current target, complete content, start mode, and duplicate disposition exactly match the confirmed draft revision. Stop and issue a revised draft if confirmation is missing, stale, or no longer matches current state.
-5. Carry out the confirmed disposition: reuse unchanged, update only confirmed fields, or create one new top-level issue in `backlog`.
-6. Assign the resolved squad when creating or when the confirmed update requires it, and verify there is no parent issue.
-7. Re-open the target issue and verify the saved content.
-8. Move `backlog` to `todo` only for a confirmed Prepare to submit mode; never downgrade an already-active reused issue.
-9. Reload the target by its canonical service ID and verify the final workspace, identifier, content, assignment, parent, and status before reporting success or beginning Follow mode.
-
-Do not manually create the squad's child issues in the UI.
+Use the authenticated browser only to resolve workspace/project/squad context, inspect duplicates, read an Issue chain, or follow progress when CLI reads are unavailable. Do not create or materially update a managed workflow Issue in the UI because the required deterministic protocol binding cannot be completed atomically there.
 
 ## Continuously Follow a Started Requirement
 
-After a confirmed Prepare to submit operation starts a new/backlog issue or reuses an issue that is already active, immediately switch to Follow mode for that top-level issue. The default outcome of “创建并启动” is create **and follow**, not create and stop.
+After a confirmed Prepare to submit operation starts a protocol-verified new/backlog issue or reuses a protocol-verified issue that is already active, immediately switch to Follow mode for that top-level issue. The default outcome of “创建并启动” is create **and follow**, not create and stop.
 
 1. Keep the issue key as the active requirement for the current conversation. On later turns, resume this requirement unless the user changes the target or explicitly stops following it.
 2. Follow the top-level issue, its active descendants, recent comments, metadata, assignees, task runs, branch/commit/PR bindings, CI, tests, review outcomes, and `waiting_on`/`blocked_reason` changes.
@@ -224,10 +227,11 @@ After a mutation, report:
 - issue key and link when available;
 - selected workspace and project;
 - resolved squad and final status;
+- verified protocol revision and workflow binding;
 - whether the squad was started;
 - any ambiguity, duplicate, configuration problem, or remaining user action.
 
-Never claim an issue was created, updated, started, or approved without a fresh read of the resulting state by its canonical service ID. If that read fails or the state does not match, report the operation as unverified or partially successful; do not present an issue key as completed creation evidence.
+Never claim an issue was created, updated, started, bound, or approved without a fresh read of the resulting state by its canonical service ID. If that read fails or the state does not match, report the operation as unverified or partially successful; do not present an issue key as completed creation evidence.
 
 For a started requirement, the creation report is an intermediate progress update. Continue following instead of ending with only the new issue key and initial status.
 

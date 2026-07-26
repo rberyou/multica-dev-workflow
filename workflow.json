@@ -1,12 +1,11 @@
 {
   "$schema": "./workflow.schema.json",
-  "schema_version": 2,
+  "schema_version": 3,
   "workflow": {
     "id": "development-delivery",
     "name": "开发交付小队",
-    "version": "1.1.0-rc.4",
-    "phase": 1,
-    "protocol_revision": "v3",
+    "version": "2.0.0-dev.1",
+    "protocol_revision": "v4",
     "approver_role": "人工审批人"
   },
   "skills": [
@@ -25,9 +24,9 @@
       "attach_to": []
     },
     {
-      "key": "workflow-observer",
-      "name": "multica-workflow-observer",
-      "path": "skills/multica-workflow-observer",
+      "key": "workflow-incidents",
+      "name": "multica-workflow-incidents",
+      "path": "skills/multica-workflow-incidents",
       "targets": ["local", "workspace"],
       "attach_to": [
         "leader",
@@ -36,8 +35,7 @@
         "integrator",
         "developer-a",
         "developer-b",
-        "code-reviewer",
-        "workflow-observer"
+        "code-reviewer"
       ]
     },
     {
@@ -111,72 +109,20 @@
       "instruction_files": ["instructions/common.md", "instructions/roles/code-reviewer.md"],
       "max_concurrent_tasks": 1,
       "permission_mode": "public_to_workspace"
-    },
-    {
-      "key": "workflow-observer",
-      "name": "工作流观察员",
-      "description": "接收工作流异常上报、运行确定性巡检、去重分诊并验证修复结果",
-      "runtime_binding": "opencode-review",
-      "instruction_files": ["instructions/roles/workflow-observer.md"],
-      "max_concurrent_tasks": 1,
-      "permission_mode": "public_to_workspace"
     }
   ],
   "projects": [
     {
-      "key": "workflow-operations",
-      "title": "工作流运维",
-      "description": "集中记录 Phase 1 工作流 Observation、Incident、Maintenance Case 与 Observer 验证证据。",
-      "lead": "workflow-observer",
+      "key": "workflow-incidents",
+      "title": "工作流问题",
+      "description": "集中记录需要跨任务跟踪的工作流 Incident、修复关联和验证证据。",
+      "lead": "leader",
       "status": "in_progress"
     }
   ],
-  "autopilots": [
-    {
-      "key": "workflow-health-audit",
-      "title": "工作流增量巡检",
-      "description": "使用 multica-workflow-observer 的 Observer Mode，运行 scripts/observer.py scan --mode incremental。只扫描已启用 Project Registration，先恢复 pending/processing/failed Observation；单条失败不终止扫描，最多五次后进入 quarantined 并由运维对象巡检形成可追踪 Finding。随后巡检登记项目及 Observation、Incident、Maintenance Case、Registration、Observer Control，执行 Incident 去重和项目独立游标提交。无法持久化扫描控制状态时必须失败；外部操作员或调度器必须单独运行 scripts/workflow.py health。",
-      "agent": "workflow-observer",
-      "mode": "run_only",
-      "project": "workflow-operations",
-      "status": "active",
-      "subscribers": ["human_approver"],
-      "triggers": [
-        {
-          "key": "hourly",
-          "kind": "schedule",
-          "label": "multica-workflow:workflow-health-hourly",
-          "enabled": true,
-          "cron": "0 * * * *",
-          "timezone": "Asia/Shanghai"
-        }
-      ]
-    },
-    {
-      "key": "workflow-full-audit",
-      "title": "工作流每日全量巡检",
-      "description": "使用 multica-workflow-observer 的 Observer Mode，运行 scripts/observer.py scan --mode full。重新校验所有已注册项目的工作流对象、pending/processing/failed/quarantined Observation、Incident、Maintenance Case、Registration、Observer Control 和 Git 管理的控制面状态；核验普通开发、发布、Workspace Plan、apply journal 与不可变 plan-digest Workspace deployment record 形成的修复闭环，不得扫描未注册项目的普通业务 Issue。",
-      "agent": "workflow-observer",
-      "mode": "run_only",
-      "project": "workflow-operations",
-      "status": "active",
-      "subscribers": ["human_approver"],
-      "triggers": [
-        {
-          "key": "daily",
-          "kind": "schedule",
-          "label": "multica-workflow:workflow-full-daily",
-          "enabled": true,
-          "cron": "15 2 * * *",
-          "timezone": "Asia/Shanghai"
-        }
-      ]
-    }
-  ],
-  "operations": {
-    "project": "workflow-operations",
-    "observer_agent": "workflow-observer",
-    "observer_skill": "workflow-observer",
+  "incidents": {
+    "project": "workflow-incidents",
+    "skill": "workflow-incidents",
     "reporter_agents": [
       "leader",
       "planner",
@@ -185,18 +131,7 @@
       "developer-a",
       "developer-b",
       "code-reviewer"
-    ],
-    "autopilot": "workflow-health-audit",
-    "full_scan_autopilot": "workflow-full-audit",
-    "maintenance_intake_mode": "human_gated",
-    "automatic_expansion": false
-  },
-  "secure_runtime": {
-    "schema_version": 1,
-    "phase": "planned",
-    "required": false,
-    "open_code_allowed": true,
-    "agents": {}
+    ]
   },
   "squad": {
     "key": "development-delivery",

@@ -1,232 +1,102 @@
 from pathlib import Path
 import json
-import re
-import shutil
 import sys
-import tempfile
 import unittest
+
+from jsonschema import Draft202012Validator
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from workflow_lib import WorkflowError, validate_repository  # noqa: E402
+from workflow_lib import validate_repository  # noqa: E402
+import workflow as workflow_cli  # noqa: E402
 
 
 class ManifestTests(unittest.TestCase):
-    def test_requirement_intake_confirms_before_create_and_keeps_following(self):
-        skill = (ROOT / "skills/multica-requirement-intake/SKILL.md").read_text(
-            encoding="utf-8"
-        )
-        agent = (
-            ROOT / "skills/multica-requirement-intake/agents/openai.yaml"
-        ).read_text(encoding="utf-8")
+    @classmethod
+    def setUpClass(cls):
+        cls.manifest = json.loads((ROOT / "workflow.json").read_text(encoding="utf-8"))
+        cls.schema = json.loads((ROOT / "workflow.schema.json").read_text(encoding="utf-8"))
 
-        self.assertIn("CONFIRM REQUIREMENT v<N>", skill)
-        self.assertIn(
-            "before the corresponding create, start, or material-update mutation",
-            skill,
-        )
-        self.assertIn("duplicate disposition", skill)
-        self.assertIn("canonical identifier and link", skill)
-        self.assertIn(
-            "fresh read of the resulting state by its canonical service ID", skill
-        )
-        self.assertIn("require it to be a top-level issue", skill)
-        self.assertIn("reuses an issue that is already active", skill)
-        self.assertIn("finally-style cleanup", skill)
-        self.assertIn("Do not create a temporary file for unchanged reuse", skill)
-        self.assertIn("continue monitoring for that comment", skill)
-        self.assertIn("Continuously Follow a Started Requirement", skill)
-        self.assertIn("An approval interaction is a pause in monitoring", skill)
-        self.assertIn("confirm a top-level requirement before creating it", agent)
-        self.assertNotIn(
-            "do not ask for a separate confirmation after preparing the description",
-            skill,
-        )
+    def test_manifest_matches_schema_and_repository_contract(self):
+        Draft202012Validator(self.schema).validate(self.manifest)
+        checked, profile = validate_repository(ROOT, "quality")
+        self.assertEqual(checked["workflow"]["protocol_revision"], "v4")
+        self.assertEqual(profile["name"], "quality")
 
-    def test_manager_flow_requires_explicit_verify_after_apply(self):
-        content = (ROOT / "skills/multica-workflow-manager/SKILL.md").read_text(
-            encoding="utf-8"
-        )
-        apply_step = content.index("5. Run `apply`")
-        verify_step = content.index("6. Run `verify`")
-        self.assertLess(apply_step, verify_step)
-
-    def test_generated_autopilot_contract_has_no_priority(self):
-        contract = json.loads(
-            (
-                ROOT
-                / "skills/multica-workflow-observer/references/control-plane-contract.json"
-            ).read_text(encoding="utf-8")
-        )
-        for desired in contract["autopilots"].values():
-            self.assertNotIn("priority", desired)
-
-    def test_all_deployment_profiles_validate(self):
-        for profile in ["quality", "codex-only", "opencode-only"]:
-            manifest, deployment = validate_repository(ROOT, profile)
-            self.assertEqual(manifest["schema_version"], 2)
-            self.assertEqual(deployment["name"], profile)
-
-    def test_schema_and_manifest_are_json(self):
-        json.loads((ROOT / "workflow.json").read_text(encoding="utf-8"))
-        json.loads((ROOT / "workflow.schema.json").read_text(encoding="utf-8"))
-
-    def test_portable_files_have_no_concrete_ids_or_user_paths(self):
-        uuid = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
-        user_path = re.compile(r"(?:[A-Za-z]:\\Users\\[^<\\]+|/Users/[^<\s/]+|/home/[^<\s/]+)")
-        token = re.compile(r"\b(?:mul|gho)_[A-Za-z0-9_-]{8,}\b")
-        paths = [
-            ROOT / "workflow.json",
-            *ROOT.glob("deployment-profiles/*.json"),
-            *ROOT.glob("instructions/**/*.md"),
-            *ROOT.glob("skills/**/*.md"),
-            *ROOT.glob("skills/**/*.yaml"),
-            *ROOT.glob("skills/**/*.py"),
-            *ROOT.glob("docs/*.md"),
-            *ROOT.glob("docs/*.json"),
-            *ROOT.glob(".github/**/*.yml"),
-            *ROOT.glob(".github/**/*.md"),
-        ]
-        for path in paths:
-            text = path.read_text(encoding="utf-8")
-            self.assertIsNone(uuid.search(text), path)
-            self.assertIsNone(user_path.search(text), path)
-            self.assertIsNone(token.search(text), path)
-
-    def test_skills_have_management_metadata(self):
-        manifest = json.loads((ROOT / "workflow.json").read_text(encoding="utf-8"))
-        for skill in [item["name"] for item in manifest["skills"]]:
-            content = (ROOT / f"skills/{skill}/SKILL.md").read_text(encoding="utf-8")
-            self.assertIn("managed_by: multica-dev-workflow", content)
-            self.assertIn("workflow_id: development-delivery", content)
-
-    def test_scheduled_observer_keeps_health_monitoring_out_of_band(self):
-        manifest = json.loads((ROOT / "workflow.json").read_text(encoding="utf-8"))
-        incremental = next(
-            item
-            for item in manifest["autopilots"]
-            if item["key"] == "workflow-health-audit"
-        )
-        full = next(
-            item
-            for item in manifest["autopilots"]
-            if item["key"] == "workflow-full-audit"
-        )
-        self.assertIn("scan --mode incremental", incremental["description"])
-        self.assertIn("workflow.py health", incremental["description"])
-        self.assertIn("scan --mode full", full["description"])
-        self.assertEqual(incremental["triggers"][0]["cron"], "0 * * * *")
-        self.assertEqual(full["triggers"][0]["cron"], "15 2 * * *")
-
-    def test_release_workflow_uses_protected_environment_request(self):
-        workflow = (ROOT / ".github/workflows/release.yml").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("workflow_dispatch:", workflow)
-        self.assertNotIn("push:\n    tags:", workflow)
-        self.assertIn("if: github.ref != 'refs/heads/main'", workflow)
-        self.assertIn("release workflow must be dispatched from refs/heads/main", workflow)
-        self.assertIn("ref: refs/heads/main", workflow)
-        self.assertNotIn("ref: ${{ github.sha }}", workflow)
-        self.assertLess(
-            workflow.index("Verify Request on trusted main"),
-            workflow.index("Check out approved source commit"),
-        )
-        self.assertIn("environment: workflow-release", workflow)
-        self.assertIn("python scripts/release.py verify-request", workflow)
-        self.assertIn("python scripts/release.py verify-publish-gate", workflow)
-        self.assertIn("python scripts/release.py publish", workflow)
-        self.assertIn("python scripts/release.py publish-release", workflow)
-        self.assertIn(
-            "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1",
-            workflow,
-        )
-        self.assertNotIn('git config user.name "github-actions[bot]"', workflow)
-        self.assertNotIn("contents: write", workflow)
-        self.assertGreaterEqual(workflow.count("persist-credentials: false"), 2)
-        self.assertIn("GH_TOKEN: ${{ github.token }}", workflow)
-        self.assertIn("recover_existing_tag", workflow)
-        self.assertNotIn("actions/setup-dotnet", workflow)
-        self.assertNotIn("generate_secure_runtime_manifest.py", workflow)
-        self.assertIn(
-            'python scripts/release.py verify-assets --tag "${{ needs.validate-request.outputs.tag }}"',
-            workflow,
-        )
-        self.assertIn("steps.publisher.outputs.token", workflow)
-        self.assertIn("multica-workflow-console-${{ needs.validate-request.outputs.tag }}.zip", workflow)
-        self.assertNotIn("multica-workflow-maintainer-${{ needs.validate-request.outputs.tag }}.zip", workflow)
-        self.assertNotIn("multica-workflow-secure-runtime-win-x64-${{ needs.validate-request.outputs.tag }}.zip", workflow)
-        self.assertIn(
-            "release-request-${{ steps.request.outputs.release_request_digest }}",
-            workflow,
-        )
-
-        control = json.loads((ROOT / "docs/release-control.json").read_text(encoding="utf-8"))
-        self.assertEqual(control["required_visibility"], "public")
-
-    def test_phase1_ci_excludes_future_component_validation(self):
-        phase1 = (ROOT / ".github/workflows/validate.yml").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("name: validate-phase1", phase1)
-        self.assertNotIn("actions/setup-dotnet", phase1)
-        self.assertNotIn("generate_secure_runtime_manifest.py", phase1)
-        self.assertNotIn("multica-workflow-maintainer", phase1)
-
-    def test_operations_disable_automatic_maintenance_expansion(self):
-        manifest = json.loads((ROOT / "workflow.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["workflow"]["phase"], 1)
+    def test_v4_manages_only_the_ordinary_development_team(self):
         self.assertEqual(
-            manifest["operations"]["maintenance_intake_mode"], "human_gated"
+            {item["key"] for item in self.manifest["agents"]},
+            {
+                "leader",
+                "planner",
+                "plan-reviewer",
+                "integrator",
+                "developer-a",
+                "developer-b",
+                "code-reviewer",
+            },
         )
-        self.assertIs(manifest["operations"]["automatic_expansion"], False)
+        self.assertNotIn("autopilots", self.manifest)
+        self.assertFalse((ROOT / "secure-runtime/WorkflowSecureRuntime.sln").exists())
+        self.assertFalse(
+            (ROOT / "secure-runtime/src/WorkflowSecureRuntime.Core/WorkflowSecureRuntime.Core.csproj").exists()
+        )
+        self.assertFalse((ROOT / "instructions/roles/workflow-observer.md").exists())
+        self.assertFalse((ROOT / "instructions/roles/workflow-maintainer.md").exists())
+        self.assertFalse((ROOT / "instructions/roles/workflow-maintenance-reviewer.md").exists())
+        self.assertFalse((ROOT / "skills/multica-workflow-observer/SKILL.md").exists())
+        self.assertFalse((ROOT / "skills/multica-workflow-maintainer/SKILL.md").exists())
+
+    def test_incident_skill_is_attached_to_every_squad_agent(self):
+        incidents = self.manifest["incidents"]
+        reporters = set(incidents["reporter_agents"])
+        squad_agents = {item["agent"] for item in self.manifest["squad"]["agent_members"]}
+        skill = next(item for item in self.manifest["skills"] if item["key"] == incidents["skill"])
+        project = next(item for item in self.manifest["projects"] if item["key"] == incidents["project"])
+        self.assertEqual(reporters, squad_agents)
+        self.assertEqual(set(skill["attach_to"]), reporters)
+        self.assertIn("workspace", skill["targets"])
+        self.assertEqual(project["lead"], "leader")
+
+    def test_versions_match_every_active_skill(self):
+        version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+        self.assertEqual(self.manifest["workflow"]["version"], version)
+        for skill in self.manifest["skills"]:
+            content = (ROOT / skill["path"] / "SKILL.md").read_text(encoding="utf-8")
+            self.assertIn(f"version: {version}", content)
+
+    def test_validation_workflow_targets_v4_tools_and_tests(self):
+        workflow = (ROOT / ".github/workflows/validate.yml").read_text(encoding="utf-8")
+        self.assertIn("tests.test_docs", workflow)
+        self.assertIn("tests.test_incidents", workflow)
+        self.assertIn("multica-workflow-incidents/scripts/incidents.py", workflow)
+        self.assertNotIn("generate_audit_contract.py", workflow)
+        self.assertNotIn("release-control-evidence", workflow)
+
+    def test_cli_has_only_current_operational_commands(self):
+        subparsers = next(
+            action
+            for action in workflow_cli.parser()._actions
+            if action.__class__.__name__ == "_SubParsersAction"
+        )
         self.assertEqual(
-            manifest["operations"]["full_scan_autopilot"],
-            "workflow-full-audit",
+            set(subparsers.choices),
+            {
+                "doctor",
+                "export",
+                "plan",
+                "drift",
+                "verify",
+                "apply",
+                "install-skills",
+                "bind-workflow-issue",
+                "report-incident",
+                "link-incident-fix",
+                "close-incident",
+            },
         )
-        self.assertEqual(manifest["secure_runtime"]["agents"], {})
-
-    def test_operations_contract_is_required_for_v2(self):
-        with tempfile.TemporaryDirectory() as temp:
-            temp_root = Path(temp) / "repo"
-            shutil.copytree(
-                ROOT,
-                temp_root,
-                ignore=shutil.ignore_patterns(
-                    ".git", ".multica", "build", "__pycache__", "*.pyc"
-                ),
-            )
-            manifest_path = temp_root / "workflow.json"
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            manifest.pop("operations")
-            manifest_path.write_text(
-                json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
-            with self.assertRaisesRegex(WorkflowError, "operations"):
-                validate_repository(temp_root, "quality")
-
-    def test_operations_reporters_must_match_squad_contract(self):
-        with tempfile.TemporaryDirectory() as temp:
-            temp_root = Path(temp) / "repo"
-            shutil.copytree(
-                ROOT,
-                temp_root,
-                ignore=shutil.ignore_patterns(
-                    ".git", ".multica", "build", "__pycache__", "*.pyc"
-                ),
-            )
-            manifest_path = temp_root / "workflow.json"
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            manifest["operations"]["reporter_agents"].pop()
-            manifest_path.write_text(
-                json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
-            with self.assertRaisesRegex(WorkflowError, "exactly match"):
-                validate_repository(temp_root, "quality")
 
 
 if __name__ == "__main__":

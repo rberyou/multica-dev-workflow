@@ -1,14 +1,12 @@
-from pathlib import Path
 from contextlib import contextmanager
+from pathlib import Path
 import importlib.util
-import io
 import json
 import re
 import shutil
 import subprocess
-import tempfile
-from types import SimpleNamespace
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 import zipfile
@@ -18,58 +16,27 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from workflow_lib import (  # noqa: E402
-    _autopilot_update_args,
-    _runtime_choice,
     WorkflowError,
+    _runtime_choice,
     apply_plan,
     build_plan,
-    deployment_record_path,
     install_skills,
     load_deployment_record,
+    mutation_actions,
     parse_marker,
     plan_has_blockers,
     redact,
     render_marker,
-    sha256_value,
+    save_plan,
     strip_marker,
     validate_repository,
-    write_json,
 )
-import workflow as workflow_cli  # noqa: E402
+
 
 CONSOLE_PATH = ROOT / "skills/multica-workflow-console/scripts/workflow_console.py"
 CONSOLE_SPEC = importlib.util.spec_from_file_location("workflow_console", CONSOLE_PATH)
 workflow_console = importlib.util.module_from_spec(CONSOLE_SPEC)
 CONSOLE_SPEC.loader.exec_module(workflow_console)
-
-
-class FakeCLI:
-    def __init__(self):
-        self.profile = "test"
-        self.workspace_id = "workspace-test"
-        self.calls = []
-
-    def json(self, args, include_workspace=True):
-        command = tuple(args)
-        self.calls.append(command)
-        if command[:2] == ("agent", "list"):
-            return []
-        if command[:2] == ("squad", "list"):
-            return []
-        if command[:2] == ("skill", "list"):
-            return []
-        if command[:2] == ("project", "list"):
-            return []
-        if command[:2] == ("autopilot", "list"):
-            return []
-        if command[:2] == ("runtime", "list"):
-            return [
-                {"id": "runtime-codex", "provider": "codex", "status": "online"},
-                {"id": "runtime-opencode", "provider": "opencode", "status": "online"},
-            ]
-        if command[:3] == ("user", "profile", "get"):
-            return {"id": "user-test", "name": "Tester"}
-        raise AssertionError(f"unexpected fake command: {command}")
 
 
 def flag(args, name, default=None):
@@ -82,47 +49,62 @@ def flag(args, name, default=None):
 @contextmanager
 def committed_temp_repo():
     with tempfile.TemporaryDirectory() as temp:
-        temp_root = Path(temp) / "repo"
+        root = Path(temp) / "repo"
         shutil.copytree(
             ROOT,
-            temp_root,
-            ignore=shutil.ignore_patterns(".git", ".multica", "exports", "build", "__pycache__", "*.pyc"),
+            root,
+            ignore=shutil.ignore_patterns(
+                ".git", ".multica", "exports", "build", "__pycache__", "*.pyc"
+            ),
         )
-        subprocess.run(["git", "init"], cwd=temp_root, check=True, capture_output=True)
-        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=temp_root, check=True)
-        subprocess.run(["git", "config", "user.name", "Test"], cwd=temp_root, check=True)
-        subprocess.run(["git", "add", "."], cwd=temp_root, check=True)
-        subprocess.run(["git", "commit", "-m", "test"], cwd=temp_root, check=True, capture_output=True)
-        yield temp_root
+        subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"],
+            cwd=root,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Test"], cwd=root, check=True
+        )
+        subprocess.run(["git", "add", "."], cwd=root, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "test"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+        )
+        yield root
 
 
-class MutatingCLI:
+class FakeCLI:
     def __init__(self):
         self.profile = "test"
         self.workspace_id = "workspace-test"
+        self.calls = []
         self.agents = []
         self.squads = []
         self.skills = []
         self.projects = []
         self.autopilots = []
-        self.issues = []
-        self.fail_project_create = False
-        self.autopilot_list_summaries = False
-        self.real_autopilot_responses = False
-        self.commands = []
+        self.archived_agents = []
+        self.fail_archive_once = False
         self.skill_details = {}
         self.agent_skills = {}
         self.members = {}
         self.runtimes = [
             {"id": "runtime-codex", "provider": "codex", "status": "online"},
-            {"id": "runtime-opencode", "provider": "opencode", "status": "online"},
+            {
+                "id": "runtime-opencode",
+                "provider": "opencode",
+                "status": "online",
+            },
         ]
         self.user = {"id": "user-test", "name": "Tester"}
 
     def json(self, args, include_workspace=True):
         args = list(args)
         command = tuple(args)
-        self.commands.append(command)
+        self.calls.append(command)
         if command[:2] == ("agent", "list"):
             return self.agents
         if command[:2] == ("agent", "get"):
@@ -134,70 +116,44 @@ class MutatingCLI:
         if command[:2] == ("project", "list"):
             return self.projects
         if command[:2] == ("autopilot", "list"):
-            if self.autopilot_list_summaries:
-                return [
-                    {
-                        key: value
-                        for key, value in item.items()
-                        if key not in {"description", "triggers", "subscribers"}
-                    }
-                    for item in self.autopilots
-                ]
             return self.autopilots
-        if command[:2] == ("issue", "list"):
-            limit = int(flag(args, "--limit", "100"))
-            offset = int(flag(args, "--offset", "0"))
-            return self.issues[offset : offset + limit]
         if command[:2] == ("autopilot", "get"):
-            item = next(item for item in self.autopilots if item["id"] == args[2])
-            if self.real_autopilot_responses:
-                return {
-                    "autopilot": {
-                        **{
-                            key: value
-                            for key, value in item.items()
-                            if key not in {"agent_id", "mode", "triggers", "subscribers"}
-                        },
-                        "assignee_id": item["agent_id"],
-                        "execution_mode": item["mode"],
-                        "subscribers": [
-                            {
-                                "user_id": subscriber["id"],
-                                "user_type": subscriber.get("user_type", "member"),
-                            }
-                            for subscriber in item["subscribers"]
-                        ],
-                    },
-                    "triggers": item["triggers"],
-                }
-            return item
+            return next(item for item in self.autopilots if item["id"] == args[2])
         if command[:2] == ("runtime", "list"):
             return self.runtimes
         if command[:3] == ("user", "profile", "get"):
             return self.user
-        if command[:3] == ("skill", "get", command[2] if len(command) > 2 else None):
+        if command[:2] == ("skill", "get"):
             return self.skill_details[args[2]]
         if command[:3] == ("agent", "skills", "list"):
             return self.agent_skills.get(args[3], [])
         if command[:3] == ("squad", "member", "list"):
             return self.members.get(args[3], [])
         if command[:2] == ("skill", "import"):
-            import zipfile
-
-            archive_path = Path(flag(args, "--file"))
-            with zipfile.ZipFile(archive_path) as archive:
+            with zipfile.ZipFile(Path(flag(args, "--file"))) as archive:
                 content = archive.read("SKILL.md").decode("utf-8")
             name = re.search(r"(?m)^name:\s*(.+)$", content).group(1).strip()
-            existing = next((item for item in self.skills if item["name"] == name), None)
-            if existing:
-                skill_id = existing["id"]
-            else:
-                skill_id = f"skill-{len(self.skills) + 1}"
-                existing = {"id": skill_id, "name": name, "description": ""}
-                self.skills.append(existing)
-            detail = {**existing, "content": content}
-            self.skill_details[skill_id] = detail
-            return detail
+            package_hash = re.search(
+                r"(?m)^\s*package_hash:\s*(\S+)\s*$", content
+            ).group(1)
+            current = next((item for item in self.skills if item["name"] == name), None)
+            if current is None:
+                current = {"id": f"skill-{len(self.skills) + 1}", "name": name}
+                self.skills.append(current)
+            self.skill_details[current["id"]] = {
+                **current,
+                "metadata": {
+                    "managed_by": "multica-dev-workflow",
+                    "workflow_id": "development-delivery",
+                    "package_hash": package_hash,
+                },
+            }
+            return self.skill_details[current["id"]]
+        if command[:2] == ("skill", "delete"):
+            skill_id = args[2]
+            self.skills = [item for item in self.skills if item["id"] != skill_id]
+            self.skill_details.pop(skill_id, None)
+            return {}
         if command[:2] == ("agent", "create"):
             agent_id = f"agent-{len(self.agents) + 1}"
             permission = flag(args, "--permission-mode", "private")
@@ -209,11 +165,10 @@ class MutatingCLI:
                 "runtime_id": flag(args, "--runtime-id"),
                 "model": flag(args, "--model", ""),
                 "thinking_level": flag(args, "--thinking-level", ""),
-                "max_concurrent_tasks": int(flag(args, "--max-concurrent-tasks", "1")),
+                "max_concurrent_tasks": int(
+                    flag(args, "--max-concurrent-tasks", "1")
+                ),
                 "permission_mode": permission,
-                "custom_args": json.loads(flag(args, "--custom-args", "[]")),
-                "mcp_config": json.loads(flag(args, "--mcp-config", "{}")),
-                "runtime_config": json.loads(flag(args, "--runtime-config", "{}")),
                 "invocation_targets": (
                     [{"target_type": "workspace", "target_id": self.workspace_id}]
                     if "--public-to-workspace" in args
@@ -225,26 +180,20 @@ class MutatingCLI:
             return agent
         if command[:2] == ("agent", "update"):
             agent = next(item for item in self.agents if item["id"] == args[2])
-            mapping = {
+            for option, key in {
                 "--name": "name",
                 "--description": "description",
                 "--instructions": "instructions",
                 "--runtime-id": "runtime_id",
                 "--model": "model",
                 "--thinking-level": "thinking_level",
-            }
-            for option, key in mapping.items():
-                if option in args:
-                    agent[key] = flag(args, option, "")
-            for option, key in {
-                "--custom-args": "custom_args",
-                "--mcp-config": "mcp_config",
-                "--runtime-config": "runtime_config",
             }.items():
                 if option in args:
-                    agent[key] = json.loads(flag(args, option))
+                    agent[key] = flag(args, option, "")
             if "--max-concurrent-tasks" in args:
-                agent["max_concurrent_tasks"] = int(flag(args, "--max-concurrent-tasks"))
+                agent["max_concurrent_tasks"] = int(
+                    flag(args, "--max-concurrent-tasks")
+                )
             if "--permission-mode" in args:
                 agent["permission_mode"] = flag(args, "--permission-mode")
                 agent["invocation_targets"] = (
@@ -253,1342 +202,519 @@ class MutatingCLI:
                     else []
                 )
             return agent
+        if command[:2] == ("agent", "archive"):
+            agent = next(item for item in self.agents if item["id"] == args[2])
+            if self.fail_archive_once:
+                self.fail_archive_once = False
+                raise RuntimeError("simulated archive failure")
+            if any(item.get("agent_id") == agent["id"] for item in self.autopilots):
+                raise AssertionError("cannot archive an Agent referenced by an Autopilot")
+            if any(
+                member.get("member_type") == "agent"
+                and member.get("member_id") == agent["id"]
+                for members in self.members.values()
+                for member in members
+            ):
+                raise AssertionError("cannot archive an Agent still present in a Squad")
+            if any(item.get("lead_id") == agent["id"] for item in self.projects):
+                raise AssertionError("cannot archive an Agent that still leads a Project")
+            self.agents.remove(agent)
+            self.archived_agents.append(agent)
+            return agent
         if command[:3] == ("agent", "skills", "set"):
             agent_id = args[3]
-            ids = [item for item in flag(args, "--skill-ids", "").split(",") if item]
-            self.agent_skills[agent_id] = [self.skill_details[item] for item in ids]
+            skill_ids = [item for item in flag(args, "--skill-ids", "").split(",") if item]
+            self.agent_skills[agent_id] = [
+                self.skill_details[skill_id] for skill_id in skill_ids
+            ]
             return self.agent_skills[agent_id]
         if command[:2] == ("project", "create"):
-            if self.fail_project_create:
-                raise WorkflowError("injected project create failure")
-            project_id = f"project-{len(self.projects) + 1}"
             lead = next(item for item in self.agents if item["name"] == flag(args, "--lead"))
             project = {
-                "id": project_id,
+                "id": f"project-{len(self.projects) + 1}",
                 "title": flag(args, "--title"),
                 "description": flag(args, "--description", ""),
                 "lead_id": lead["id"],
-                "lead_type": "agent",
                 "status": flag(args, "--status", "in_progress"),
                 "icon": flag(args, "--icon", ""),
             }
             self.projects.append(project)
             return project
+        if command[:2] == ("autopilot", "delete"):
+            autopilot = next(item for item in self.autopilots if item["id"] == args[2])
+            self.autopilots.remove(autopilot)
+            return {}
         if command[:2] == ("project", "update"):
             project = next(item for item in self.projects if item["id"] == args[2])
+            if "--title" in args:
+                project["title"] = flag(args, "--title")
+            if "--description" in args:
+                project["description"] = flag(args, "--description", "")
             if "--lead" in args:
-                lead = next(item for item in self.agents if item["name"] == flag(args, "--lead"))
+                lead = next(
+                    item for item in self.agents if item["name"] == flag(args, "--lead")
+                )
                 project["lead_id"] = lead["id"]
-            mapping = {
-                "--title": "title",
-                "--description": "description",
-                "--status": "status",
-                "--icon": "icon",
-            }
-            for option, key in mapping.items():
-                if option in args:
-                    project[key] = flag(args, option, "")
+            if "--status" in args:
+                project["status"] = flag(args, "--status", "in_progress")
+            if "--icon" in args:
+                project["icon"] = flag(args, "--icon", "")
             return project
-        if command[:2] == ("autopilot", "create"):
-            if "--priority" in args:
-                raise WorkflowError("Autopilot priority is not supported")
-            autopilot_id = f"autopilot-{len(self.autopilots) + 1}"
-            autopilot = {
-                "id": autopilot_id,
-                "title": flag(args, "--title"),
-                "description": flag(args, "--description", ""),
-                "agent_id": flag(args, "--agent"),
-                "mode": flag(args, "--mode"),
-                "project_id": flag(args, "--project"),
-                "status": "active",
-                "issue_title_template": flag(args, "--issue-title-template", ""),
-                "subscribers": [
-                    {"id": args[index + 1]}
-                    for index, item in enumerate(args)
-                    if item == "--subscriber"
-                ],
-                "triggers": [],
-            }
-            self.autopilots.append(autopilot)
-            if self.real_autopilot_responses:
-                return {"autopilot": {"id": autopilot_id}}
-            return autopilot
-        if command[:2] == ("autopilot", "update"):
-            if "--priority" in args:
-                raise WorkflowError("Autopilot priority is not supported")
-            if "--clear-subscribers" in args and "--subscriber" in args:
-                raise WorkflowError("subscriber replacement flags are mutually exclusive")
-            autopilot = next(item for item in self.autopilots if item["id"] == args[2])
-            mapping = {
-                "--title": "title",
-                "--description": "description",
-                "--agent": "agent_id",
-                "--mode": "mode",
-                "--project": "project_id",
-                "--status": "status",
-                "--issue-title-template": "issue_title_template",
-            }
-            for option, key in mapping.items():
-                if option in args:
-                    autopilot[key] = flag(args, option, "")
-            if "--clear-subscribers" in args:
-                autopilot["subscribers"] = []
-            elif "--subscriber" in args:
-                autopilot["subscribers"] = [
-                    {"id": args[index + 1]}
-                    for index, item in enumerate(args)
-                    if item == "--subscriber"
-                ]
-            return autopilot
-        if command[:2] == ("autopilot", "trigger-add"):
-            autopilot = next(item for item in self.autopilots if item["id"] == args[2])
-            trigger = {
-                "id": f"trigger-{len(autopilot['triggers']) + 1}",
-                "kind": flag(args, "--kind"),
-                "label": flag(args, "--label", ""),
-                "enabled": True,
-                "cron": flag(args, "--cron", ""),
-                "timezone": flag(args, "--timezone", "UTC"),
-            }
-            autopilot["triggers"].append(trigger)
-            return trigger
-        if command[:2] == ("autopilot", "trigger-update"):
-            autopilot = next(item for item in self.autopilots if item["id"] == args[2])
-            trigger = next(item for item in autopilot["triggers"] if item["id"] == args[3])
-            if "--label" in args:
-                trigger["label"] = flag(args, "--label", "")
-            enabled_arg = next((item for item in args if item.startswith("--enabled=")), None)
-            if enabled_arg:
-                trigger["enabled"] = enabled_arg.split("=", 1)[1].lower() == "true"
-            if "--cron" in args:
-                trigger["cron"] = flag(args, "--cron", "")
-            if "--timezone" in args:
-                trigger["timezone"] = flag(args, "--timezone", "UTC")
-            return trigger
         if command[:2] == ("squad", "create"):
-            squad_id = f"squad-{len(self.squads) + 1}"
             squad = {
-                "id": squad_id,
+                "id": f"squad-{len(self.squads) + 1}",
                 "name": flag(args, "--name"),
                 "description": flag(args, "--description", ""),
                 "instructions": "",
                 "leader_id": flag(args, "--leader"),
             }
             self.squads.append(squad)
-            self.members[squad_id] = []
+            self.members[squad["id"]] = []
             return squad
         if command[:2] == ("squad", "update"):
             squad = next(item for item in self.squads if item["id"] == args[2])
-            mapping = {
-                "--name": "name",
-                "--description": "description",
-                "--instructions": "instructions",
-                "--leader": "leader_id",
-            }
-            for option, key in mapping.items():
-                if option in args:
-                    squad[key] = flag(args, option, "")
+            squad.update(
+                {
+                    "name": flag(args, "--name"),
+                    "description": flag(args, "--description", ""),
+                    "instructions": flag(args, "--instructions", ""),
+                    "leader_id": flag(args, "--leader"),
+                }
+            )
             return squad
         if command[:3] == ("squad", "member", "add"):
-            squad_id = args[3]
-            item = {
+            member = {
                 "member_id": flag(args, "--member-id"),
                 "member_type": flag(args, "--type"),
                 "role": flag(args, "--role"),
             }
-            self.members[squad_id].append(item)
-            return item
+            self.members[args[3]].append(member)
+            return member
         if command[:3] == ("squad", "member", "set-role"):
+            member = next(
+                item
+                for item in self.members[args[3]]
+                if item["member_id"] == flag(args, "--member-id")
+                and item["member_type"] == flag(args, "--member-type")
+            )
+            member["role"] = flag(args, "--role")
+            return member
+        if command[:3] == ("squad", "member", "remove"):
             squad_id = args[3]
             member_id = flag(args, "--member-id")
-            member_type = flag(args, "--member-type")
-            item = next(
-                entry
-                for entry in self.members[squad_id]
-                if entry["member_id"] == member_id and entry["member_type"] == member_type
+            member_type = flag(args, "--type", "agent")
+            member = next(
+                item
+                for item in self.members[squad_id]
+                if item["member_id"] == member_id
+                and item["member_type"] == member_type
             )
-            item["role"] = flag(args, "--role")
-            return item
-        raise AssertionError(f"unexpected mutating command: {command}")
+            self.members[squad_id].remove(member)
+            return member
+        raise AssertionError(f"unexpected fake command: {command}")
 
 
 class ReconcileTests(unittest.TestCase):
-    def test_marker_round_trip(self):
-        body = "hello\n"
-        rendered = render_marker("wf", "agent.leader", "abc", body)
-        self.assertEqual(parse_marker(rendered)["object_key"], "agent.leader")
-        self.assertEqual(strip_marker(rendered), body)
-
-    def test_managed_marker_is_not_confused_by_previous_name_support(self):
+    def test_marker_and_redaction_helpers(self):
         rendered = render_marker("wf", "agent.leader", "abc", "body\n")
-        self.assertEqual(parse_marker(rendered)["workflow_id"], "wf")
+        self.assertEqual(parse_marker(rendered)["object_key"], "agent.leader")
+        self.assertEqual(strip_marker(rendered), "body\n")
+        self.assertEqual(redact({"token": "secret", "safe": "value"})["token"], "<redacted>")
 
-    def test_runtime_preserves_compatible_existing_binding(self):
+    def test_runtime_choice_preserves_compatible_binding_and_blocks_ambiguity(self):
         binding = {"provider": "codex", "required_status": "online"}
         runtime = {"id": "old", "provider": "codex", "status": "online"}
         selected, error = _runtime_choice(
-            "binding", binding, {"bindings": {}}, [runtime], {"name": "Agent", "runtime_id": "old"}, {"old": runtime}, False
+            "binding",
+            binding,
+            {"bindings": {}},
+            [runtime],
+            {"name": "Agent", "runtime_id": "old"},
+            {"old": runtime},
+            False,
         )
-        self.assertEqual(selected, "old")
-        self.assertIsNone(error)
-
-    def test_runtime_ambiguity_requires_local_map(self):
-        binding = {"provider": "codex", "required_status": "online"}
-        runtimes = [
-            {"id": "one", "provider": "codex", "status": "online"},
-            {"id": "two", "provider": "codex", "status": "online"},
-        ]
-        selected, error = _runtime_choice("binding", binding, {"bindings": {}}, runtimes, None, {}, False)
+        self.assertEqual((selected, error), ("old", None))
+        selected, error = _runtime_choice(
+            "binding",
+            binding,
+            {"bindings": {}},
+            [runtime, {**runtime, "id": "other"}],
+            None,
+            {"old": runtime, "other": {**runtime, "id": "other"}},
+            False,
+        )
         self.assertIsNone(selected)
         self.assertIn("multiple Runtimes", error)
 
-    def test_empty_workspace_plan_rebuilds_all_objects(self):
-        cli = FakeCLI()
-        workspace = {"id": cli.workspace_id, "name": "Test", "slug": "test"}
-        with tempfile.TemporaryDirectory() as temp:
-            runtime_map = Path(temp) / "runtime-map.json"
-            plan = build_plan(ROOT, cli, workspace, "quality", runtime_map, False, False, write_archives=False)
-        self.assertFalse(plan_has_blockers(plan))
-        types = [action["type"] for action in plan["actions"]]
-        self.assertEqual(types.count("CREATE_AGENT"), 8)
-        self.assertEqual(types.count("CREATE_PROJECT"), 1)
-        self.assertEqual(types.count("CREATE_AUTOPILOT"), 2)
-        self.assertEqual(types.count("ADD_AUTOPILOT_TRIGGER"), 2)
-        self.assertEqual(types.count("CREATE_SQUAD"), 1)
-        self.assertEqual(types.count("ADD_MEMBER"), 8)
-        self.assertEqual(types.count("CREATE_SKILL"), 2)
-        self.assertEqual(types.count("ATTACH_SKILL"), 8)
+    def test_repository_contract_has_no_scheduled_automation(self):
+        manifest, _ = validate_repository(ROOT, "quality")
+        self.assertNotIn("autopilots", manifest)
+        self.assertEqual(manifest["workflow"]["protocol_revision"], "v4")
 
-    def test_repository_validation_enforces_complete_workflow_schema(self):
-        cases = {
-            "invalid autopilot mode": lambda value: value["autopilots"][0].update(
-                {"mode": "invalid"}
-            ),
-            "invalid autopilot status": lambda value: value["autopilots"][0].update(
-                {"status": "invalid"}
-            ),
-            "missing schedule cron": lambda value: value["autopilots"][0][
-                "triggers"
-            ][0].pop("cron"),
-            "missing schedule timezone": lambda value: value["autopilots"][0][
-                "triggers"
-            ][0].pop("timezone"),
-            "missing trigger kind": lambda value: value["autopilots"][0][
-                "triggers"
-            ][0].pop("kind"),
-            "missing trigger label": lambda value: value["autopilots"][0][
-                "triggers"
-            ][0].pop("label"),
-            "unknown project property": lambda value: value["projects"][0].update(
-                {"unexpected": True}
-            ),
-            "unknown autopilot property": lambda value: value["autopilots"][0].update(
-                {"unexpected": True}
-            ),
-            "removed autopilot priority": lambda value: value["autopilots"][0].update(
-                {"priority": "medium"}
-            ),
-            "invalid workflow phase": lambda value: value["workflow"].update(
-                {"phase": 4}
-            ),
-        }
-        for label, mutate in cases.items():
-            with self.subTest(case=label), committed_temp_repo() as temp_root:
-                path = temp_root / "workflow.json"
-                manifest = json.loads(path.read_text(encoding="utf-8"))
-                mutate(manifest)
-                write_json(path, manifest)
-                with self.assertRaisesRegex(WorkflowError, "workflow.json schema"):
-                    validate_repository(temp_root, "quality")
+    def test_initial_plan_apply_and_second_plan_are_idempotent(self):
+        with committed_temp_repo() as root:
+            cli = FakeCLI()
+            workspace = {"id": cli.workspace_id, "name": "Test", "slug": "test"}
+            runtime_map = root / ".multica/runtime-map.local.json"
+            plan = build_plan(
+                root, cli, workspace, "quality", runtime_map, False, False
+            )
+            types = [item["type"] for item in plan["actions"]]
+            self.assertFalse(plan_has_blockers(plan))
+            self.assertIn("CREATE_AGENT", types)
+            self.assertIn("CREATE_PROJECT", types)
+            self.assertIn("CREATE_SQUAD", types)
+            self.assertNotIn("CREATE_AUTOPILOT", types)
+            plan_path = save_plan(root, plan)
+            journal = apply_plan(root, cli, plan_path, plan["plan_digest"][:12])
+            self.assertTrue(journal.get("finished_at"))
+            self.assertEqual(len(cli.agents), 7)
+            self.assertEqual(len(cli.projects), 1)
+            self.assertEqual(len(cli.squads), 1)
+            self.assertEqual(len(cli.skills), 2)
+            self.assertIsNotNone(load_deployment_record(root, cli.workspace_id))
+            second = build_plan(
+                root, cli, workspace, "quality", runtime_map, False, False, False
+            )
+            self.assertFalse(plan_has_blockers(second))
+            self.assertEqual(mutation_actions(second), [])
 
-    def test_phase1_repository_rejects_future_maintenance_components(self):
-        with committed_temp_repo() as temp_root:
-            path = temp_root / "workflow.json"
-            manifest = json.loads(path.read_text(encoding="utf-8"))
-            future_agent = {
-                **manifest["agents"][0],
-                "key": "workflow-maintainer",
-                "name": "工作流维护员",
+    def test_apply_rejects_changed_multica_state(self):
+        with committed_temp_repo() as root:
+            cli = FakeCLI()
+            workspace = {"id": cli.workspace_id, "name": "Test", "slug": "test"}
+            runtime_map = root / ".multica/runtime-map.local.json"
+            plan = build_plan(
+                root, cli, workspace, "quality", runtime_map, False, False
+            )
+            path = save_plan(root, plan)
+            cli.runtimes.append(
+                {"id": "new-runtime", "provider": "other", "status": "online"}
+            )
+            with self.assertRaisesRegex(WorkflowError, "Multica state changed"):
+                apply_plan(root, cli, path, plan["plan_digest"][:12])
+
+    def test_unmarked_same_name_agent_requires_adoption(self):
+        with committed_temp_repo() as root:
+            cli = FakeCLI()
+            cli.agents.append(
+                {
+                    "id": "foreign",
+                    "name": "开发队长",
+                    "description": "",
+                    "instructions": "unmanaged",
+                    "runtime_id": "runtime-codex",
+                    "model": "gpt-5.5",
+                    "thinking_level": "xhigh",
+                    "max_concurrent_tasks": 1,
+                    "permission_mode": "public_to",
+                    "invocation_targets": [
+                        {"target_type": "workspace", "target_id": cli.workspace_id}
+                    ],
+                }
+            )
+            cli.agent_skills["foreign"] = []
+            plan = build_plan(
+                root,
+                cli,
+                {"id": cli.workspace_id, "name": "Test", "slug": "test"},
+                "quality",
+                root / ".multica/runtime-map.local.json",
+                False,
+                False,
+                False,
+            )
+            self.assertTrue(plan_has_blockers(plan))
+            self.assertTrue(
+                any("requires --adopt" in item.get("reason", "") for item in plan["actions"])
+            )
+
+    def test_apply_retires_managed_objects_removed_from_desired_state(self):
+        with committed_temp_repo() as root:
+            cli = FakeCLI()
+            workspace = {"id": cli.workspace_id, "name": "Test", "slug": "test"}
+            runtime_map = root / ".multica/runtime-map.local.json"
+            initial = build_plan(
+                root, cli, workspace, "quality", runtime_map, False, False
+            )
+            apply_plan(root, cli, save_plan(root, initial), initial["plan_digest"][:12])
+
+            retired_skill = {
+                "id": "skill-retired",
+                "name": "multica-workflow-observer",
             }
-            manifest["agents"].append(future_agent)
-            write_json(path, manifest)
-            with self.assertRaisesRegex(
-                WorkflowError, "Phase 1 must not deploy future maintenance Agents"
-            ):
-                validate_repository(temp_root, "quality")
+            cli.skills.append(retired_skill)
+            cli.skill_details["skill-retired"] = {
+                **retired_skill,
+                "metadata": {
+                    "managed_by": "multica-dev-workflow",
+                    "workflow_id": "development-delivery",
+                    "package_hash": "old",
+                },
+            }
+            retired_agent = {
+                "id": "agent-retired",
+                "name": "工作流观察员",
+                "description": "",
+                "instructions": render_marker(
+                    "development-delivery", "agent.workflow-observer", "old", "old\n"
+                ),
+                "runtime_id": "runtime-codex",
+                "model": "gpt-5.5",
+                "thinking_level": "",
+                "max_concurrent_tasks": 1,
+                "permission_mode": "private",
+                "invocation_targets": [],
+            }
+            cli.agents.append(retired_agent)
+            cli.agent_skills["agent-retired"] = [
+                cli.skill_details["skill-retired"]
+            ]
+            squad_id = cli.squads[0]["id"]
+            cli.members[squad_id].append(
+                {
+                    "member_id": "agent-retired",
+                    "member_type": "agent",
+                    "role": "工作流观察员",
+                }
+            )
+            leader_id = next(item["id"] for item in cli.agents if item["name"] == "开发队长")
+            cli.agent_skills[leader_id].append(cli.skill_details["skill-retired"])
+            cli.autopilots.append(
+                {
+                    "id": "autopilot-retired",
+                    "title": "旧巡检",
+                    "description": render_marker(
+                        "development-delivery",
+                        "autopilot.workflow-health-audit",
+                        "old",
+                        "old\n",
+                    ),
+                    "agent_id": "agent-retired",
+                    "project_id": "project-1",
+                    "status": "active",
+                }
+            )
+            retired_project = {
+                "id": "project-retired",
+                "title": "旧工作流运维",
+                "description": render_marker(
+                    "development-delivery",
+                    "project.workflow-operations",
+                    "old",
+                    "old\n",
+                ),
+                "lead_id": "agent-retired",
+                "status": "in_progress",
+                "icon": "",
+            }
+            cli.projects.append(retired_project)
 
-    def test_redaction_handles_nested_secret_objects(self):
-        value = {"token": "secret", "mcp_config": {"servers": []}, "nested": [{"password": "p"}]}
-        result = redact(value)
-        self.assertEqual(result["token"], "<redacted>")
-        self.assertEqual(result["mcp_config"], "<redacted>")
-        self.assertEqual(result["nested"][0]["password"], "<redacted>")
+            plan = build_plan(
+                root, cli, workspace, "quality", runtime_map, False, False
+            )
+            action_types = {item["type"] for item in plan["actions"]}
+            self.assertIn("DELETE_RETIRED_SKILL", action_types)
+            self.assertIn("ARCHIVE_RETIRED_AGENT", action_types)
+            self.assertIn("DELETE_RETIRED_AUTOPILOT", action_types)
+            self.assertIn("DETACH_RETIRED_SKILLS", action_types)
+            self.assertIn("REMOVE_RETIRED_MEMBER", action_types)
+            self.assertIn("REASSIGN_RETIRED_PROJECT_LEAD", action_types)
+            apply_plan(root, cli, save_plan(root, plan), plan["plan_digest"][:12])
+            self.assertFalse(cli.autopilots)
+            self.assertNotIn(retired_skill, cli.skills)
+            self.assertIn(retired_agent, cli.archived_agents)
+            self.assertIn(retired_project, cli.projects)
+            self.assertEqual(retired_project["lead_id"], leader_id)
+            self.assertFalse(
+                any(
+                    item["member_id"] == "agent-retired"
+                    for item in cli.members[squad_id]
+                )
+            )
+            remove_index = next(
+                index
+                for index, call in enumerate(cli.calls)
+                if call[:3] == ("squad", "member", "remove")
+                and flag(call, "--member-id") == "agent-retired"
+            )
+            archive_index = next(
+                index
+                for index, call in enumerate(cli.calls)
+                if call[:2] == ("agent", "archive")
+                and call[2] == "agent-retired"
+            )
+            self.assertLess(remove_index, archive_index)
+            autopilot_index = next(
+                index
+                for index, call in enumerate(cli.calls)
+                if call[:2] == ("autopilot", "delete")
+                and call[2] == "autopilot-retired"
+            )
+            self.assertLess(autopilot_index, archive_index)
+            project_index = next(
+                index
+                for index, call in enumerate(cli.calls)
+                if call[:2] == ("project", "update")
+                and call[2] == "project-retired"
+            )
+            self.assertLess(project_index, archive_index)
+            self.assertNotIn(
+                "skill-retired",
+                {
+                    str(item.get("id") or item.get("skill_id"))
+                    for item in cli.agent_skills[leader_id]
+                },
+            )
 
-    def test_install_skills_copy_mode(self):
+    def test_install_skills_copies_only_local_targets(self):
         with tempfile.TemporaryDirectory() as temp:
-            results = install_skills(ROOT, Path(temp), copy_mode=True, replace_existing=False)
+            results = install_skills(ROOT, Path(temp), True, False)
             self.assertEqual(
                 {item["skill"] for item in results},
                 {
                     "multica-requirement-intake",
                     "multica-workflow-manager",
-                    "multica-workflow-observer",
+                    "multica-workflow-incidents",
                     "multica-workflow-console",
                 },
             )
-            self.assertTrue((Path(temp) / "multica-workflow-manager/SKILL.md").is_file())
+            self.assertFalse(
+                any(Path(temp).rglob("__pycache__"))
+            )
 
-    def test_draft_plan_cannot_be_applied(self):
-        plan = {
-            "schema_version": 1,
-            "draft": True,
-            "actions": [],
-        }
-        plan["plan_digest"] = sha256_value(plan)
+    def test_install_skills_removes_only_owned_retired_skills(self):
         with tempfile.TemporaryDirectory() as temp:
-            path = Path(temp) / "plan.json"
-            write_json(path, plan)
-            with self.assertRaisesRegex(WorkflowError, "draft plans"):
-                apply_plan(ROOT, FakeCLI(), path, plan["plan_digest"][:12])
-
-    def test_empty_workspace_apply_reaches_no_change(self):
-        with committed_temp_repo() as temp_root:
-            cli = MutatingCLI()
-            workspace = {"id": cli.workspace_id, "name": "Test", "slug": "test"}
-            runtime_map = temp_root / ".multica/runtime-map.local.json"
-            plan = build_plan(temp_root, cli, workspace, "quality", runtime_map, False, False)
-            self.assertFalse(plan["draft"])
-            self.assertFalse(plan_has_blockers(plan))
-            plan_path = temp_root / ".multica/plans/plan.json"
-            write_json(plan_path, plan)
-            with patch.dict(
-                "workflow_lib.os.environ",
-                {"MULTICA_AGENT_ID": "agent-original"},
-                clear=False,
-            ):
-                journal = apply_plan(
-                    temp_root, cli, plan_path, plan["plan_digest"][:12]
-                )
-            deployment = load_deployment_record(temp_root, cli.workspace_id)
-            self.assertIsNotNone(deployment)
-            self.assertEqual(deployment["source_commit"], plan["source_commit"])
-            self.assertEqual(deployment["plan_digest"], plan["plan_digest"])
-            self.assertEqual(deployment["workspace"]["id"], cli.workspace_id)
-            self.assertTrue(Path(journal["deployment_record"]).is_file())
-            self.assertEqual(
-                Path(journal["deployment_record"]).name,
-                f"{plan['plan_digest']}.json",
+            target = Path(temp)
+            retired = target / "multica-workflow-observer"
+            retired.mkdir()
+            (retired / "SKILL.md").write_text(
+                "---\n"
+                "name: multica-workflow-observer\n"
+                "metadata:\n"
+                "  managed_by: multica-dev-workflow\n"
+                "  workflow_id: development-delivery\n"
+                "---\n",
+                encoding="utf-8",
             )
-            self.assertEqual(
-                json.loads(
-                    Path(journal["deployment_record"]).read_text(encoding="utf-8")
-                ),
-                deployment,
-            )
-            newer_deployment = {
-                **deployment,
-                "deployed_at": "9999-12-31T23:59:59Z",
-                "plan_digest": "f" * 64,
-            }
-            write_json(
-                deployment_record_path(temp_root, cli.workspace_id),
-                newer_deployment,
-            )
-            with patch.dict(
-                "workflow_lib.os.environ",
-                {"MULTICA_AGENT_ID": "agent-recovery"},
-                clear=False,
-            ):
-                recovered = apply_plan(
-                    temp_root, cli, plan_path, plan["plan_digest"][:12]
-                )
-            self.assertEqual(
-                recovered["deployment_record"], journal["deployment_record"]
-            )
-            self.assertEqual(
-                json.loads(
-                    Path(recovered["deployment_record"]).read_text(encoding="utf-8")
-                )["applied_actor"],
-                "agent-original",
-            )
-            self.assertEqual(
-                load_deployment_record(temp_root, cli.workspace_id),
-                newer_deployment,
-            )
-
-            verification = build_plan(temp_root, cli, workspace, "quality", runtime_map, False, False, write_archives=False)
-            remaining = [
-                action
-                for action in verification["actions"]
-                if action["type"] not in {"NO_CHANGE", "WARNING"}
-            ]
-            self.assertEqual(remaining, [])
-
-    def test_completed_legacy_journal_recovers_stable_unknown_actor(self):
-        with committed_temp_repo() as temp_root:
-            cli = MutatingCLI()
-            workspace = {"id": cli.workspace_id, "name": "Test", "slug": "test"}
-            runtime_map = temp_root / ".multica/runtime-map.local.json"
-            plan = build_plan(
-                temp_root, cli, workspace, "quality", runtime_map, False, False
-            )
-            plan_path = temp_root / ".multica/plans/legacy.json"
-            write_json(plan_path, plan)
-            journal = apply_plan(
-                temp_root, cli, plan_path, plan["plan_digest"][:12]
-            )
-            journal_path = (
-                temp_root
-                / f".multica/journals/{plan['plan_digest'][:12]}.json"
-            )
-            legacy_journal = json.loads(journal_path.read_text(encoding="utf-8"))
-            legacy_journal.pop("applied_actor", None)
-            legacy_journal.pop("deployment_record", None)
-            write_json(journal_path, legacy_journal)
-
-            recovered_from_record = apply_plan(
-                temp_root, cli, plan_path, plan["plan_digest"][:12]
-            )
-            self.assertEqual(recovered_from_record["applied_actor"], "human_host")
-
-            legacy_journal = json.loads(journal_path.read_text(encoding="utf-8"))
-            legacy_journal.pop("applied_actor", None)
-            legacy_journal.pop("deployment_record", None)
-            write_json(journal_path, legacy_journal)
-            Path(journal["deployment_record"]).unlink()
-            deployment_record_path(temp_root, cli.workspace_id).unlink()
-
-            recovered = apply_plan(
-                temp_root, cli, plan_path, plan["plan_digest"][:12]
-            )
-            recovered_record = json.loads(
-                Path(recovered["deployment_record"]).read_text(encoding="utf-8")
-            )
-            self.assertEqual(recovered["applied_actor"], "legacy_unknown")
-            self.assertEqual(recovered_record["applied_actor"], "legacy_unknown")
-
-            replayed = apply_plan(
-                temp_root, cli, plan_path, plan["plan_digest"][:12]
-            )
-            self.assertEqual(replayed["applied_actor"], "legacy_unknown")
-
-    def test_real_autopilot_response_is_idempotent_and_uses_supported_commands(self):
-        with committed_temp_repo() as temp_root:
-            cli = MutatingCLI()
-            cli.real_autopilot_responses = True
-            workspace = {"id": cli.workspace_id, "name": "Test", "slug": "test"}
-            runtime_map = temp_root / ".multica/runtime-map.local.json"
-            plan = build_plan(
-                temp_root, cli, workspace, "quality", runtime_map, False, False
-            )
-            plan_path = temp_root / ".multica/plans/real.json"
-            write_json(plan_path, plan)
-            apply_plan(temp_root, cli, plan_path, plan["plan_digest"][:12])
-
-            autopilot_commands = [
-                command
-                for command in cli.commands
-                if command[:2] in {
-                    ("autopilot", "create"),
-                    ("autopilot", "update"),
-                }
-            ]
-            self.assertEqual(
-                len([item for item in autopilot_commands if item[:2] == ("autopilot", "create")]),
-                2,
-            )
-            updates = [
-                item
-                for item in autopilot_commands
-                if item[:2] == ("autopilot", "update")
-            ]
-            manifest = json.loads(
-                (temp_root / "workflow.json").read_text(encoding="utf-8")
-            )
-            expected_status_updates = sum(
-                item["status"] != "active" for item in manifest["autopilots"]
-            )
-            self.assertEqual(len(updates), expected_status_updates)
-            for command in autopilot_commands:
-                self.assertNotIn("--priority", command)
-                self.assertFalse(
-                    "--clear-subscribers" in command and "--subscriber" in command
-                )
-
-            verification = build_plan(
-                temp_root,
-                cli,
-                workspace,
-                "quality",
-                runtime_map,
-                False,
-                False,
-                write_archives=False,
-            )
-            self.assertEqual(
-                [
-                    item
-                    for item in verification["actions"]
-                    if item["type"] not in {"NO_CHANGE", "WARNING"}
-                ],
-                [],
-            )
-
-    def test_real_autopilot_cron_expression_trigger_is_idempotent(self):
-        with committed_temp_repo() as temp_root:
-            cli = MutatingCLI()
-            cli.real_autopilot_responses = True
-            workspace = {"id": cli.workspace_id, "name": "Test", "slug": "test"}
-            runtime_map = temp_root / ".multica/runtime-map.local.json"
-            initial = build_plan(
-                temp_root, cli, workspace, "quality", runtime_map, False, False
-            )
-            initial_path = temp_root / ".multica/plans/initial.json"
-            write_json(initial_path, initial)
-            apply_plan(temp_root, cli, initial_path, initial["plan_digest"][:12])
-
-            trigger = cli.autopilots[0]["triggers"][0]
-            trigger["cron_expression"] = trigger.pop("cron")
-
-            verification = build_plan(
-                temp_root,
-                cli,
-                workspace,
-                "quality",
-                runtime_map,
-                False,
-                False,
-                write_archives=False,
-            )
-            self.assertEqual(
-                [
-                    item
-                    for item in verification["actions"]
-                    if item["type"] not in {"NO_CHANGE", "WARNING"}
-                ],
-                [],
-            )
-
-    def test_paused_autopilot_create_uses_one_minimal_status_update(self):
-        with committed_temp_repo() as temp_root:
-            cli = MutatingCLI()
-            cli.real_autopilot_responses = True
-            workspace = {"id": cli.workspace_id, "name": "Test", "slug": "test"}
-            runtime_map = temp_root / ".multica/runtime-map.local.json"
-            plan = build_plan(
-                temp_root,
-                cli,
-                workspace,
-                "quality",
-                runtime_map,
-                False,
-                False,
-                disable_operations=True,
-            )
-            plan_path = temp_root / ".multica/plans/paused.json"
-            write_json(plan_path, plan)
-            apply_plan(temp_root, cli, plan_path, plan["plan_digest"][:12])
-            updates = [
-                command
-                for command in cli.commands
-                if command[:2] == ("autopilot", "update")
-            ]
-            self.assertEqual(len(updates), 2)
-            self.assertTrue(
-                all(
-                    update[3:] == ("--status", "paused", "--output", "json")
-                    for update in updates
-                )
-            )
-
-    def test_non_member_autopilot_subscriber_remains_visible_as_drift(self):
-        with committed_temp_repo() as temp_root:
-            cli = MutatingCLI()
-            cli.real_autopilot_responses = True
-            workspace = {"id": cli.workspace_id, "name": "Test", "slug": "test"}
-            runtime_map = temp_root / ".multica/runtime-map.local.json"
-            initial = build_plan(
-                temp_root, cli, workspace, "quality", runtime_map, False, False
-            )
-            initial_path = temp_root / ".multica/plans/initial.json"
-            write_json(initial_path, initial)
-            apply_plan(temp_root, cli, initial_path, initial["plan_digest"][:12])
-            cli.autopilots[0]["subscribers"] = [
-                {"id": "user-test", "user_type": "agent"}
-            ]
-            drift = build_plan(
-                temp_root,
-                cli,
-                workspace,
-                "quality",
-                runtime_map,
-                False,
-                False,
-                write_archives=False,
-            )
-            self.assertTrue(
-                any(
-                    item["type"] == "UPDATE_AUTOPILOT"
-                    for item in drift["actions"]
-                )
-            )
-
-    def test_autopilot_update_uses_exactly_one_subscriber_replacement_mode(self):
-        desired = {
-            "title": "Audit",
-            "description": "Prompt",
-            "mode": "run_only",
-            "status": "active",
-            "subscriber_ids": ["human-1", "human-2"],
-        }
-        replacement = _autopilot_update_args(
-            "autopilot-1", desired, "agent-1", "project-1"
-        )
-        self.assertNotIn("--clear-subscribers", replacement)
-        self.assertEqual(replacement.count("--subscriber"), 2)
-        self.assertNotIn("--priority", replacement)
-
-        desired["subscriber_ids"] = []
-        cleared = _autopilot_update_args(
-            "autopilot-1", desired, "agent-1", "project-1"
-        )
-        self.assertIn("--clear-subscribers", cleared)
-        self.assertNotIn("--subscriber", cleared)
-
-    def test_exact_rc1_partial_state_recovers_idempotently_with_real_cli_shape(self):
-        with committed_temp_repo() as temp_root:
-            cli = MutatingCLI()
-            cli.real_autopilot_responses = True
-            workspace = {"id": cli.workspace_id, "name": "Test", "slug": "test"}
-            runtime_map = temp_root / ".multica/runtime-map.local.json"
-            initial = build_plan(
-                temp_root, cli, workspace, "quality", runtime_map, False, False
-            )
-            initial_path = temp_root / ".multica/plans/initial.json"
-            write_json(initial_path, initial)
-            apply_plan(temp_root, cli, initial_path, initial["plan_digest"][:12])
-
-            control_keys = {
-                "agent.workflow-observer",
-            }
-            retained_agents = []
-            for agent in cli.agents:
-                object_key = (parse_marker(agent["instructions"]) or {}).get("object_key")
-                if object_key in control_keys:
-                    retained_agents.append(agent)
-                else:
-                    cli.agent_skills.pop(agent["id"], None)
-            cli.agents = retained_agents
-            cli.squads = []
-            cli.members = {}
-            self.assertEqual(len(cli.skills), 2)
-            for detail in cli.skill_details.values():
-                detail["content"] = re.sub(
-                    r"(?m)^\s*package_hash:\s*\S+\s*$",
-                    "  package_hash: rc1-stale",
-                    detail["content"],
-                )
-            cli.autopilots[0]["triggers"] = []
-            cli.autopilots[0]["description"] = re.sub(
-                r"(?m)^spec_hash=.*$", "spec_hash=rc1-stale", cli.autopilots[0]["description"]
-            )
-
-            cli.commands = []
-            recovery = build_plan(
-                temp_root,
-                cli,
-                workspace,
-                "quality",
-                runtime_map,
-                False,
-                False,
-                write_archives=False,
-            )
-            disallowed = {"BLOCKED", "ADOPT_AGENT", "ADOPT_SKILL", "ADOPT_PROJECT", "ADOPT_AUTOPILOT"}
-            self.assertTrue(disallowed.isdisjoint({item["type"] for item in recovery["actions"]}))
-            self.assertEqual(
-                len([item for item in recovery["actions"] if item["type"] == "UPDATE_SKILL"]),
-                2,
-            )
-            self.assertEqual(
-                len([item for item in recovery["actions"] if item["type"] == "CREATE_AGENT"]),
-                7,
-            )
-            self.assertEqual(
-                len([item for item in recovery["actions"] if item["type"] == "CREATE_SQUAD"]),
-                1,
-            )
-            self.assertEqual(
-                len([item for item in recovery["actions"] if item["type"] == "ADD_AUTOPILOT_TRIGGER"]),
-                1,
-            )
-            self.assertEqual(
-                len([item for item in recovery["actions"] if item["type"] == "UPDATE_AUTOPILOT"]),
-                1,
-            )
-
-            recovery_path = temp_root / ".multica/plans/recovery.json"
-            write_json(recovery_path, recovery)
-            apply_plan(temp_root, cli, recovery_path, recovery["plan_digest"][:12])
-            for command in cli.commands:
-                if command[:2] not in {
-                    ("autopilot", "create"),
-                    ("autopilot", "update"),
-                }:
-                    continue
-                self.assertNotIn("--priority", command)
-                self.assertFalse(
-                    "--clear-subscribers" in command and "--subscriber" in command
-                )
-
-            verification = build_plan(
-                temp_root,
-                cli,
-                workspace,
-                "quality",
-                runtime_map,
-                False,
-                False,
-                write_archives=False,
-            )
-            self.assertEqual(
-                [
-                    item
-                    for item in verification["actions"]
-                    if item["type"] not in {"NO_CHANGE", "WARNING"}
-                ],
-                [],
-            )
-
-    def test_disable_operations_pauses_autopilot_and_retains_reporters(self):
-        with committed_temp_repo() as temp_root:
-            cli = MutatingCLI()
-            workspace = {"id": cli.workspace_id, "name": "Test", "slug": "test"}
-            runtime_map = temp_root / ".multica/runtime-map.local.json"
-            initial = build_plan(temp_root, cli, workspace, "quality", runtime_map, False, False)
-            initial_path = temp_root / ".multica/plans/initial.json"
-            write_json(initial_path, initial)
-            apply_plan(temp_root, cli, initial_path, initial["plan_digest"][:12])
-
-            local_skill = {
-                "id": "skill-local-manager",
-                "name": "multica-workflow-manager",
-            }
-            cli.skills.append(local_skill)
-            cli.skill_details[local_skill["id"]] = {
-                **local_skill,
-                "content": "name: multica-workflow-manager\n",
-            }
-            leader = next(
-                item
-                for item in cli.agents
-                if parse_marker(item["instructions"])["object_key"] == "agent.leader"
-            )
-            cli.agent_skills[leader["id"]].append(cli.skill_details[local_skill["id"]])
-
-            disabled = build_plan(
-                temp_root,
-                cli,
-                workspace,
-                "quality",
-                runtime_map,
-                False,
-                False,
-                disable_operations=True,
-                write_archives=False,
-            )
-            types = [item["type"] for item in disabled["actions"]]
-            manifest = json.loads((temp_root / "workflow.json").read_text(encoding="utf-8"))
-            self.assertEqual(types.count("DETACH_SKILL"), 0)
-            self.assertEqual(
-                types.count("UPDATE_AUTOPILOT"), len(manifest["autopilots"])
-            )
-            disabled_path = temp_root / ".multica/plans/disabled.json"
-            write_json(disabled_path, disabled)
-            apply_plan(temp_root, cli, disabled_path, disabled["plan_digest"][:12])
-
-            observer_skill_id = next(
-                item["id"] for item in cli.skills if item["name"] == "multica-workflow-observer"
-            )
-            for agent_key in manifest["operations"]["reporter_agents"]:
-                agent = next(
-                    item
-                    for item in cli.agents
-                    if parse_marker(item["instructions"])["object_key"] == f"agent.{agent_key}"
-                )
-                assigned_ids = {item["id"] for item in cli.agent_skills[agent["id"]]}
-                self.assertIn(observer_skill_id, assigned_ids, agent_key)
-            observer_agent = next(
-                item
-                for item in cli.agents
-                if parse_marker(item["instructions"])["object_key"] == "agent.workflow-observer"
-            )
+            results = install_skills(ROOT, target, True, False)
+            self.assertFalse(retired.exists())
             self.assertIn(
-                observer_skill_id,
-                {item["id"] for item in cli.agent_skills[observer_agent["id"]]},
-            )
-            self.assertTrue(
-                all(item["status"] == "paused" for item in cli.autopilots)
-            )
-            self.assertIn(
-                local_skill["id"],
-                {item["id"] for item in cli.agent_skills[leader["id"]]},
-            )
-
-    def test_disable_operations_blocks_active_v3_without_explicit_degraded_approval(self):
-        with committed_temp_repo() as temp_root:
-            cli = MutatingCLI()
-            cli.issues = [
                 {
-                    "id": "req-1",
-                    "identifier": "T-100",
-                    "status": "in_progress",
-                    "parent_issue_id": None,
-                    "metadata": {
-                        "workflow_id": "development-delivery",
-                        "protocol_revision": "v3",
-                    },
-                }
-            ]
-            workspace = {"id": cli.workspace_id, "name": "Test", "slug": "test"}
-            runtime_map = temp_root / ".multica/runtime-map.local.json"
-            blocked = build_plan(
-                temp_root,
-                cli,
-                workspace,
-                "quality",
-                runtime_map,
-                False,
-                False,
-                disable_operations=True,
-                write_archives=False,
-            )
-            self.assertTrue(
-                any(
-                    item["type"] == "BLOCKED" and item["key"] == "active-v3-rollback"
-                    for item in blocked["actions"]
-                )
-            )
-            degraded = build_plan(
-                temp_root,
-                cli,
-                workspace,
-                "quality",
-                runtime_map,
-                False,
-                False,
-                disable_operations=True,
-                allow_active_v3_degraded=True,
-                write_archives=False,
-            )
-            self.assertFalse(plan_has_blockers(degraded))
-            self.assertTrue(
-                any(
-                    item["type"] == "WARNING" and item["key"] == "active-v3-rollback"
-                    for item in degraded["actions"]
-                )
+                    "skill": "multica-workflow-observer",
+                    "mode": "retired-removed",
+                    "path": str(retired),
+                },
+                results,
             )
 
-    def test_reporter_skills_are_deferred_until_control_plane_exists(self):
-        with committed_temp_repo() as temp_root:
-            cli = MutatingCLI()
-            workspace = {"id": cli.workspace_id, "name": "Test", "slug": "test"}
-            runtime_map = temp_root / ".multica/runtime-map.local.json"
-            plan = build_plan(temp_root, cli, workspace, "quality", runtime_map, False, False)
-            plan_path = temp_root / ".multica/plans/plan.json"
-            write_json(plan_path, plan)
-            cli.fail_project_create = True
-            with self.assertRaisesRegex(WorkflowError, "injected project create failure"):
-                apply_plan(temp_root, cli, plan_path, plan["plan_digest"][:12])
-
-            manifest = json.loads((temp_root / "workflow.json").read_text(encoding="utf-8"))
-            reporter_object_keys = {
-                f"agent.{agent_key}" for agent_key in manifest["operations"]["reporter_agents"]
-            }
-            created_object_keys = {
-                parse_marker(item["instructions"])["object_key"] for item in cli.agents
-            }
-            self.assertTrue(reporter_object_keys.isdisjoint(created_object_keys))
-
-    def test_project_lead_name_ambiguity_blocks_during_planning(self):
-        with committed_temp_repo() as temp_root:
-            cli = MutatingCLI()
-            workspace = {"id": cli.workspace_id, "name": "Test", "slug": "test"}
-            runtime_map = temp_root / ".multica/runtime-map.local.json"
-            initial = build_plan(temp_root, cli, workspace, "quality", runtime_map, False, False)
-            initial_path = temp_root / ".multica/plans/initial.json"
-            write_json(initial_path, initial)
-            apply_plan(temp_root, cli, initial_path, initial["plan_digest"][:12])
-
-            lead = next(
-                item
-                for item in cli.agents
-                if parse_marker(item["instructions"])["object_key"] == "agent.workflow-observer"
-            )
-            duplicate = {**lead, "id": "agent-duplicate-lead", "instructions": "unmanaged"}
-            cli.agents.append(duplicate)
-            cli.agent_skills[duplicate["id"]] = []
-            plan = build_plan(
-                temp_root, cli, workspace, "quality", runtime_map, False, False, write_archives=False
-            )
-            blockers = [item for item in plan["actions"] if item["type"] == "BLOCKED"]
-            self.assertTrue(
-                any(
-                    item["key"] == "workflow-operations"
-                    and "project lead name is not unique" in item["reason"]
-                    for item in blockers
-                )
-            )
-
-    def test_repository_observer_commands_accept_json_output(self):
-        self.assertEqual(workflow_cli.parser().parse_args(["audit", "--output", "json"]).output, "json")
-        self.assertEqual(workflow_cli.parser().parse_args(["health", "--output", "json"]).output, "json")
-        self.assertEqual(
-            workflow_cli.parser()
-            .parse_args(["scan", "--mode", "incremental", "--output", "json"])
-            .output,
-            "json",
-        )
-        self.assertEqual(
-            workflow_cli.parser()
-            .parse_args(
-                [
-                    "record-maintenance-progress",
-                    "--incident",
-                    "WOR-1",
-                    "--stage",
-                    "in-development",
-                    "--implementation-issue",
-                    "T-1",
-                    "--output",
-                    "json",
-                ]
-            )
-            .output,
-            "json",
-        )
-
-    def test_repository_audit_forwards_read_only_mode_by_default(self):
-        args = workflow_cli.parser().parse_args(["audit", "--scope", "all"])
-        fake_cli = SimpleNamespace(binary="multica", profile="test")
-        completed = SimpleNamespace(stdout="{}", stderr="", returncode=0)
-        with (
-            patch.object(
-                workflow_cli,
-                "context",
-                return_value=(fake_cli, {"id": "workspace-test"}),
-            ),
-            patch.object(
-                workflow_cli, "run_process", return_value=completed
-            ) as run_process,
-            patch.object(workflow_cli, "write_console_safe"),
-        ):
-            self.assertEqual(workflow_cli.command_observer(args, ROOT), 0)
-        command = run_process.call_args.args[0]
-        self.assertIn("audit", command)
-        self.assertNotIn("--report", command)
-
-    def test_workflow_console_status_invokes_read_only_audit(self):
-        completed = SimpleNamespace(returncode=0)
-        with (
-            patch.dict(workflow_console.os.environ, {}, clear=True),
-            patch.object(workflow_console, "locate_repo", return_value=ROOT),
-            patch.object(
-                workflow_console.subprocess, "run", return_value=completed
-            ) as run_process,
-            patch.object(
-                workflow_console.sys,
-                "argv",
-                ["workflow_console.py", "status", "--workspace", "workspace-test"],
-            ),
-        ):
-            self.assertEqual(workflow_console.main(), 0)
-        command = run_process.call_args.args[0]
-        self.assertIn("audit", command)
-        self.assertNotIn("--report", command)
-        self.assertEqual(
-            workflow_cli.parser()
-            .parse_args(
-                [
-                    "bind-workflow-issue",
-                    "--issue",
-                    "T-1",
-                    "--object-type",
-                    "requirement",
-                    "--created-by-role",
-                    "leader",
-                    "--output",
-                    "json",
-                ]
-            )
-            .output,
-            "json",
-        )
-
-    def test_command_apply_reports_clean_immediate_verification(self):
-        with tempfile.TemporaryDirectory() as temp:
-            plan_path = Path(temp) / "plan.json"
-            plan_path.write_text(
-                json.dumps(
-                    {
-                        "profile": "test",
-                        "workspace": {"id": "workspace-test"},
-                        "deployment_profile": "quality",
-                        "runtime_map_path": "runtime-map.json",
-                        "disable_operations": False,
-                        "allow_active_v3_degraded": False,
-                    }
-                ),
+            foreign = target / "multica-workflow-maintainer"
+            foreign.mkdir()
+            (foreign / "SKILL.md").write_text(
+                "---\nname: multica-workflow-maintainer\n---\n",
                 encoding="utf-8",
             )
-            args = SimpleNamespace(
-                plan=str(plan_path),
-                approve="digest",
-                allow_agent_identity=False,
-                multica_bin=None,
-                profile=None,
-            )
-            fake_cli = SimpleNamespace(workspace_id="workspace-test")
-            clean = {"actions": [{"type": "NO_CHANGE", "key": "workflow"}]}
-            with (
-                patch.dict(workflow_cli.os.environ, {}, clear=True),
-                patch.object(workflow_cli, "discover_multica", return_value="multica"),
-                patch.object(workflow_cli, "resolve_profile", return_value="test"),
-                patch.object(workflow_cli, "MulticaCLI", return_value=fake_cli),
-                patch.object(workflow_cli, "resolve_workspace", return_value={"id": "workspace-test"}),
-                patch.object(workflow_cli, "apply_plan", return_value={"completed": []}),
-                patch.object(workflow_cli, "build_from_args", return_value=(clean, {}, fake_cli)) as verify,
-                patch("builtins.print") as output,
-            ):
-                self.assertEqual(workflow_cli.command_apply(args, ROOT), 0)
-            verify.assert_called_once()
-            output.assert_any_call("Apply and verify: OK")
+            with self.assertRaisesRegex(WorkflowError, "not owned"):
+                install_skills(ROOT, target, True, True)
+            self.assertTrue(foreign.exists())
 
-    def test_command_apply_rejects_residual_post_mutation_drift(self):
-        with tempfile.TemporaryDirectory() as temp:
-            plan_path = Path(temp) / "plan.json"
-            plan_path.write_text(
-                json.dumps(
-                    {
-                        "profile": "test",
-                        "workspace": {"id": "workspace-test"},
-                        "deployment_profile": "quality",
-                        "runtime_map_path": "runtime-map.json",
-                        "disable_operations": False,
-                        "allow_active_v3_degraded": False,
-                    }
-                ),
-                encoding="utf-8",
-            )
-            args = SimpleNamespace(
-                plan=str(plan_path),
-                approve="digest",
-                allow_agent_identity=False,
-                multica_bin=None,
-                profile=None,
-            )
-            fake_cli = SimpleNamespace(workspace_id="workspace-test")
-            drift = {
-                "actions": [
-                    {"type": "UPDATE_AUTOPILOT", "key": "workflow-health-audit"}
-                ]
-            }
-            with (
-                patch.dict(workflow_cli.os.environ, {}, clear=True),
-                patch.object(workflow_cli, "discover_multica", return_value="multica"),
-                patch.object(workflow_cli, "resolve_profile", return_value="test"),
-                patch.object(workflow_cli, "MulticaCLI", return_value=fake_cli),
-                patch.object(workflow_cli, "resolve_workspace", return_value={"id": "workspace-test"}),
-                patch.object(workflow_cli, "apply_plan", return_value={"completed": []}),
-                patch.object(workflow_cli, "build_from_args", return_value=(drift, {}, fake_cli)),
-                patch.object(workflow_cli, "print_plan"),
-                patch("builtins.print"),
-            ):
-                with self.assertRaisesRegex(
-                    WorkflowError, "verification still reports drift"
-                ):
-                    workflow_cli.command_apply(args, ROOT)
-
-    def test_repository_console_output_escapes_unencodable_characters(self):
-        class AsciiStream(io.StringIO):
-            encoding = "ascii"
-
-        stream = AsciiStream()
-        workflow_cli.write_console_safe("value=\ufffd", stream)
-        self.assertEqual(stream.getvalue(), "value=\\ufffd")
-
-    def test_unmarked_project_requires_adopt(self):
-        with committed_temp_repo() as temp_root:
-            cli = MutatingCLI()
+    def test_retirement_recovers_with_a_fresh_plan_after_partial_failure(self):
+        with committed_temp_repo() as root:
+            cli = FakeCLI()
             workspace = {"id": cli.workspace_id, "name": "Test", "slug": "test"}
-            runtime_map = temp_root / ".multica/runtime-map.local.json"
-            initial = build_plan(temp_root, cli, workspace, "quality", runtime_map, False, False)
-            initial_path = temp_root / ".multica/plans/initial.json"
-            write_json(initial_path, initial)
-            apply_plan(temp_root, cli, initial_path, initial["plan_digest"][:12])
-            cli.projects[0]["description"] = "unmarked\n"
-            plan = build_plan(temp_root, cli, workspace, "quality", runtime_map, False, False, write_archives=False)
-            blockers = [item for item in plan["actions"] if item["type"] == "BLOCKED"]
-            self.assertTrue(any("requires --adopt" in item["reason"] for item in blockers))
-
-    def test_unmarked_same_hash_skill_is_reimported_when_adopted(self):
-        with committed_temp_repo() as temp_root:
-            cli = MutatingCLI()
-            workspace = {"id": cli.workspace_id, "name": "Test", "slug": "test"}
-            runtime_map = temp_root / ".multica/runtime-map.local.json"
-            initial = build_plan(temp_root, cli, workspace, "quality", runtime_map, False, False)
-            initial_path = temp_root / ".multica/plans/initial.json"
-            write_json(initial_path, initial)
-            apply_plan(temp_root, cli, initial_path, initial["plan_digest"][:12])
-
-            skill = next(item for item in cli.skills if item["name"] == "multica-workflow-observer")
-            detail = cli.skill_details[skill["id"]]
-            detail["content"] = re.sub(
-                r"(?m)^\s*(managed_by|workflow_id):.*\r?\n?", "", detail["content"]
-            )
-
-            blocked = build_plan(
-                temp_root, cli, workspace, "quality", runtime_map, False, False, write_archives=False
-            )
-            self.assertTrue(
-                any(
-                    item["type"] == "BLOCKED" and item["key"] == "workflow-observer"
-                    for item in blocked["actions"]
-                )
-            )
-
-            adopted = build_plan(
-                temp_root, cli, workspace, "quality", runtime_map, True, False, write_archives=False
-            )
-            self.assertTrue(
-                any(
-                    item["type"] == "ADOPT_SKILL" and item["key"] == "workflow-observer"
-                    for item in adopted["actions"]
-                )
-            )
-            adopted_path = temp_root / ".multica/plans/adopted.json"
-            write_json(adopted_path, adopted)
-            apply_plan(temp_root, cli, adopted_path, adopted["plan_digest"][:12])
-            self.assertIn(
-                "managed_by: multica-dev-workflow",
-                cli.skill_details[skill["id"]]["content"],
-            )
-
-    def test_unrelated_autopilot_trigger_is_preserved(self):
-        with committed_temp_repo() as temp_root:
-            cli = MutatingCLI()
-            workspace = {"id": cli.workspace_id, "name": "Test", "slug": "test"}
-            runtime_map = temp_root / ".multica/runtime-map.local.json"
-            initial = build_plan(temp_root, cli, workspace, "quality", runtime_map, False, False)
-            initial_path = temp_root / ".multica/plans/initial.json"
-            write_json(initial_path, initial)
-            apply_plan(temp_root, cli, initial_path, initial["plan_digest"][:12])
-            cli.autopilots[0]["triggers"].append(
-                {"id": "trigger-extra", "kind": "schedule", "label": "user-trigger", "enabled": True, "cron": "30 * * * *", "timezone": "UTC"}
-            )
-            plan = build_plan(temp_root, cli, workspace, "quality", runtime_map, False, False, write_archives=False)
-            mutations = [item for item in plan["actions"] if item["type"] not in {"NO_CHANGE", "WARNING"}]
-            self.assertEqual(mutations, [])
-
-    def test_autopilot_summary_list_uses_get_details_for_plan_and_disable(self):
-        with committed_temp_repo() as temp_root:
-            cli = MutatingCLI()
-            workspace = {"id": cli.workspace_id, "name": "Test", "slug": "test"}
-            runtime_map = temp_root / ".multica/runtime-map.local.json"
-            initial = build_plan(temp_root, cli, workspace, "quality", runtime_map, False, False)
-            initial_path = temp_root / ".multica/plans/initial.json"
-            write_json(initial_path, initial)
-            apply_plan(temp_root, cli, initial_path, initial["plan_digest"][:12])
-
-            cli.autopilot_list_summaries = True
-            verification = build_plan(
-                temp_root, cli, workspace, "quality", runtime_map, False, False, write_archives=False
-            )
-            remaining = [
-                item
-                for item in verification["actions"]
-                if item["type"] not in {"NO_CHANGE", "WARNING"}
-            ]
-            self.assertEqual(remaining, [])
-
-            disabled = build_plan(
-                temp_root,
-                cli,
-                workspace,
-                "quality",
-                runtime_map,
-                False,
-                False,
-                disable_operations=True,
-                write_archives=False,
-            )
-            self.assertEqual(
-                sum(
-                    item["type"] == "UPDATE_AUTOPILOT"
-                    for item in disabled["actions"]
-                ),
-                2,
-            )
-
-    def test_changed_autopilot_trigger_without_id_blocks_planning(self):
-        with committed_temp_repo() as temp_root:
-            cli = MutatingCLI()
-            workspace = {"id": cli.workspace_id, "name": "Test", "slug": "test"}
-            runtime_map = temp_root / ".multica/runtime-map.local.json"
+            runtime_map = root / ".multica/runtime-map.local.json"
             initial = build_plan(
-                temp_root, cli, workspace, "quality", runtime_map, False, False
+                root, cli, workspace, "quality", runtime_map, False, False
             )
-            initial_path = temp_root / ".multica/plans/initial.json"
-            write_json(initial_path, initial)
-            apply_plan(temp_root, cli, initial_path, initial["plan_digest"][:12])
+            apply_plan(root, cli, save_plan(root, initial), initial["plan_digest"][:12])
 
-            trigger = cli.autopilots[0]["triggers"][0]
-            trigger.pop("id")
-            trigger["cron"] = "30 * * * *"
-            plan = build_plan(
-                temp_root,
-                cli,
-                workspace,
-                "quality",
-                runtime_map,
-                False,
-                False,
-                write_archives=False,
+            retired_agent = {
+                "id": "agent-retired-retry",
+                "name": "旧工作流观察员",
+                "description": "",
+                "instructions": render_marker(
+                    "development-delivery",
+                    "agent.workflow-observer-retry",
+                    "old",
+                    "old\n",
+                ),
+                "runtime_id": "runtime-codex",
+                "model": "gpt-5.5",
+                "thinking_level": "",
+                "max_concurrent_tasks": 1,
+                "permission_mode": "private",
+                "invocation_targets": [],
+            }
+            cli.agents.append(retired_agent)
+            cli.agent_skills[retired_agent["id"]] = []
+            squad_id = cli.squads[0]["id"]
+            cli.members[squad_id].append(
+                {
+                    "member_id": retired_agent["id"],
+                    "member_type": "agent",
+                    "role": "旧观察员",
+                }
             )
-            blocked = [
-                item
-                for item in plan["actions"]
-                if item["type"] == "BLOCKED"
-                and item["key"] == "workflow-health-audit.hourly"
-            ]
-            self.assertEqual(len(blocked), 1)
-            self.assertIn("omitted its trigger ID", blocked[0]["reason"])
+
+            plan = build_plan(
+                root, cli, workspace, "quality", runtime_map, False, False
+            )
+            cli.fail_archive_once = True
+            with self.assertRaisesRegex(RuntimeError, "simulated archive failure"):
+                apply_plan(
+                    root, cli, save_plan(root, plan), plan["plan_digest"][:12]
+                )
+            self.assertIn(retired_agent, cli.agents)
             self.assertFalse(
                 any(
-                    item["type"] == "UPDATE_AUTOPILOT_TRIGGER"
-                    for item in plan["actions"]
+                    item["member_id"] == retired_agent["id"]
+                    for item in cli.members[squad_id]
                 )
             )
 
-    def test_new_agent_inherits_unique_managed_binding_runtime(self):
-        with committed_temp_repo() as temp_root:
-            cli = MutatingCLI()
-            workspace = {"id": cli.workspace_id, "name": "Test", "slug": "test"}
-            runtime_map = temp_root / ".multica/runtime-map.local.json"
-            initial = build_plan(temp_root, cli, workspace, "quality", runtime_map, False, False)
-            initial_path = temp_root / ".multica/plans/initial.json"
-            write_json(initial_path, initial)
-            apply_plan(temp_root, cli, initial_path, initial["plan_digest"][:12])
-            observer_agent = next(item for item in cli.agents if parse_marker(item["instructions"])["object_key"] == "agent.workflow-observer")
-            cli.agents.remove(observer_agent)
-            cli.agent_skills.pop(observer_agent["id"], None)
-            cli.runtimes.append({"id": "runtime-opencode-extra", "provider": "opencode", "status": "online"})
-            plan = build_plan(temp_root, cli, workspace, "quality", runtime_map, False, False, write_archives=False)
-            self.assertFalse(plan_has_blockers(plan))
-            create = next(item for item in plan["actions"] if item["type"] == "CREATE_AGENT" and item["key"] == "workflow-observer")
-            self.assertEqual(create["desired"]["runtime_id"], "runtime-opencode")
-
-    def test_secure_bindings_pin_the_dedicated_runtime(self):
-        with committed_temp_repo() as temp_root:
-            cli = MutatingCLI()
-            workspace = {"id": cli.workspace_id, "name": "Test", "slug": "test"}
-            runtime_map = temp_root / ".multica/runtime-map.local.json"
-            plan = build_plan(
-                temp_root, cli, workspace, "quality", runtime_map, False, False
+            retry = build_plan(
+                root, cli, workspace, "quality", runtime_map, False, False
             )
-            plan_path = temp_root / ".multica/plans/initial.json"
-            write_json(plan_path, plan)
-            apply_plan(temp_root, cli, plan_path, plan["plan_digest"][:12])
-            output = temp_root / "agent-bindings.local.json"
-            args = SimpleNamespace(
-                output=str(output),
-                deployment_profile="quality",
+            retry_types = {item["type"] for item in retry["actions"]}
+            self.assertIn("ARCHIVE_RETIRED_AGENT", retry_types)
+            self.assertNotIn("REMOVE_RETIRED_MEMBER", retry_types)
+            apply_plan(
+                root, cli, save_plan(root, retry), retry["plan_digest"][:12]
             )
-            with patch.object(workflow_cli, "context", return_value=(cli, workspace)):
-                with self.assertRaisesRegex(
-                    WorkflowError, "secure runtime is only planned"
-                ):
-                    workflow_cli.command_secure_bindings(args, temp_root)
+            self.assertIn(retired_agent, cli.archived_agents)
 
-            bootstrap_output = temp_root / "agent-bindings.bootstrap.local.json"
-            bootstrap_id = "11111111-1111-1111-1111-111111111111"
-            args.output = str(bootstrap_output)
-            args.bootstrap_runtime_id = bootstrap_id
-            with patch.object(workflow_cli, "context", return_value=(cli, workspace)):
-                self.assertEqual(
-                    workflow_cli.command_secure_bindings(args, temp_root), 0
-                )
-            bootstrap = json.loads(bootstrap_output.read_text(encoding="utf-8"))
-            self.assertIs(bootstrap["bootstrap"], True)
-            self.assertEqual(bootstrap["runtime_id"], bootstrap_id)
-            self.assertEqual(bootstrap["agents"], {})
+    def test_console_runs_doctor_then_drift(self):
+        calls = []
 
-    def test_actual_v1_reconciler_ignores_paused_v11_control_plane(self):
-        with committed_temp_repo() as temp_root, tempfile.TemporaryDirectory() as old_temp:
-            cli = MutatingCLI()
-            workspace = {"id": cli.workspace_id, "name": "Test", "slug": "test"}
-            runtime_map = temp_root / ".multica/runtime-map.local.json"
-            initial = build_plan(temp_root, cli, workspace, "quality", runtime_map, False, False)
-            initial_path = temp_root / ".multica/plans/initial.json"
-            write_json(initial_path, initial)
-            apply_plan(temp_root, cli, initial_path, initial["plan_digest"][:12])
+        def fake_run(command, cwd=None):
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
 
-            disabled = build_plan(
-                temp_root,
-                cli,
-                workspace,
-                "quality",
-                runtime_map,
-                False,
-                False,
-                disable_operations=True,
-            )
-            disabled_path = temp_root / ".multica/plans/disabled.json"
-            write_json(disabled_path, disabled)
-            apply_plan(temp_root, cli, disabled_path, disabled["plan_digest"][:12])
-            self.assertEqual(cli.autopilots[0]["status"], "paused")
+        with (
+            patch.object(sys, "argv", ["workflow_console.py", "status", "--repo", str(ROOT)]),
+            patch.dict("os.environ", {}, clear=True),
+            patch.object(workflow_console.subprocess, "run", side_effect=fake_run),
+        ):
+            self.assertEqual(workflow_console.main(), 0)
+        self.assertIn("doctor", calls[0])
+        self.assertIn("drift", calls[1])
 
-            archive = Path(old_temp) / "v1.zip"
-            result = subprocess.run(
-                ["git", "archive", "--format=zip", "--output", str(archive), "v1.0.0"],
-                cwd=ROOT,
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode != 0:
-                self.skipTest("v1.0.0 tag unavailable in this checkout")
-            old_root = Path(old_temp) / "v1"
-            old_root.mkdir()
-            with zipfile.ZipFile(archive) as source:
-                source.extractall(old_root)
-            subprocess.run(["git", "init"], cwd=old_root, check=True, capture_output=True)
-            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=old_root, check=True)
-            subprocess.run(["git", "config", "user.name", "Test"], cwd=old_root, check=True)
-            subprocess.run(["git", "add", "."], cwd=old_root, check=True)
-            subprocess.run(["git", "commit", "-m", "v1"], cwd=old_root, check=True, capture_output=True)
+    def test_console_returns_blocked_for_host_precondition_failures(self):
+        with (
+            patch.object(
+                sys,
+                "argv",
+                ["workflow_console.py", "status", "--repo", str(ROOT / "missing")],
+            ),
+            patch.dict("os.environ", {}, clear=True),
+        ):
+            self.assertEqual(workflow_console.main(), 2)
 
-            spec = importlib.util.spec_from_file_location("workflow_lib_v1", old_root / "scripts/workflow_lib.py")
-            old_lib = importlib.util.module_from_spec(spec)
-            sys.modules[spec.name] = old_lib
-            spec.loader.exec_module(old_lib)
-            old_runtime_map = old_root / ".multica/runtime-map.local.json"
-            rollback = old_lib.build_plan(old_root, cli, workspace, "quality", old_runtime_map, False, False)
-            self.assertFalse(old_lib.plan_has_blockers(rollback))
-            rollback_path = old_root / ".multica/plans/rollback.json"
-            old_lib.write_json(rollback_path, rollback)
-            old_lib.apply_plan(old_root, cli, rollback_path, rollback["plan_digest"][:12])
-            verification = old_lib.build_plan(
-                old_root, cli, workspace, "quality", old_runtime_map, False, False, write_archives=False
-            )
-            remaining = [
-                item for item in verification["actions"] if item["type"] not in {"NO_CHANGE", "WARNING"}
-            ]
-            self.assertEqual(remaining, [])
-            self.assertEqual(len(cli.projects), 1)
-            self.assertEqual(len(cli.autopilots), 2)
-            self.assertTrue(
-                all(item["status"] == "paused" for item in cli.autopilots)
-            )
+        with (
+            patch.object(sys, "argv", ["workflow_console.py", "status"]),
+            patch.dict("os.environ", {"MULTICA_AGENT_ID": "agent-1"}, clear=True),
+        ):
+            self.assertEqual(workflow_console.main(), 2)
 
 
 if __name__ == "__main__":

@@ -3,7 +3,7 @@
 ## Development Source / Incident
 
 - Plan revision:
-- Requirement or Maintenance Case:
+- Requirement:
 - Incident, if applicable:
 - Protocol/version impact:
 
@@ -13,6 +13,6 @@
 - [ ] Unit/integration tests
 - [ ] Skill packaging and portability checks
 - [ ] Independent Review bound to current PR head SHA
-- [ ] Canary/rollback plan updated when required
+- [ ] Deployment/rollback notes updated when required
 
 ## Risk and Rollback

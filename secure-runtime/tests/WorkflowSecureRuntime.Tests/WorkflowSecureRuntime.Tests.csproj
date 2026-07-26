@@ -1,9 +1,0 @@
-<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <OutputType>Exe</OutputType>
-    <AssemblyName>workflow-secure-runtime-tests</AssemblyName>
-  </PropertyGroup>
-  <ItemGroup>
-    <ProjectReference Include="..\..\src\WorkflowSecureRuntime.Core\WorkflowSecureRuntime.Core.csproj" />
-  </ItemGroup>
-</Project>

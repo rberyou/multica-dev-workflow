@@ -17,10 +17,15 @@ from typing import Any, Iterable
 
 from jsonschema import Draft202012Validator
 
-from package_skills import build_archive, package_hash
+from package_skills import build_archive, package_hash, source_files
 
 
 MANAGED_BY = "multica-dev-workflow"
+RETIRED_LOCAL_SKILL_NAMES = {
+    "multica-workflow-observer",
+    "multica-workflow-maintainer",
+    "multica-workflow-maintenance-reviewer",
+}
 MARKER_RE = re.compile(r"\A<!-- multica-workflow\r?\n(?P<body>.*?)\r?\n-->\r?\n?", re.DOTALL)
 UUID_RE = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
 WORKFLOW_VERSION_LITERAL_RE = re.compile(
@@ -308,13 +313,12 @@ def validate_repository(root: Path, deployment_profile: str) -> tuple[dict[str, 
             rendered.append(f"workflow.json schema {location}: {item.message}")
         raise WorkflowError("repository validation failed:\n- " + "\n- ".join(rendered))
     errors: list[str] = []
-    if manifest.get("schema_version") != 2:
-        errors.append("schema_version must be 2")
+    if manifest.get("schema_version") != 3:
+        errors.append("schema_version must be 3")
     workflow = manifest.get("workflow") or {}
-    for field in ["id", "name", "version", "phase", "protocol_revision", "approver_role"]:
+    for field in ["id", "name", "version", "protocol_revision", "approver_role"]:
         if not workflow.get(field):
             errors.append(f"workflow.{field} is required")
-    current_phase = workflow.get("phase")
     version_file = (root / "VERSION").read_text(encoding="utf-8").strip() if (root / "VERSION").is_file() else ""
     if version_file != workflow.get("version"):
         errors.append("VERSION must match workflow.version")
@@ -331,15 +335,6 @@ def validate_repository(root: Path, deployment_profile: str) -> tuple[dict[str, 
         errors.append("agent keys must be unique")
     if len(set(agent_names)) != len(agent_names):
         errors.append("agent names must be unique")
-    if current_phase == 1:
-        future_agents = {
-            "workflow-maintainer",
-            "workflow-maintenance-reviewer",
-        } & set(agent_keys)
-        if future_agents:
-            errors.append(
-                f"Phase 1 must not deploy future maintenance Agents: {sorted(future_agents)}"
-            )
     bindings = profile.get("bindings") or {}
     for agent in agents:
         if agent.get("runtime_binding") not in bindings:
@@ -363,8 +358,6 @@ def validate_repository(root: Path, deployment_profile: str) -> tuple[dict[str, 
     skill_names = [skill.get("name") for skill in manifest.get("skills") or []]
     if len(set(skill_keys)) != len(skill_keys) or len(set(skill_names)) != len(skill_names):
         errors.append("skill keys and names must be unique")
-    if current_phase == 1 and "workflow-maintainer" in set(skill_keys):
-        errors.append("Phase 1 must not deploy the workflow-maintainer Skill")
     for skill in manifest.get("skills") or []:
         directory = root / str(skill.get("path", ""))
         if not (directory / "SKILL.md").is_file():
@@ -380,55 +373,22 @@ def validate_repository(root: Path, deployment_profile: str) -> tuple[dict[str, 
     for project in projects:
         if project.get("lead") not in agent_keys:
             errors.append(f"project {project.get('key')} references missing lead agent {project.get('lead')}")
-    autopilots = manifest.get("autopilots") or []
-    autopilot_keys = [autopilot.get("key") for autopilot in autopilots]
-    autopilot_titles = [autopilot.get("title") for autopilot in autopilots]
-    if len(set(autopilot_keys)) != len(autopilot_keys) or len(set(autopilot_titles)) != len(autopilot_titles):
-        errors.append("autopilot keys and titles must be unique")
     project_key_set = set(project_keys)
-    for autopilot in autopilots:
-        if autopilot.get("agent") not in agent_keys:
-            errors.append(f"autopilot {autopilot.get('key')} references missing agent {autopilot.get('agent')}")
-        if autopilot.get("project") not in project_key_set:
-            errors.append(f"autopilot {autopilot.get('key')} references missing project {autopilot.get('project')}")
-        trigger_keys = [trigger.get("key") for trigger in autopilot.get("triggers") or []]
-        trigger_labels = [trigger.get("label") for trigger in autopilot.get("triggers") or []]
-        if len(set(trigger_keys)) != len(trigger_keys) or len(set(trigger_labels)) != len(trigger_labels):
-            errors.append(f"autopilot {autopilot.get('key')} trigger keys and labels must be unique")
-    operations = manifest.get("operations")
-    if not isinstance(operations, dict):
-        errors.append("operations is required for schema_version 2")
+    incidents = manifest.get("incidents")
+    if not isinstance(incidents, dict):
+        errors.append("incidents is required for schema_version 3")
     else:
-        for field in [
-            "project",
-            "observer_agent",
-            "observer_skill",
-            "reporter_agents",
-            "autopilot",
-            "full_scan_autopilot",
-        ]:
-            if field not in operations:
-                errors.append(f"operations.{field} is required")
-        if operations.get("project") not in project_key_set:
-            errors.append("operations.project must reference a managed project")
-        if operations.get("observer_agent") not in agent_keys:
-            errors.append("operations.observer_agent must reference a managed agent")
-        if operations.get("observer_skill") not in skill_keys:
-            errors.append("operations.observer_skill must reference a managed skill")
-        unknown_reporters = set(operations.get("reporter_agents") or []) - set(agent_keys)
+        for field in ["project", "skill", "reporter_agents"]:
+            if field not in incidents:
+                errors.append(f"incidents.{field} is required")
+        if incidents.get("project") not in project_key_set:
+            errors.append("incidents.project must reference a managed project")
+        if incidents.get("skill") not in skill_keys:
+            errors.append("incidents.skill must reference a managed skill")
+        unknown_reporters = set(incidents.get("reporter_agents") or []) - set(agent_keys)
         if unknown_reporters:
-            errors.append(f"operations.reporter_agents reference unknown agents: {sorted(unknown_reporters)}")
-        if operations.get("autopilot") not in set(autopilot_keys):
-            errors.append("operations.autopilot must reference a managed autopilot")
-        if operations.get("full_scan_autopilot") not in set(autopilot_keys):
-            errors.append(
-                "operations.full_scan_autopilot must reference a managed autopilot"
-            )
-        if operations.get("maintenance_intake_mode") != "human_gated":
-            errors.append("operations.maintenance_intake_mode must be human_gated")
-        if operations.get("automatic_expansion") is not False:
-            errors.append("operations.automatic_expansion must be false")
-        reporter_agents = set(operations.get("reporter_agents") or [])
+            errors.append(f"incidents.reporter_agents reference unknown agents: {sorted(unknown_reporters)}")
+        reporter_agents = set(incidents.get("reporter_agents") or [])
         squad_agents = {
             str(member.get("agent") or "")
             for member in squad.get("agent_members") or []
@@ -436,85 +396,23 @@ def validate_repository(root: Path, deployment_profile: str) -> tuple[dict[str, 
         }
         if reporter_agents != squad_agents:
             errors.append(
-                "operations.reporter_agents must exactly match squad.agent_members agents"
+                "incidents.reporter_agents must exactly match squad.agent_members agents"
             )
-        observer_agent = str(operations.get("observer_agent") or "")
-        observer_skill = next(
+        incident_skill = next(
             (
                 skill
                 for skill in manifest.get("skills") or []
-                if skill.get("key") == operations.get("observer_skill")
+                if skill.get("key") == incidents.get("skill")
             ),
             None,
         )
-        required_observer_attachments = reporter_agents | {observer_agent}
-        if observer_skill:
-            if "workspace" not in set(observer_skill.get("targets") or []):
-                errors.append("operations.observer_skill must target workspace")
-            if set(observer_skill.get("attach_to") or []) != required_observer_attachments:
+        if incident_skill:
+            if "workspace" not in set(incident_skill.get("targets") or []):
+                errors.append("incidents.skill must target workspace")
+            if set(incident_skill.get("attach_to") or []) != reporter_agents:
                 errors.append(
-                    "operations.observer_skill attach_to must exactly match reporters plus observer_agent"
+                    "incidents.skill attach_to must exactly match reporter agents"
                 )
-        for field in ["autopilot", "full_scan_autopilot"]:
-            managed_autopilot = next(
-                (
-                    item
-                    for item in autopilots
-                    if item.get("key") == operations.get(field)
-                ),
-                None,
-            )
-            if managed_autopilot and (
-                managed_autopilot.get("agent") != observer_agent
-                or managed_autopilot.get("project") != operations.get("project")
-            ):
-                errors.append(
-                    f"operations.{field} must use operations.observer_agent and operations.project"
-                )
-    secure_runtime = manifest.get("secure_runtime")
-    if not isinstance(secure_runtime, dict):
-        errors.append("secure_runtime is required")
-    else:
-        secure_agents = secure_runtime.get("agents") or {}
-        secure_phase = str(secure_runtime.get("phase") or "")
-        if secure_phase not in {"planned", "enforced"}:
-            errors.append("secure_runtime.phase must be planned or enforced")
-        if secure_phase == "planned" and (
-            secure_runtime.get("required") is not False
-            or secure_runtime.get("open_code_allowed") is not True
-        ):
-            errors.append(
-                "planned secure_runtime must be optional and allow ordinary runtimes"
-            )
-        if secure_phase == "enforced" and (
-            secure_runtime.get("required") is not True
-            or secure_runtime.get("open_code_allowed") is not False
-        ):
-            errors.append("enforced secure_runtime must be required and disallow OpenCode")
-        if not isinstance(secure_agents, dict):
-            errors.append("secure_runtime.agents must be an object")
-            secure_agents = {}
-        if secure_phase == "enforced" and not secure_agents:
-            errors.append("enforced secure_runtime.agents must define managed secure roles")
-        if current_phase == 1 and secure_agents:
-            errors.append("Phase 1 secure_runtime.agents must be empty")
-        for agent_key, security_profile in secure_agents.items():
-            desired_agent = next((item for item in agents if item.get("key") == agent_key), None)
-            if not desired_agent:
-                errors.append(f"secure_runtime references missing agent {agent_key}")
-                continue
-            if secure_phase != "enforced":
-                continue
-            runtime_config = desired_agent.get("runtime_config") or {}
-            if runtime_config.get("secure_runtime_required") is not True:
-                errors.append(f"secure Agent {agent_key} must require the secure runtime")
-            if runtime_config.get("security_profile") != security_profile:
-                errors.append(f"secure Agent {agent_key} security_profile differs from secure_runtime.agents")
-            if desired_agent.get("mcp_config") != {} or desired_agent.get("custom_args") != []:
-                errors.append(f"secure Agent {agent_key} must use strict empty MCP and custom args")
-            binding = bindings.get(desired_agent.get("runtime_binding"), {})
-            if binding.get("provider") != "codex":
-                errors.append(f"secure Agent {agent_key} must use a Codex runtime binding")
     portable_files = [
         root / "workflow.json",
         *root.glob("deployment-profiles/*.json"),
@@ -681,103 +579,6 @@ def project_spec(
     }
 
 
-def autopilot_spec(
-    key: str,
-    title: str,
-    description: str,
-    agent: str,
-    mode: str,
-    project: str,
-    status: str,
-    issue_title_template: str,
-    subscriber_ids: list[str],
-) -> dict[str, Any]:
-    return {
-        "key": key,
-        "title": title,
-        "description": description,
-        "agent": agent,
-        "mode": mode,
-        "project": project,
-        "status": status,
-        "issue_title_template": issue_title_template,
-        "subscriber_ids": sorted(subscriber_ids),
-    }
-
-
-def normalized_subscriber_ids(value: Any) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    result = []
-    for item in value:
-        if isinstance(item, str):
-            result.append(item)
-        elif isinstance(item, dict):
-            subscriber_type = str(
-                item.get("user_type")
-                or item.get("member_type")
-                or item.get("subscriber_type")
-                or item.get("type")
-                or ""
-            ).lower()
-            if subscriber_type and subscriber_type not in {"member", "user"}:
-                continue
-            identifier = item.get("id") or item.get("user_id") or item.get("member_id") or item.get("subscriber_id")
-            if identifier:
-                result.append(str(identifier))
-    return sorted(set(result))
-
-
-def normalized_triggers(value: Any) -> list[dict[str, Any]]:
-    triggers = _as_list(value, "triggers")
-    return [
-        {
-            "id": trigger.get("id"),
-            "kind": trigger.get("kind") or trigger.get("type"),
-            "label": trigger.get("label") or "",
-            "enabled": bool(trigger.get("enabled", True)),
-            "cron": trigger_cron(trigger),
-            "timezone": trigger.get("timezone") or "UTC",
-        }
-        for trigger in triggers
-    ]
-
-
-def trigger_cron(trigger: dict[str, Any]) -> Any:
-    return trigger.get("cron") or trigger.get("cron_expression") or trigger.get("schedule") or ""
-
-
-def normalized_autopilot_detail(value: Any, fallback: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        return fallback
-    nested = value.get("autopilot")
-    if isinstance(nested, dict):
-        detail = {**fallback, **nested}
-        for field in ["triggers", "subscribers"]:
-            if field in value:
-                detail[field] = value[field]
-    else:
-        detail = {**fallback, **value}
-    payload = nested if isinstance(nested, dict) else value
-    if isinstance(payload, dict) and payload.get("assignee_id"):
-        detail["agent_id"] = payload["assignee_id"]
-    elif not detail.get("agent_id") and detail.get("assignee_id"):
-        detail["agent_id"] = detail["assignee_id"]
-    if isinstance(payload, dict) and payload.get("execution_mode"):
-        detail["mode"] = payload["execution_mode"]
-    elif not detail.get("mode") and detail.get("execution_mode"):
-        detail["mode"] = detail["execution_mode"]
-    return detail
-
-
-def autopilot_state_items(state: dict[str, Any]) -> list[dict[str, Any]]:
-    details = state.get("autopilot_details") or {}
-    return [
-        details.get(str(item.get("id") or ""), item)
-        for item in state.get("autopilots", [])
-    ]
-
-
 def manifest_agent_name(manifest: dict[str, Any], agent_key: str) -> str:
     for agent in manifest.get("agents", []):
         if agent.get("key") == agent_key:
@@ -785,9 +586,7 @@ def manifest_agent_name(manifest: dict[str, Any], agent_key: str) -> str:
     raise WorkflowError(f"manifest agent not found: {agent_key}")
 
 
-def desired_skill_attachments(
-    manifest: dict[str, Any], disable_operations: bool
-) -> dict[str, set[str]]:
+def desired_skill_attachments(manifest: dict[str, Any]) -> dict[str, set[str]]:
     desired: dict[str, set[str]] = {agent["key"]: set() for agent in manifest.get("agents", [])}
     for skill in manifest.get("skills", []):
         if "workspace" not in skill.get("targets", []):
@@ -843,52 +642,7 @@ def _as_list(value: Any, possible_key: str) -> list[dict[str, Any]]:
     return []
 
 
-def list_active_v3_requirements(
-    cli: MulticaCLI, workflow_id: str, max_issues: int = 5000
-) -> list[dict[str, Any]]:
-    result = []
-    offset = 0
-    page_size = 100
-    while offset < max_issues:
-        limit = min(page_size, max_issues - offset)
-        page = _as_list(
-            cli.json(
-                [
-                    "issue",
-                    "list",
-                    "--metadata",
-                    f"workflow_id={workflow_id}",
-                    "--metadata",
-                    "protocol_revision=v3",
-                    "--limit",
-                    str(limit),
-                    "--offset",
-                    str(offset),
-                    "--output",
-                    "json",
-                ]
-            ),
-            "issues",
-        )
-        result.extend(
-            {
-                "id": item.get("id"),
-                "identifier": item.get("identifier"),
-                "status": item.get("status"),
-            }
-            for item in page
-            if str(item.get("status") or "") in {"backlog", "todo", "in_progress", "in_review", "blocked"}
-            and not item.get("parent_issue_id")
-        )
-        if len(page) < limit:
-            return result
-        offset += len(page)
-    raise WorkflowError(f"active v3 requirement scan exceeded max_issues={max_issues}")
-
-
-def fetch_state(
-    cli: MulticaCLI, include_active_v3: bool = False, workflow_id: str = ""
-) -> dict[str, Any]:
+def fetch_state(cli: MulticaCLI) -> dict[str, Any]:
     agents = _as_list(cli.json(["agent", "list", "--output", "json"]), "agents")
     enriched_agents = []
     for current in agents:
@@ -899,7 +653,23 @@ def fetch_state(
     squads = _as_list(cli.json(["squad", "list", "--output", "json"]), "squads")
     skills = _as_list(cli.json(["skill", "list", "--output", "json"]), "skills")
     projects = _as_list(cli.json(["project", "list", "--output", "json"]), "projects")
-    autopilots = _as_list(cli.json(["autopilot", "list", "--output", "json"]), "autopilots")
+    autopilots = _as_list(
+        cli.json(["autopilot", "list", "--output", "json"]), "autopilots"
+    )
+    autopilot_details: dict[str, dict[str, Any]] = {}
+    for autopilot in autopilots:
+        autopilot_id = str(autopilot.get("id") or "")
+        if autopilot_id:
+            detail = cli.json(
+                ["autopilot", "get", autopilot_id, "--output", "json"]
+            )
+            if isinstance(detail, dict):
+                nested = detail.get("autopilot")
+                autopilot_details[autopilot_id] = (
+                    {**autopilot, **nested, **{key: value for key, value in detail.items() if key != "autopilot"}}
+                    if isinstance(nested, dict)
+                    else {**autopilot, **detail}
+                )
     runtimes = _as_list(cli.json(["runtime", "list", "--output", "json"]), "runtimes")
     user = cli.json(["user", "profile", "get", "--output", "json"]) or {}
     squad_members: dict[str, list[dict[str, Any]]] = {}
@@ -922,14 +692,6 @@ def fetch_state(
         if agent_id:
             value = cli.json(["agent", "skills", "list", agent_id, "--output", "json"])
             agent_skills[agent_id] = _as_list(value, "skills")
-    autopilot_details: dict[str, dict[str, Any]] = {}
-    for autopilot in autopilots:
-        autopilot_id = str(autopilot.get("id", ""))
-        if autopilot_id:
-            raw_detail = cli.json(["autopilot", "get", autopilot_id, "--output", "json"]) or autopilot
-            detail = normalized_autopilot_detail(raw_detail, autopilot)
-            if isinstance(detail, dict):
-                autopilot_details[autopilot_id] = detail
     result = {
         "agents": agents,
         "squads": squads,
@@ -943,8 +705,6 @@ def fetch_state(
         "skill_details": skill_details,
         "agent_skills": agent_skills,
     }
-    if include_active_v3:
-        result["active_v3_requirements"] = list_active_v3_requirements(cli, workflow_id)
     return result
 
 
@@ -990,34 +750,18 @@ def observed_hash(state: dict[str, Any]) -> str:
         }
         for project in state.get("projects", [])
     ]
-    autopilots = []
-    for autopilot in state.get("autopilots", []):
-        detail = state.get("autopilot_details", {}).get(str(autopilot.get("id")), autopilot)
-        detail = normalized_autopilot_detail(detail, autopilot)
-        autopilots.append(
-            {
-                **{
-                    key: detail.get(key)
-                    for key in [
-                        "id",
-                        "title",
-                        "description",
-                        "agent_id",
-                        "mode",
-                        "project_id",
-                        "status",
-                        "issue_title_template",
-                    ]
-                },
-                "subscriber_ids": normalized_subscriber_ids(
-                    detail.get("subscribers") or detail.get("subscriber_ids")
-                ),
-                "triggers": sorted(
-                    normalized_triggers(detail.get("triggers")),
-                    key=lambda item: (str(item.get("label")), str(item.get("id"))),
-                ),
-            }
-        )
+    autopilots = [
+        {
+            key: detail.get(key)
+            for key in ["id", "title", "description", "agent_id", "project_id", "status"]
+        }
+        for autopilot in state.get("autopilots", [])
+        for detail in [
+            state.get("autopilot_details", {}).get(
+                str(autopilot.get("id") or ""), autopilot
+            )
+        ]
+    ]
     runtimes = [
         {key: runtime.get(key) for key in ["id", "provider", "status", "custom_name", "daemon_id"]}
         for runtime in state.get("runtimes", [])
@@ -1038,10 +782,6 @@ def observed_hash(state: dict[str, Any]) -> str:
             key: sorted([str(item.get("id") or item.get("skill_id")) for item in value])
             for key, value in sorted(state.get("agent_skills", {}).items())
         },
-        "active_v3_requirements": sorted(
-            state.get("active_v3_requirements", []),
-            key=lambda item: str(item.get("id") or item.get("identifier")),
-        ),
     }
     return sha256_value(compact)
 
@@ -1095,39 +835,6 @@ def match_managed(
     return None, False, errors
 
 
-def resolve_human_approver_id(
-    state: dict[str, Any], manifest: dict[str, Any], workflow_id: str
-) -> tuple[str | None, str | None]:
-    human_members = manifest.get("squad", {}).get("human_members") or []
-    contract = human_members[0] if human_members else {}
-    selector = contract.get("selector")
-    if selector == "current_user":
-        user_id = str(state.get("user", {}).get("id") or "")
-        return (user_id, None) if user_id else (None, "authenticated user ID unavailable")
-
-    squad = manifest.get("squad") or {}
-    current, _, errors = match_managed(
-        state.get("squads", []),
-        workflow_id,
-        f"squad.{squad.get('key')}",
-        str(squad.get("name") or ""),
-        "instructions",
-    )
-    if errors:
-        return None, "; ".join(errors)
-    if not current:
-        return None, "managed squad is unavailable for human approver resolution"
-    role = manifest.get("workflow", {}).get("approver_role")
-    matches = [
-        item
-        for item in state.get("squad_members", {}).get(str(current.get("id")), [])
-        if item.get("member_type") == "member" and item.get("role") == role
-    ]
-    if len(matches) != 1:
-        return None, f"expected one human approver with role {role}, found {len(matches)}"
-    return str(matches[0].get("member_id")), None
-
-
 def _runtime_choice(
     binding_key: str,
     binding: dict[str, Any],
@@ -1178,43 +885,16 @@ def build_plan(
     runtime_map_path: Path,
     adopt: bool,
     rebind_runtimes: bool,
-    disable_operations: bool = False,
-    allow_active_v3_degraded: bool = False,
     write_archives: bool = True,
 ) -> dict[str, Any]:
-    if allow_active_v3_degraded and not disable_operations:
-        raise WorkflowError("--allow-active-v3-degraded requires --disable-operations")
     manifest, profile = validate_repository(root, deployment_profile)
     workflow = manifest["workflow"]
     workflow_id = str(workflow["id"])
-    state = fetch_state(cli, include_active_v3=disable_operations, workflow_id=workflow_id)
+    state = fetch_state(cli)
     actions: list[dict[str, Any]] = []
     runtime_map = load_runtime_map(runtime_map_path)
     runtimes = state.get("runtimes", [])
     runtime_by_id = runtime_index(state)
-
-    active_v3 = state.get("active_v3_requirements", [])
-    if disable_operations and active_v3:
-        identifiers = [str(item.get("identifier") or item.get("id")) for item in active_v3]
-        if allow_active_v3_degraded:
-            actions.append(
-                {
-                    "type": "WARNING",
-                    "key": "active-v3-rollback",
-                    "reason": f"explicit degraded rollback with active v3 requirements: {identifiers}",
-                }
-            )
-        else:
-            actions.append(
-                {
-                    "type": "BLOCKED",
-                    "key": "active-v3-rollback",
-                    "reason": (
-                        f"active v3 requirements must be frozen or explicitly approved with "
-                        f"--allow-active-v3-degraded: {identifiers}"
-                    ),
-                }
-            )
 
     desired_skill_by_key: dict[str, dict[str, Any]] = {}
     current_skills_by_name: dict[str, list[dict[str, Any]]] = {}
@@ -1253,7 +933,70 @@ def build_plan(
         else:
             actions.append({"type": "NO_CHANGE", "key": f"skill.{skill['key']}"})
 
+    desired_workspace_skill_names = {
+        str(skill["name"])
+        for skill in manifest.get("skills", [])
+        if "workspace" in skill.get("targets", [])
+    }
+    retired_skill_ids: set[str] = set()
+    for current in state.get("skills", []):
+        skill_id = str(current.get("id") or "")
+        detail = state.get("skill_details", {}).get(skill_id, current)
+        if (
+            deep_find(detail, "managed_by") == MANAGED_BY
+            and deep_find(detail, "workflow_id") == workflow_id
+            and str(current.get("name") or detail.get("name") or "")
+            not in desired_workspace_skill_names
+        ):
+            if not skill_id:
+                actions.append(
+                    {
+                        "type": "BLOCKED",
+                        "key": str(current.get("name") or "retired-skill"),
+                        "reason": "retired managed Skill has no ID",
+                    }
+                )
+                continue
+            retired_skill_ids.add(skill_id)
+            actions.append(
+                {
+                    "type": "DELETE_RETIRED_SKILL",
+                    "key": str(current.get("name") or skill_id),
+                    "current_id": skill_id,
+                }
+            )
+
     current_agents = state.get("agents", [])
+    desired_agent_object_keys = {
+        f"agent.{agent['key']}" for agent in manifest.get("agents", [])
+    }
+    retired_agent_ids: set[str] = set()
+    for current in current_agents:
+        marker = parse_marker(str(current.get("instructions") or "")) or {}
+        object_key = str(marker.get("object_key") or "")
+        if (
+            marker.get("managed_by") == MANAGED_BY
+            and marker.get("workflow_id") == workflow_id
+            and object_key.startswith("agent.")
+            and object_key not in desired_agent_object_keys
+        ):
+            if not current.get("id"):
+                actions.append(
+                    {
+                        "type": "BLOCKED",
+                        "key": object_key,
+                        "reason": "retired managed Agent has no ID",
+                    }
+                )
+            else:
+                retired_agent_ids.add(str(current["id"]))
+                actions.append(
+                    {
+                        "type": "ARCHIVE_RETIRED_AGENT",
+                        "key": object_key,
+                        "current_id": str(current["id"]),
+                    }
+                )
     desired_agents: dict[str, dict[str, Any]] = {}
     current_agents_by_key: dict[str, dict[str, Any]] = {}
     inherited_runtime_candidates: dict[str, set[str]] = {}
@@ -1373,8 +1116,7 @@ def build_plan(
 
     # Agent skill assignment reconciliation is non-destructive for unrelated skills.
     skill_by_id = {str(item.get("id")): item for item in state.get("skills", []) if item.get("id")}
-    desired_attached = desired_skill_attachments(manifest, disable_operations)
-    operations = manifest.get("operations") or {}
+    desired_attached = desired_skill_attachments(manifest)
     for agent_key in desired_attached:
         current_agent = current_agents_by_key.get(agent_key)
         current_assignments = state.get("agent_skills", {}).get(str(current_agent.get("id")), []) if current_agent else []
@@ -1392,18 +1134,65 @@ def build_plan(
         for skill_key in sorted(current_managed_keys - desired_attached.get(agent_key, set())):
             actions.append({"type": "DETACH_SKILL", "agent_key": agent_key, "skill_key": skill_key})
 
-    current_projects_by_key: dict[str, dict[str, Any]] = {}
+    if retired_skill_ids:
+        for agent in state.get("agents", []):
+            agent_id = str(agent.get("id") or "")
+            current_ids = {
+                str(item.get("id") or item.get("skill_id") or "")
+                for item in state.get("agent_skills", {}).get(agent_id, [])
+            }
+            attached_retired = sorted(current_ids & retired_skill_ids)
+            if attached_retired:
+                actions.append(
+                    {
+                        "type": "DETACH_RETIRED_SKILLS",
+                        "key": str(agent.get("name") or agent_id),
+                        "current_id": agent_id,
+                        "retired_skill_ids": attached_retired,
+                        "remaining_skill_ids": sorted(current_ids - retired_skill_ids),
+                    }
+                )
+
+    for autopilot in state.get("autopilots", []):
+        autopilot_id = str(autopilot.get("id") or "")
+        detail = state.get("autopilot_details", {}).get(autopilot_id, autopilot)
+        marker = parse_marker(str(detail.get("description") or "")) or {}
+        if (
+            marker.get("managed_by") == MANAGED_BY
+            and marker.get("workflow_id") == workflow_id
+            and str(marker.get("object_key") or "").startswith("autopilot.")
+        ):
+            if not autopilot_id:
+                actions.append(
+                    {
+                        "type": "BLOCKED",
+                        "key": str(marker.get("object_key") or "retired-autopilot"),
+                        "reason": "retired managed automation has no ID",
+                    }
+                )
+            else:
+                actions.append(
+                    {
+                        "type": "DELETE_RETIRED_AUTOPILOT",
+                        "key": str(marker.get("object_key") or autopilot_id),
+                        "current_id": autopilot_id,
+                    }
+                )
+
     for project in manifest.get("projects", []):
         lead_key = project["lead"]
         lead_name = manifest_agent_name(manifest, lead_key)
         lead_current = current_agents_by_key.get(lead_key)
         exact_lead_name_matches = [
-            item for item in state.get("agents", []) if str(item.get("name") or "") == lead_name
+            item
+            for item in state.get("agents", [])
+            if str(item.get("name") or "") == lead_name
         ]
         lead_collisions = [
             item
             for item in exact_lead_name_matches
-            if not lead_current or str(item.get("id")) != str(lead_current.get("id"))
+            if not lead_current
+            or str(item.get("id")) != str(lead_current.get("id"))
         ]
         if lead_collisions:
             actions.append(
@@ -1425,7 +1214,9 @@ def build_plan(
             name_field="title",
         )
         for error in errors:
-            actions.append({"type": "BLOCKED", "key": project["key"], "reason": error})
+            actions.append(
+                {"type": "BLOCKED", "key": project["key"], "reason": error}
+            )
         if errors:
             continue
         if current and not marked and not adopt:
@@ -1437,8 +1228,6 @@ def build_plan(
                 }
             )
             continue
-        if current:
-            current_projects_by_key[project["key"]] = current
         body = str(project.get("description") or "").strip() + "\n"
         spec = project_spec(
             project["key"],
@@ -1451,11 +1240,15 @@ def build_plan(
         spec_hash = sha256_value(spec)
         desired = {
             **project,
-            "description": render_marker(workflow_id, object_key, spec_hash, body),
+            "description": render_marker(
+                workflow_id, object_key, spec_hash, body
+            ),
             "spec_hash": spec_hash,
         }
         if not current:
-            actions.append({"type": "CREATE_PROJECT", "key": project["key"], "desired": desired})
+            actions.append(
+                {"type": "CREATE_PROJECT", "key": project["key"], "desired": desired}
+            )
             continue
         lead_current = current_agents_by_key.get(project["lead"])
         current_spec = project_spec(
@@ -1463,7 +1256,8 @@ def build_plan(
             str(current.get("title") or ""),
             strip_marker(str(current.get("description") or "")),
             project["lead"]
-            if lead_current and str(current.get("lead_id")) == str(lead_current.get("id"))
+            if lead_current
+            and str(current.get("lead_id")) == str(lead_current.get("id"))
             else str(current.get("lead_id") or ""),
             str(current.get("status") or ""),
             str(current.get("icon") or ""),
@@ -1483,199 +1277,44 @@ def build_plan(
                 }
             )
 
-    approver_id, approver_error = resolve_human_approver_id(state, manifest, workflow_id)
-    current_autopilots_by_key: dict[str, dict[str, Any]] = {}
-    for autopilot in manifest.get("autopilots", []):
-        object_key = f"autopilot.{autopilot['key']}"
-        current, marked, errors = match_managed(
-            autopilot_state_items(state),
-            workflow_id,
-            object_key,
-            autopilot["title"],
-            "description",
-            autopilot.get("previous_titles") or [],
-            name_field="title",
-        )
-        for error in errors:
-            actions.append({"type": "BLOCKED", "key": autopilot["key"], "reason": error})
-        if errors:
-            continue
-        if current and not marked and not adopt:
-            actions.append(
-                {
-                    "type": "BLOCKED",
-                    "key": autopilot["key"],
-                    "reason": f"same-title unmarked autopilot {autopilot['title']} requires --adopt",
-                }
-            )
-            continue
-        if current:
-            current_autopilots_by_key[autopilot["key"]] = current
-
-        subscriber_ids: list[str] = []
-        subscriber_error = None
-        for selector in autopilot.get("subscribers") or []:
-            if selector == "current_user":
-                value = str(state.get("user", {}).get("id") or "")
-                if not value:
-                    subscriber_error = "authenticated user ID unavailable for Autopilot subscriber"
-                    break
-                subscriber_ids.append(value)
-            elif selector == "human_approver":
-                if approver_error or not approver_id:
-                    subscriber_error = approver_error or "human approver unavailable"
-                    break
-                subscriber_ids.append(approver_id)
-        if subscriber_error:
-            actions.append({"type": "BLOCKED", "key": autopilot["key"], "reason": subscriber_error})
-            continue
-
-        effective_status = str(autopilot["status"])
-        if disable_operations and autopilot["key"] in {
-            operations.get("autopilot"),
-            operations.get("full_scan_autopilot"),
-        }:
-            effective_status = "paused"
-        body = str(autopilot.get("description") or "").strip() + "\n"
-        spec = autopilot_spec(
-            autopilot["key"],
-            autopilot["title"],
-            body,
-            autopilot["agent"],
-            autopilot["mode"],
-            autopilot["project"],
-            effective_status,
-            str(autopilot.get("issue_title_template") or ""),
-            subscriber_ids,
-        )
-        spec_hash = sha256_value(spec)
-        desired = {
-            **autopilot,
-            "status": effective_status,
-            "description": render_marker(workflow_id, object_key, spec_hash, body),
-            "subscriber_ids": sorted(set(subscriber_ids)),
-            "spec_hash": spec_hash,
-        }
-        if not current:
-            actions.append({"type": "CREATE_AUTOPILOT", "key": autopilot["key"], "desired": desired})
-        else:
-            detail = state.get("autopilot_details", {}).get(str(current.get("id")), current)
-            detail = normalized_autopilot_detail(detail, current)
-            required_fields = ["title", "description", "agent_id", "mode", "project_id", "status", "triggers"]
-            missing_fields = [field for field in required_fields if field not in detail]
-            if "subscribers" not in detail and "subscriber_ids" not in detail:
-                missing_fields.append("subscribers")
-            if missing_fields:
-                actions.append(
-                    {
-                        "type": "BLOCKED",
-                        "key": autopilot["key"],
-                        "reason": f"Autopilot get cannot verify managed fields: {sorted(missing_fields)}",
-                    }
-                )
-                continue
-            agent_current = current_agents_by_key.get(autopilot["agent"])
-            project_current = current_projects_by_key.get(autopilot["project"])
-            current_spec = autopilot_spec(
-                autopilot["key"],
-                str(detail.get("title") or current.get("title") or ""),
-                strip_marker(str(detail.get("description") or current.get("description") or "")),
-                autopilot["agent"]
-                if agent_current and str(detail.get("agent_id")) == str(agent_current.get("id"))
-                else str(detail.get("agent_id") or ""),
-                str(detail.get("mode") or ""),
-                autopilot["project"]
-                if project_current and str(detail.get("project_id")) == str(project_current.get("id"))
-                else str(detail.get("project_id") or ""),
-                str(detail.get("status") or ""),
-                str(detail.get("issue_title_template") or ""),
-                normalized_subscriber_ids(detail.get("subscribers") or detail.get("subscriber_ids")),
-            )
-            current_hash = sha256_value(current_spec)
-            current_marker = parse_marker(str(detail.get("description") or "")) or {}
-            if (
-                current_hash == spec_hash
-                and marked
-                and current_marker.get("spec_hash") == spec_hash
-            ):
-                actions.append({"type": "NO_CHANGE", "key": object_key})
-            else:
-                actions.append(
-                    {
-                        "type": "ADOPT_AUTOPILOT" if not marked else "UPDATE_AUTOPILOT",
-                        "key": autopilot["key"],
-                        "current_id": current.get("id"),
-                        "current_hash": current_hash,
-                        "desired_hash": spec_hash,
-                        "desired": desired,
-                    }
-                )
-
-        current_detail = (
-            state.get("autopilot_details", {}).get(str(current.get("id")), current) if current else {}
-        )
-        current_triggers = normalized_triggers(current_detail.get("triggers"))
-        for trigger in autopilot.get("triggers") or []:
-            matches = [item for item in current_triggers if item.get("label") == trigger["label"]]
-            if len(matches) > 1:
-                actions.append(
-                    {
-                        "type": "BLOCKED",
-                        "key": f"{autopilot['key']}.{trigger['key']}",
-                        "reason": f"multiple Autopilot triggers use label {trigger['label']}",
-                    }
-                )
-                continue
-            if not matches:
-                actions.append(
-                    {
-                        "type": "ADD_AUTOPILOT_TRIGGER",
-                        "key": f"{autopilot['key']}.{trigger['key']}",
-                        "autopilot_key": autopilot["key"],
-                        "desired": trigger,
-                    }
-                )
-                continue
-            existing_trigger = matches[0]
-            if existing_trigger.get("kind") != trigger.get("kind"):
-                actions.append(
-                    {
-                        "type": "BLOCKED",
-                        "key": f"{autopilot['key']}.{trigger['key']}",
-                        "reason": "managed Autopilot trigger kind replacement requires explicit redesign",
-                    }
-                )
-                continue
-            desired_trigger = {
-                "kind": trigger.get("kind"),
-                "label": trigger.get("label"),
-                "enabled": bool(trigger.get("enabled", True)),
-                "cron": trigger.get("cron") or "",
-                "timezone": trigger.get("timezone") or "UTC",
-            }
-            current_trigger = {key: existing_trigger.get(key) for key in desired_trigger}
-            if current_trigger != desired_trigger:
-                if not existing_trigger.get("id"):
+    desired_project_object_keys = {
+        f"project.{project['key']}" for project in manifest.get("projects", [])
+    }
+    retirement_lead_key = str(manifest["squad"]["leader"])
+    for current in state.get("projects", []):
+        marker = parse_marker(str(current.get("description") or "")) or {}
+        object_key = str(marker.get("object_key") or "")
+        if (
+            marker.get("managed_by") == MANAGED_BY
+            and marker.get("workflow_id") == workflow_id
+            and object_key.startswith("project.")
+            and object_key not in desired_project_object_keys
+        ):
+            if str(current.get("lead_id") or "") in retired_agent_ids:
+                if not current.get("id"):
                     actions.append(
                         {
                             "type": "BLOCKED",
-                            "key": f"{autopilot['key']}.{trigger['key']}",
-                            "reason": (
-                                "managed Autopilot trigger differs from desired state but "
-                                "the CLI omitted its trigger ID"
-                            ),
+                            "key": object_key,
+                            "reason": "retired managed Project has no ID for lead reassignment",
                         }
                     )
-                    continue
-                actions.append(
-                    {
-                        "type": "UPDATE_AUTOPILOT_TRIGGER",
-                        "key": f"{autopilot['key']}.{trigger['key']}",
-                        "autopilot_key": autopilot["key"],
-                        "current_id": existing_trigger.get("id"),
-                        "desired": trigger,
-                    }
-                )
+                else:
+                    actions.append(
+                        {
+                            "type": "REASSIGN_RETIRED_PROJECT_LEAD",
+                            "key": object_key,
+                            "current_id": str(current["id"]),
+                            "lead_key": retirement_lead_key,
+                        }
+                    )
+            actions.append(
+                {
+                    "type": "WARNING",
+                    "key": object_key,
+                    "reason": "preserving retired managed Project and its durable history",
+                }
+            )
 
     squad = manifest["squad"]
     squad_object_key = f"squad.{squad['key']}"
@@ -1774,9 +1413,24 @@ def build_plan(
                 )
         for member in members:
             role = str(member.get("role") or "")
+            member_id = str(member.get("member_id") or "")
+            if (
+                member.get("member_type") == "agent"
+                and member_id in retired_agent_ids
+            ):
+                actions.append(
+                    {
+                        "type": "REMOVE_RETIRED_MEMBER",
+                        "key": member_id,
+                        "squad_id": str(current_squad["id"]),
+                        "member_id": member_id,
+                        "member_type": "agent",
+                    }
+                )
+                continue
             if member.get("member_type") == "member" and role == approver_role:
                 continue
-            if member.get("member_type") == "agent" and str(member.get("member_id")) in expected_agent_ids.values():
+            if member.get("member_type") == "agent" and member_id in expected_agent_ids.values():
                 continue
             if role in expected_roles or role == approver_role:
                 actions.append({"type": "BLOCKED", "key": "roster", "reason": f"unmanaged roster member conflicts with managed role {role}"})
@@ -1802,9 +1456,6 @@ def build_plan(
         "observed_hash": observed_hash(state),
         "adopt": adopt,
         "rebind_runtimes": rebind_runtimes,
-        "disable_operations": disable_operations,
-        "allow_active_v3_degraded": allow_active_v3_degraded,
-        "active_v3_requirements": active_v3,
         "actions": actions,
     }
     plan["plan_digest"] = sha256_value(plan)
@@ -1965,113 +1616,6 @@ def _project_update_args(project_id: str, desired: dict[str, Any], lead_name: st
     return args
 
 
-def _autopilot_create_args(
-    desired: dict[str, Any], agent_id: str, project_id: str
-) -> list[str]:
-    args = [
-        "autopilot",
-        "create",
-        "--agent",
-        agent_id,
-        "--description",
-        desired.get("description", ""),
-        "--mode",
-        desired["mode"],
-        "--title",
-        desired["title"],
-        "--project",
-        project_id,
-        "--output",
-        "json",
-    ]
-    if desired.get("issue_title_template"):
-        args.extend(["--issue-title-template", desired["issue_title_template"]])
-    for subscriber_id in desired.get("subscriber_ids") or []:
-        args.extend(["--subscriber", subscriber_id])
-    return args
-
-
-def _autopilot_update_args(
-    autopilot_id: str, desired: dict[str, Any], agent_id: str, project_id: str
-) -> list[str]:
-    args = [
-        "autopilot",
-        "update",
-        autopilot_id,
-        "--agent",
-        agent_id,
-        "--description",
-        desired.get("description", ""),
-        "--mode",
-        desired["mode"],
-        "--title",
-        desired["title"],
-        "--project",
-        project_id,
-        "--status",
-        desired.get("status", "active"),
-        "--output",
-        "json",
-    ]
-    if desired.get("issue_title_template"):
-        args.extend(["--issue-title-template", desired["issue_title_template"]])
-    subscriber_ids = desired.get("subscriber_ids") or []
-    if subscriber_ids:
-        for subscriber_id in subscriber_ids:
-            args.extend(["--subscriber", subscriber_id])
-    else:
-        args.append("--clear-subscribers")
-    return args
-
-
-def _autopilot_status_update_args(autopilot_id: str, status: str) -> list[str]:
-    return [
-        "autopilot",
-        "update",
-        autopilot_id,
-        "--status",
-        status,
-        "--output",
-        "json",
-    ]
-
-
-def _trigger_add_args(autopilot_id: str, desired: dict[str, Any]) -> list[str]:
-    args = [
-        "autopilot",
-        "trigger-add",
-        autopilot_id,
-        "--kind",
-        desired["kind"],
-        "--label",
-        desired["label"],
-        "--output",
-        "json",
-    ]
-    if desired["kind"] == "schedule":
-        args.extend(["--cron", desired["cron"], "--timezone", desired["timezone"]])
-    return args
-
-
-def _trigger_update_args(
-    autopilot_id: str, trigger_id: str, desired: dict[str, Any]
-) -> list[str]:
-    args = [
-        "autopilot",
-        "trigger-update",
-        autopilot_id,
-        trigger_id,
-        "--label",
-        desired["label"],
-        f"--enabled={'true' if desired.get('enabled', True) else 'false'}",
-        "--output",
-        "json",
-    ]
-    if desired["kind"] == "schedule":
-        args.extend(["--cron", desired["cron"], "--timezone", desired["timezone"]])
-    return args
-
-
 def _refresh_maps(cli: MulticaCLI, manifest: dict[str, Any]) -> tuple[dict[str, str], dict[str, str], dict[str, Any]]:
     state = fetch_state(cli)
     workflow_id = manifest["workflow"]["id"]
@@ -2126,13 +1670,8 @@ def finalize_deployment_record(
     record_path = deployment_evidence_record_path(root, workspace_id, plan_digest)
     latest_record_path = deployment_record_path(root, workspace_id)
     applied_actor = str(journal.get("applied_actor") or "")
-    if not applied_actor and record_path.is_file():
-        existing_record = read_json(record_path)
-        if isinstance(existing_record, dict):
-            applied_actor = str(existing_record.get("applied_actor") or "")
-    applied_actor = applied_actor or "legacy_unknown"
-    if journal.get("applied_actor") != applied_actor:
-        journal["applied_actor"] = applied_actor
+    if not applied_actor:
+        raise WorkflowError("completed apply journal has no applied actor")
     expected_record = {
         "schema_version": 1,
         "deployed_at": journal["finished_at"],
@@ -2210,11 +1749,7 @@ def apply_plan(root: Path, cli: MulticaCLI, plan_path: Path, approval: str) -> d
             return finalize_deployment_record(
                 root, plan, journal_path, existing_journal, expected_digest
             )
-    current_state = fetch_state(
-        cli,
-        include_active_v3=bool(plan.get("disable_operations", False)),
-        workflow_id=str(plan.get("workflow_id") or ""),
-    )
+    current_state = fetch_state(cli)
     if observed_hash(current_state) != plan.get("observed_hash"):
         raise WorkflowError("Multica state changed after planning; generate a new plan")
 
@@ -2227,20 +1762,9 @@ def apply_plan(root: Path, cli: MulticaCLI, plan_path: Path, approval: str) -> d
         "completed": [],
     }
     workflow_id = manifest["workflow"]["id"]
-    reporter_agent_keys = set((manifest.get("operations") or {}).get("reporter_agents") or [])
-    defer_reporter_enablement = not bool(plan.get("disable_operations", False))
-    deferred_agent_actions = []
-
     for action in plan.get("actions", []):
         action_type = action.get("type")
         if action_type in {"NO_CHANGE", "WARNING"}:
-            continue
-        if (
-            defer_reporter_enablement
-            and action_type in {"CREATE_AGENT", "ADOPT_AGENT", "UPDATE_AGENT"}
-            and action.get("key") in reporter_agent_keys
-        ):
-            deferred_agent_actions.append(action)
             continue
         handled = False
         if action_type in {"CREATE_SKILL", "ADOPT_SKILL", "UPDATE_SKILL"}:
@@ -2268,6 +1792,122 @@ def apply_plan(root: Path, cli: MulticaCLI, plan_path: Path, approval: str) -> d
             journal["completed"].append({"type": action_type, "key": action.get("key"), "at": utc_now()})
             write_json(journal_path, journal)
 
+    for action in plan.get("actions", []):
+        if action.get("type") != "DETACH_RETIRED_SKILLS":
+            continue
+        cli.json(
+            [
+                "agent",
+                "skills",
+                "set",
+                str(action["current_id"]),
+                "--skill-ids",
+                ",".join(action.get("remaining_skill_ids") or []),
+                "--output",
+                "json",
+            ]
+        )
+        journal["completed"].append(
+            {"type": action["type"], "key": action.get("key"), "at": utc_now()}
+        )
+        write_json(journal_path, journal)
+
+    for action in plan.get("actions", []):
+        if action.get("type") != "REMOVE_RETIRED_MEMBER":
+            continue
+        cli.json(
+            [
+                "squad",
+                "member",
+                "remove",
+                str(action["squad_id"]),
+                "--member-id",
+                str(action["member_id"]),
+                "--type",
+                str(action["member_type"]),
+                "--output",
+                "json",
+            ]
+        )
+        journal["completed"].append(
+            {"type": action["type"], "key": action.get("key"), "at": utc_now()}
+        )
+        write_json(journal_path, journal)
+
+    for action in plan.get("actions", []):
+        if action.get("type") != "DELETE_RETIRED_AUTOPILOT":
+            continue
+        cli.json(["autopilot", "delete", str(action["current_id"])])
+        journal["completed"].append(
+            {"type": action["type"], "key": action.get("key"), "at": utc_now()}
+        )
+        write_json(journal_path, journal)
+
+    retirement_agent_ids, _, retirement_state = _refresh_maps(cli, manifest)
+    for action in plan.get("actions", []):
+        if action.get("type") != "REASSIGN_RETIRED_PROJECT_LEAD":
+            continue
+        lead_key = str(action["lead_key"])
+        lead_id = retirement_agent_ids[lead_key]
+        lead_name = manifest_agent_name(manifest, lead_key)
+        exact_name_matches = [
+            item
+            for item in retirement_state.get("agents", [])
+            if str(item.get("name") or "") == lead_name
+        ]
+        if (
+            len(exact_name_matches) != 1
+            or str(exact_name_matches[0].get("id") or "") != lead_id
+        ):
+            raise WorkflowError(
+                f"retirement project lead name is not unique for {lead_key}"
+            )
+        updated = cli.json(
+            [
+                "project",
+                "update",
+                str(action["current_id"]),
+                "--lead",
+                lead_name,
+                "--output",
+                "json",
+            ]
+        )
+        if str(updated.get("lead_id") or "") != lead_id:
+            raise WorkflowError(
+                f"retirement project lead verification failed for {action['key']}"
+            )
+        journal["completed"].append(
+            {"type": action["type"], "key": action.get("key"), "at": utc_now()}
+        )
+        write_json(journal_path, journal)
+
+    for action in plan.get("actions", []):
+        if action.get("type") != "ARCHIVE_RETIRED_AGENT":
+            continue
+        cli.json(
+            [
+                "agent",
+                "archive",
+                str(action["current_id"]),
+                "--output",
+                "json",
+            ]
+        )
+        journal["completed"].append(
+            {"type": action["type"], "key": action.get("key"), "at": utc_now()}
+        )
+        write_json(journal_path, journal)
+
+    for action in plan.get("actions", []):
+        if action.get("type") != "DELETE_RETIRED_SKILL":
+            continue
+        cli.json(["skill", "delete", str(action["current_id"]), "--yes"])
+        journal["completed"].append(
+            {"type": action["type"], "key": action.get("key"), "at": utc_now()}
+        )
+        write_json(journal_path, journal)
+
     agent_ids, skill_ids, state = _refresh_maps(cli, manifest)
 
     # Apply skill assignments once per affected agent, preserving unrelated skills.
@@ -2276,15 +1916,7 @@ def apply_plan(root: Path, cli: MulticaCLI, plan_path: Path, approval: str) -> d
         for action in plan.get("actions", [])
         if action.get("type") in {"ATTACH_SKILL", "DETACH_SKILL"}
     }
-    desired_attached = desired_skill_attachments(
-        manifest, bool(plan.get("disable_operations", False))
-    )
-    operations = manifest.get("operations") or {}
-    deferred_reporters = (
-        set(operations.get("reporter_agents") or []) & affected_agents
-        if not bool(plan.get("disable_operations", False))
-        else set()
-    )
+    desired_attached = desired_skill_attachments(manifest)
 
     def apply_agent_skill_assignments(
         agent_keys: set[str], current_agent_ids: dict[str, str], current_skill_ids: dict[str, str], current_state: dict[str, Any]
@@ -2305,7 +1937,7 @@ def apply_plan(root: Path, cli: MulticaCLI, plan_path: Path, approval: str) -> d
             journal["completed"].append({"type": "SET_AGENT_SKILLS", "key": agent_key, "at": utc_now()})
             write_json(journal_path, journal)
 
-    apply_agent_skill_assignments(affected_agents - deferred_reporters, agent_ids, skill_ids, state)
+    apply_agent_skill_assignments(affected_agents, agent_ids, skill_ids, state)
 
     agent_ids, _, state = _refresh_maps(cli, manifest)
     project_actions = [
@@ -2332,95 +1964,6 @@ def apply_plan(root: Path, cli: MulticaCLI, plan_path: Path, approval: str) -> d
             raise WorkflowError(f"project lead verification failed for {desired['key']}")
         journal["completed"].append({"type": action["type"], "key": action.get("key"), "at": utc_now()})
         write_json(journal_path, journal)
-
-    agent_ids, _, state = _refresh_maps(cli, manifest)
-    project_ids: dict[str, str] = {}
-    for project in manifest.get("projects", []):
-        current = find_by_managed_key(
-            state.get("projects", []),
-            workflow_id,
-            f"project.{project['key']}",
-            project["title"],
-            "description",
-            project.get("previous_titles") or [],
-            name_field="title",
-        )
-        if current and current.get("id"):
-            project_ids[project["key"]] = str(current["id"])
-
-    autopilot_actions = [
-        action
-        for action in plan.get("actions", [])
-        if action.get("type") in {"CREATE_AUTOPILOT", "ADOPT_AUTOPILOT", "UPDATE_AUTOPILOT"}
-    ]
-    for action in autopilot_actions:
-        desired = action["desired"]
-        agent_id = agent_ids[desired["agent"]]
-        project_id = project_ids[desired["project"]]
-        if action["type"] == "CREATE_AUTOPILOT":
-            raw_current = cli.json(_autopilot_create_args(desired, agent_id, project_id))
-            current = normalized_autopilot_detail(raw_current, {})
-            autopilot_id = str(current.get("id") or "")
-            if not autopilot_id:
-                raise WorkflowError(f"Autopilot create did not return an ID for {desired['key']}")
-            if desired.get("status", "active") != "active":
-                cli.json(
-                    _autopilot_status_update_args(
-                        autopilot_id, desired.get("status", "active")
-                    )
-                )
-        else:
-            autopilot_id = str(action["current_id"])
-            cli.json(_autopilot_update_args(autopilot_id, desired, agent_id, project_id))
-        journal["completed"].append({"type": action["type"], "key": action.get("key"), "at": utc_now()})
-        write_json(journal_path, journal)
-
-    agent_ids, _, state = _refresh_maps(cli, manifest)
-    autopilot_ids: dict[str, str] = {}
-    for autopilot in manifest.get("autopilots", []):
-        current = find_by_managed_key(
-            autopilot_state_items(state),
-            workflow_id,
-            f"autopilot.{autopilot['key']}",
-            autopilot["title"],
-            "description",
-            autopilot.get("previous_titles") or [],
-            name_field="title",
-        )
-        if current and current.get("id"):
-            autopilot_ids[autopilot["key"]] = str(current["id"])
-
-    for action in plan.get("actions", []):
-        if action.get("type") not in {"ADD_AUTOPILOT_TRIGGER", "UPDATE_AUTOPILOT_TRIGGER"}:
-            continue
-        autopilot_id = autopilot_ids[action["autopilot_key"]]
-        if action["type"] == "ADD_AUTOPILOT_TRIGGER":
-            created_trigger = cli.json(_trigger_add_args(autopilot_id, action["desired"]))
-            if not action["desired"].get("enabled", True):
-                trigger_id = str(created_trigger.get("id") or "")
-                if not trigger_id:
-                    raise WorkflowError(f"created trigger returned no ID for {action.get('key')}")
-                cli.json(_trigger_update_args(autopilot_id, trigger_id, action["desired"]))
-        else:
-            cli.json(
-                _trigger_update_args(
-                    autopilot_id, str(action["current_id"]), action["desired"]
-                )
-            )
-        journal["completed"].append({"type": action["type"], "key": action.get("key"), "at": utc_now()})
-        write_json(journal_path, journal)
-
-    for action in deferred_agent_actions:
-        if action["type"] == "CREATE_AGENT":
-            cli.json(_agent_create_args(action["desired"]))
-        else:
-            cli.json(_agent_update_args(str(action["current_id"]), action["desired"]))
-        journal["completed"].append({"type": action["type"], "key": action.get("key"), "at": utc_now()})
-        write_json(journal_path, journal)
-
-    if deferred_reporters:
-        agent_ids, skill_ids, state = _refresh_maps(cli, manifest)
-        apply_agent_skill_assignments(deferred_reporters, agent_ids, skill_ids, state)
 
     # Create or update the squad after agents exist.
     agent_ids, _, state = _refresh_maps(cli, manifest)
@@ -2540,10 +2083,67 @@ def apply_plan(root: Path, cli: MulticaCLI, plan_path: Path, approval: str) -> d
     )
 
 
+def _remove_skill_destination(destination: Path) -> None:
+    is_junction = bool(
+        getattr(destination, "is_junction", lambda: False)()
+    )
+    if destination.is_symlink() or destination.is_file():
+        destination.unlink()
+    elif is_junction:
+        destination.rmdir()
+    else:
+        shutil.rmtree(destination)
+
+
+def _owned_retired_skill(destination: Path, expected_name: str) -> bool:
+    skill_file = destination / "SKILL.md"
+    if not skill_file.is_file():
+        return destination.is_symlink() or bool(
+            getattr(destination, "is_junction", lambda: False)()
+        )
+    content = skill_file.read_text(encoding="utf-8", errors="replace")
+    name_match = re.search(r"(?m)^name:\s*(\S+)\s*$", content)
+    return bool(
+        name_match
+        and name_match.group(1) == expected_name
+        and re.search(rf"(?m)^\s*managed_by:\s*{re.escape(MANAGED_BY)}\s*$", content)
+        and re.search(r"(?m)^\s*workflow_id:\s*development-delivery\s*$", content)
+    )
+
+
+def _copy_skill_source(source: Path, destination: Path) -> None:
+    destination.mkdir(parents=True, exist_ok=False)
+    for path in source_files(source):
+        relative = path.relative_to(source)
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, target)
+
+
 def install_skills(root: Path, target: Path, copy_mode: bool, replace_existing: bool) -> list[dict[str, str]]:
     manifest = read_json(root / "workflow.json")
     results: list[dict[str, str]] = []
     target.mkdir(parents=True, exist_ok=True)
+    for retired_name in sorted(RETIRED_LOCAL_SKILL_NAMES):
+        destination = target / retired_name
+        if not (
+            destination.exists()
+            or destination.is_symlink()
+            or bool(getattr(destination, "is_junction", lambda: False)())
+        ):
+            continue
+        if not _owned_retired_skill(destination, retired_name):
+            raise WorkflowError(
+                f"retired skill destination is not owned by this workflow: {destination}"
+            )
+        _remove_skill_destination(destination)
+        results.append(
+            {
+                "skill": retired_name,
+                "mode": "retired-removed",
+                "path": str(destination),
+            }
+        )
     for skill in manifest.get("skills", []):
         if "local" not in skill.get("targets", []):
             continue
@@ -2558,13 +2158,10 @@ def install_skills(root: Path, target: Path, copy_mode: bool, replace_existing: 
                 pass
             if not replace_existing:
                 raise WorkflowError(f"skill destination exists: {destination}; pass --replace-existing after review")
-            if destination.is_symlink() or destination.is_file():
-                destination.unlink()
-            else:
-                shutil.rmtree(destination)
+            _remove_skill_destination(destination)
         mode = "copy" if copy_mode else "link"
         if copy_mode:
-            shutil.copytree(source, destination)
+            _copy_skill_source(source, destination)
         else:
             try:
                 os.symlink(source, destination, target_is_directory=True)
@@ -2580,10 +2177,10 @@ def install_skills(root: Path, target: Path, copy_mode: bool, replace_existing: 
                     if junction.returncode == 0:
                         mode = "junction"
                     else:
-                        shutil.copytree(source, destination)
+                        _copy_skill_source(source, destination)
                         mode = "copy-fallback"
                 else:
-                    shutil.copytree(source, destination)
+                    _copy_skill_source(source, destination)
                     mode = "copy-fallback"
         results.append({"skill": skill["name"], "mode": mode, "path": str(destination)})
     return results

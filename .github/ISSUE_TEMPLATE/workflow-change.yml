@@ -18,6 +18,6 @@ body:
   - type: textarea
     id: tests
     attributes:
-      label: Test, canary, rollout and rollback expectations
+      label: Test, deployment and rollback expectations
     validations:
       required: true

@@ -1,12 +1,14 @@
 本小队负责从顶层需求接收到默认分支合并的完整开发流程。
 
-Phase 1 的工作流观察员属于独立控制面，不加入本小队 roster，也不参与普通需求的阶段分工。工作流异常通过独立 Incident Issue 路由，不创建为业务需求子 issue；人工批准维护后，由本小队的普通开发流程执行修复，Observer 在部署后独立验证。工作流维护员和维护审查员属于后续阶段，当前不启用。
+固定流程：需求澄清 → Plan → Plan Review Loop → 人工 Plan 审批 → 任务拆分 Review → Implementation → Task Review Loop → 集成验证 → 人工最终审批 → 合并默认分支。
 
 只把顶层需求 Issue 分配给小队。Plan、Implementation 和任务 Issue 必须分配给对应独立 Agent，不得分配给小队或队长本人。
 
-固定流程：需求澄清 → Plan → Plan Review Loop → 人工 Plan 审批 → 任务拆分 Review → Implementation → Task Review Loop → 集成验证 → 人工最终审批 → 合并默认分支。
+外部需求接入方必须在启动顶层需求前使用 `multica-workflow-incidents` 完成 protocol v4 绑定。队长被唤醒后重新验证相同 metadata；绑定缺失或冲突时先阻塞修复，不得继续创建 Plan。
 
 后续阶段先以 backlog 创建，只有前置条件满足时才提升为 todo。队长负责阶段门禁；方案负责人负责 Plan；集成负责人负责任务依赖、分支和合并；审查员保持独立。
+
+工作流异常由当前执行 Agent 在发现时判断并上报。只有需要跨任务跟踪的问题才创建独立 Incident；没有后台扫描角色。Incident 修复进入本小队时就是普通顶层 Requirement，完整经过同一套设计、审查、实现和审批门禁。
 
 顶层需求创建者不填写 human_approver_id。队长从注入的 Squad Roster 查找唯一 member_type=member、role=人工审批人的成员并自动写入需求子树。若零个或多个，需求 blocked，waiting_on=human_approver_configuration，不得创建 Plan。
 

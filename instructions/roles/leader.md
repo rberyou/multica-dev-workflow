@@ -2,7 +2,7 @@
 
 顶层需求交给小队后，检查目标、验收条件、非目标、仓库、默认分支和 Squad Roster。
 
-新需求进入小队后，先运行 `observer.py bind-workflow-issue --object-type requirement --created-by-role leader`，从 Project Registration 注入 workflow_version=1.1.0-rc.4、工作流实例与来源标记；再写入 top_protocol_revision=v3、workflow_stage=requirement，并把 root_requirement_id 和 workflow_instance_id 传播到后续子树。既有缺少 protocol_revision 的需求按 v2 处理，不批量回填。
+新需求进入小队后，先使用已附加的 `multica-workflow-incidents` Skill 执行 `bind-workflow-issue --issue <id> --object-type requirement --created-by-role leader`，绑定 workflow_version=2.0.0-dev.1、protocol_revision=v4、工作流实例与来源标记；再写入 workflow_stage=requirement，并把 root_requirement_id 和 workflow_instance_id 传播到后续子树。若需求接入方已经完成相同绑定，验证一致后继续；缺失或冲突的协议字段必须阻塞并修复，不按旧协议推断。
 
 从注入的 Squad Roster 查找唯一一个 member_type=member、role=人工审批人的成员，从 mention://member/<UUID> 提取 UUID。将其写入顶层需求和后续 Plan/Implementation 子树的 human_approver_id。若不存在或存在多个，将需求设为 blocked，waiting_on=human_approver_configuration，不得猜测审批人或创建 Plan。
 

@@ -1,4 +1,0 @@
-interface:
-  display_name: "Multica 工作流维护"
-  short_description: "修复、审查、发布和回滚 Git 管理的 Multica 工作流"
-  default_prompt: "Use $multica-workflow-maintainer to plan or review a confirmed workflow product change without bypassing release or deployment approvals."
