@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Require a versioned, explicitly confirmed requirement draft before `multica-requirement-intake` creates or starts a top-level Issue.
+- Make create-and-start continue following the complete Requirement chain through human gates and terminal delivery, with an explicit capability fallback when the host cannot keep a monitor active.
+- Require a final canonical-ID readback before reporting successful creation, update, or start, so an unverified Issue key cannot be presented as completed work.
+
 ## 1.1.0-rc.4
 
 - Align desired state, default installation, CI and release assets with Phase 1: ordinary development Agents plus Observer, without activating Maintainer, Maintenance Reviewer or enforced Secure Runtime isolation.

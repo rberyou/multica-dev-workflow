@@ -14,6 +14,37 @@ from workflow_lib import WorkflowError, validate_repository  # noqa: E402
 
 
 class ManifestTests(unittest.TestCase):
+    def test_requirement_intake_confirms_before_create_and_keeps_following(self):
+        skill = (ROOT / "skills/multica-requirement-intake/SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        agent = (
+            ROOT / "skills/multica-requirement-intake/agents/openai.yaml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("CONFIRM REQUIREMENT v<N>", skill)
+        self.assertIn(
+            "before the corresponding create, start, or material-update mutation",
+            skill,
+        )
+        self.assertIn("duplicate disposition", skill)
+        self.assertIn("canonical identifier and link", skill)
+        self.assertIn(
+            "fresh read of the resulting state by its canonical service ID", skill
+        )
+        self.assertIn("require it to be a top-level issue", skill)
+        self.assertIn("reuses an issue that is already active", skill)
+        self.assertIn("finally-style cleanup", skill)
+        self.assertIn("Do not create a temporary file for unchanged reuse", skill)
+        self.assertIn("continue monitoring for that comment", skill)
+        self.assertIn("Continuously Follow a Started Requirement", skill)
+        self.assertIn("An approval interaction is a pause in monitoring", skill)
+        self.assertIn("confirm a top-level requirement before creating it", agent)
+        self.assertNotIn(
+            "do not ask for a separate confirmation after preparing the description",
+            skill,
+        )
+
     def test_manager_flow_requires_explicit_verify_after_apply(self):
         content = (ROOT / "skills/multica-workflow-manager/SKILL.md").read_text(
             encoding="utf-8"

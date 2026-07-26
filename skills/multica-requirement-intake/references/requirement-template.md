@@ -126,10 +126,10 @@ LLM 偶尔返回不符合预期格式的 JSON，例如附带 Markdown code fence
 
 ## 常用提示词
 
-直接提交：
+确认后提交并持续跟踪：
 
 ```text
-使用 multica-requirement-intake，把以下问题整理成顶层需求并提交到 Multica 的 AINotes 项目，分配给开发交付小队并启动：<问题详情>
+使用 multica-requirement-intake，把以下问题整理成顶层需求草案，先和我确认完整内容；我确认当前草案版本后，再提交到 Multica 的 AINotes 项目，分配给开发交付小队并启动，并持续跟踪到需求完成或需要我明确操作：<问题详情>
 ```
 
 只生成草稿：
