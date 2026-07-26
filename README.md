@@ -20,7 +20,7 @@ The base architecture is recorded in [docs/design-plan-v5.md](docs/design-plan-v
 - v1.1 does not prune, destroy or archive managed objects.
 - Observer reporting may create/update Incident data only. Maintenance intake is human-gated; an approved Incident creates one minimal Maintenance Case that is repaired through the ordinary development workflow.
 - Local release tooling can validate and dispatch a request but cannot create tags or Releases. Publication runs only behind the protected `workflow-release` GitHub Environment.
-- Phase 1 does not deploy Workflow Maintainer or Maintenance Reviewer Agents and does not enforce the Secure Agent Runtime. Those components remain future-phase source and are validated only by the path-scoped future-components workflow.
+- Phase 1 does not deploy Workflow Maintainer or Maintenance Reviewer Agents and does not enforce the Secure Agent Runtime. Those components remain future-phase source and are validated only in separately reviewed future-component changes.
 
 ## Quick Start
 

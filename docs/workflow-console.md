@@ -40,6 +40,6 @@ The deployment journal must be the completed journal produced by `workflow.py ap
 
 ## Future Components
 
-`skills/multica-workflow-maintainer/`, the Maintainer/Reviewer instructions and `secure-runtime/` remain source for Phase 2 and Phase 3 development. They are not part of `workflow.json` desired state, default Skill installation, Phase 1 CI or Phase 1 release assets. Their validation is isolated in `.github/workflows/validate-future-components.yml`.
+`skills/multica-workflow-maintainer/`, the Maintainer/Reviewer instructions and `secure-runtime/` remain source for Phase 2 and Phase 3 development. They are not part of `workflow.json` desired state, default Skill installation, Phase 1 CI or Phase 1 release assets. Their validation must be performed in a separate future-component change.
 
 The historical `maintenance_loop.py`, Broker and Secure Runtime commands must not be used as active Phase 1 operating instructions.

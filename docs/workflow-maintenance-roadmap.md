@@ -135,7 +135,7 @@ Observer 应保证重复报告和重复巡检最终汇聚到同一个 Incident�
 
 第一阶段不启用 Maintainer 自动修复，也不要求完整生产级安全隔离。人工批准维护后，现有普通开发流程暂时代行 Maintenance Case 的执行，Observer 只负责持续跟踪和最终验证；这是阶段性替代，不改变 Maintainer 在目标架构中的最终归属。重点是证明异常能够被可靠发现、记录、跟踪和验证。
 
-当前仓库 `workflow.phase=1`。因此 `workflow.json`、Observer 控制面契约、默认 Skill 安装、常规 CI 和发布资产都只包含普通开发流程与 Observer 所需组件；Maintainer、Maintenance Reviewer 和 Secure Runtime 仅保留为未来阶段源码与路径级验证对象。
+当前仓库 `workflow.phase=1`。因此 `workflow.json`、Observer 控制面契约、默认 Skill 安装、常规 CI 和发布资产都只包含普通开发流程与 Observer 所需组件；Maintainer、Maintenance Reviewer 和 Secure Runtime 仅保留为未来阶段源码，其验证必须放在独立的未来组件变更中。
 
 ### 第二阶段：维护闭环
 

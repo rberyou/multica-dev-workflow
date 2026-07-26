@@ -1469,6 +1469,14 @@ def parse_iso_datetime(value: str, label: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def canonical_iso_datetime(value: str, label: str) -> str:
+    return (
+        parse_iso_datetime(value, label)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
+
+
 def git_head(root: Path) -> str:
     return run(["git", "rev-parse", "HEAD"], root).stdout.strip()
 
@@ -1766,13 +1774,11 @@ def verify_release_tag_ruleset(
             f"GitHub release tag ruleset is missing restrictions: {sorted(required_rules - rule_types)}"
         )
     publisher = evidence.get("publisher_app") or {}
-    app = gh_json(root, ["api", f"apps/{publisher['slug']}"])
-    if (
-        not isinstance(app, dict)
-        or int(app.get("id") or 0) != int(publisher["id"])
-        or str(app.get("slug") or "") != str(publisher["slug"])
-    ):
-        raise ReleaseError("GitHub Publisher App public identity differs from administrator evidence")
+    # The Publisher App is intentionally private. Its identity, installation,
+    # permissions and repository scope are bound by reviewed administrator
+    # evidence above; the live Ruleset bypass actor is checked below whenever
+    # GitHub exposes it to the read-only caller. The public App endpoint returns
+    # 404 for a private App and therefore cannot be a release prerequisite.
     observed_bypass = [item for item in detail.get("bypass_actors") or [] if isinstance(item, dict)]
     if observed_bypass and observed_bypass != expected.get("bypass_actors"):
         raise ReleaseError("GitHub release tag Ruleset bypass actors differ from administrator evidence")
@@ -1790,7 +1796,10 @@ def verify_release_tag_ruleset(
         "source": str(detail.get("source") or expected.get("source") or ""),
         "target": str(detail.get("target") or ""),
         "enforcement": str(detail.get("enforcement") or ""),
-        "updated_at": str(detail.get("updated_at") or ""),
+        "updated_at": canonical_iso_datetime(
+            str(detail.get("updated_at") or ""),
+            "GitHub release tag Ruleset updated_at",
+        ),
         "publisher_app_id": int(publisher["id"]),
         "publisher_app_slug": str(publisher["slug"]),
         "rules": sorted(normalized_rules, key=canonical),
@@ -1806,7 +1815,10 @@ def verify_release_tag_ruleset(
         "source": str(expected.get("source") or ""),
         "target": str(expected.get("target") or ""),
         "enforcement": str(expected.get("enforcement") or ""),
-        "updated_at": str(expected.get("updated_at") or ""),
+        "updated_at": canonical_iso_datetime(
+            str(expected.get("updated_at") or ""),
+            "release-control tag Ruleset updated_at",
+        ),
         "rules": sorted(
             [
                 {
@@ -1883,6 +1895,13 @@ def environment_protection_snapshot(
         if not isinstance(rule, dict):
             raise ReleaseError("GitHub release Environment contains an invalid protection rule")
         rule_type = str(rule.get("type") or "")
+        if rule_type == "branch_policy":
+            # GitHub exposes the Environment deployment branch policy both as
+            # a protection-rule marker and as the detailed
+            # deployment_branch_policy object queried below. Normalize it only
+            # from the detailed object so the evidence digest is stable across
+            # API response shapes.
+            continue
         if rule_type == "wait_timer":
             normalized_rules.append(
                 {"type": rule_type, "wait_timer": int(rule.get("wait_timer") or 0)}

@@ -135,20 +135,14 @@ class ManifestTests(unittest.TestCase):
         control = json.loads((ROOT / "docs/release-control.json").read_text(encoding="utf-8"))
         self.assertEqual(control["required_visibility"], "public")
 
-    def test_phase1_ci_is_separate_from_future_component_validation(self):
+    def test_phase1_ci_excludes_future_component_validation(self):
         phase1 = (ROOT / ".github/workflows/validate.yml").read_text(
             encoding="utf-8"
         )
-        future = (
-            ROOT / ".github/workflows/validate-future-components.yml"
-        ).read_text(encoding="utf-8")
         self.assertIn("name: validate-phase1", phase1)
         self.assertNotIn("actions/setup-dotnet", phase1)
         self.assertNotIn("generate_secure_runtime_manifest.py", phase1)
         self.assertNotIn("multica-workflow-maintainer", phase1)
-        self.assertIn("workflow_dispatch:", future)
-        self.assertIn("actions/setup-dotnet", future)
-        self.assertIn("multica-workflow-maintainer", future)
 
     def test_operations_disable_automatic_maintenance_expansion(self):
         manifest = json.loads((ROOT / "workflow.json").read_text(encoding="utf-8"))

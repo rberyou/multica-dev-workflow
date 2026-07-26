@@ -47,7 +47,7 @@ The release workflow validates the request with a read-only built-in token and r
 - complete repository bundle;
 - SHA256 checksums.
 
-Maintainer Skill and Secure Runtime binary packages are future-component artifacts and are not part of the Phase 1 release asset set. Their source remains in the repository and is checked by `.github/workflows/validate-future-components.yml` only when relevant paths change or the workflow is started manually.
+Maintainer Skill and Secure Runtime binary packages are future-component artifacts and are not part of the Phase 1 release asset set. Their source remains in the repository, but its validation belongs to a separately reviewed future-component change and must not become a Phase 1 release gate.
 
 Direct `v*` tag pushes do not trigger publication and are rejected by the tag ruleset for ordinary users, Dispatcher credentials and the built-in workflow token. New tags bind the Release Request digest, Plan digest, source commit, implementation provenance, CI run, expected assets, Multica approval commitments, Dispatcher installation, workflow run ID, Environment approval, publish gate and Publisher installation.
 

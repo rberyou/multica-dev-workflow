@@ -29,7 +29,7 @@ python -m py_compile scripts/workflow.py scripts/workflow_lib.py scripts/package
 check-jsonschema --schemafile workflow.schema.json workflow.json
 ```
 
-Run `generate_secure_runtime_manifest.py` and the .NET build/security tests only when a change touches `secure-runtime/`, `skills/multica-workflow-maintainer/`, or another future-component path selected by `.github/workflows/validate-future-components.yml`.
+Run `generate_secure_runtime_manifest.py` and the .NET build/security tests only in a separately reviewed future-component change that intentionally touches `secure-runtime/`, `skills/multica-workflow-maintainer/`, or their packaging and tests. Do not couple those checks to a Phase 1 PR.
 
 Validate desired-state changes with `check-jsonschema --schemafile workflow.schema.json workflow.json`. Inspect locally with `python scripts/workflow.py doctor`, then `export`, `plan`, and `verify`. Apply only a reviewed plan with matching `APPROVE WORKFLOW PLAN <short-digest>` approval; plan changes invalidate approval.
 
@@ -39,7 +39,7 @@ Use four-space indentation. Follow Python conventions (`snake_case` functions, `
 
 ## Testing Guidelines
 
-Name Python files `test_*.py` and methods `test_<behavior>`. Add regression tests beside the affected subsystem, including failure paths for approval, digest, redaction, and policy changes. Tests must be deterministic across Windows, Linux, and macOS. Run the Phase 1 Python, contract, compile and schema checks before opening a PR. Run future-component Python/.NET checks only when the PR changes their scoped paths.
+Name Python files `test_*.py` and methods `test_<behavior>`. Add regression tests beside the affected subsystem, including failure paths for approval, digest, redaction, and policy changes. Tests must be deterministic across Windows, Linux, and macOS. Run the Phase 1 Python, contract, compile and schema checks before opening a PR. Keep future-component Python/.NET validation in its own explicitly scoped change.
 
 ## Agent Workflow Concepts
 

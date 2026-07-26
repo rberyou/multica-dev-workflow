@@ -578,6 +578,7 @@ class ReleaseTests(unittest.TestCase):
                 "id": 42,
                 "name": "workflow-release",
                 "protection_rules": [
+                    {"type": "branch_policy"},
                     {
                         "type": "required_reviewers",
                         "prevent_self_review": True,
@@ -634,6 +635,35 @@ class ReleaseTests(unittest.TestCase):
                 "slug": "multica-workflow-publisher",
             }
         raise AssertionError(args)
+
+    def test_environment_snapshot_accepts_github_branch_policy_marker(self):
+        detail = self.protected_environment_gh(
+            [
+                "api",
+                "repos/rberyou/multica-dev-workflow/environments/workflow-release",
+            ]
+        )
+        rules, reviewers, prevent_self_review = (
+            release.environment_protection_snapshot(detail)
+        )
+        self.assertEqual(
+            rules,
+            [
+                {
+                    "type": "required_reviewers",
+                    "prevent_self_review": True,
+                    "reviewers": [
+                        {
+                            "type": "User",
+                            "id": 7,
+                            "login": "isolated-reviewer",
+                        }
+                    ],
+                }
+            ],
+        )
+        self.assertEqual(reviewers, {"isolated-reviewer"})
+        self.assertIs(prevent_self_review, True)
 
     @staticmethod
     def release_request_fixture():
@@ -1469,6 +1499,48 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(boundary["dispatcher_app_id"], self.DISPATCHER_APP_ID)
         self.assertTrue(boundary["dispatcher_token_verified"])
         self.assertEqual(boundary["publisher_app_id"], self.PUBLISHER_APP_ID)
+
+    def test_release_environment_does_not_require_public_publisher_app(self):
+        calls = []
+
+        def private_publisher_gh(root, args):
+            calls.append(args)
+            if args[:2] == ["api", "apps/multica-workflow-publisher"]:
+                raise AssertionError("private Publisher App must not require public readback")
+            return self.protected_environment_gh(args)
+
+        with (
+            patch.dict(release.os.environ, {"GH_TOKEN": "dispatcher-token"}, clear=True),
+            patch.object(release, "gh_json", side_effect=private_publisher_gh),
+        ):
+            boundary = release.verify_release_environment(ROOT)
+        self.assertEqual(boundary["publisher_app_id"], self.PUBLISHER_APP_ID)
+        self.assertFalse(
+            any(
+                args[:2] == ["api", "apps/multica-workflow-publisher"]
+                for args in calls
+            )
+        )
+
+    def test_release_environment_normalizes_ruleset_timestamp_timezone(self):
+        def offset_timestamp_gh(root, args):
+            value = self.protected_environment_gh(args)
+            if args[:2] == [
+                "api",
+                "repos/rberyou/multica-dev-workflow/rulesets/99",
+            ]:
+                value["updated_at"] = "2026-07-19T08:00:00+08:00"
+            return value
+
+        with (
+            patch.dict(release.os.environ, {"GH_TOKEN": "dispatcher-token"}, clear=True),
+            patch.object(release, "gh_json", side_effect=offset_timestamp_gh),
+        ):
+            boundary = release.verify_release_environment(ROOT)
+        self.assertEqual(
+            boundary["tag_ruleset"]["updated_at"],
+            "2026-07-19T00:00:00.000000Z",
+        )
 
     def test_release_environment_requires_public_repository(self):
         with (
