@@ -16,6 +16,7 @@ import subprocess
 from typing import Any, Iterable
 
 from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
 
 from package_skills import build_archive, package_hash, source_files
 
@@ -354,6 +355,11 @@ def validate_repository(root: Path, deployment_profile: str) -> tuple[dict[str, 
     for relative in squad.get("instruction_files") or []:
         if not (root / relative).is_file():
             errors.append(f"squad references missing instruction file {relative}")
+    squad_agent_keys = {
+        str(member.get("agent") or "")
+        for member in squad.get("agent_members") or []
+        if member.get("agent")
+    }
     skill_keys = [skill.get("key") for skill in manifest.get("skills") or []]
     skill_names = [skill.get("name") for skill in manifest.get("skills") or []]
     if len(set(skill_keys)) != len(skill_keys) or len(set(skill_names)) != len(skill_names):
@@ -365,6 +371,40 @@ def validate_repository(root: Path, deployment_profile: str) -> tuple[dict[str, 
         unknown = set(skill.get("attach_to") or []) - set(agent_keys)
         if unknown:
             errors.append(f"skill {skill.get('key')} attaches to unknown agents: {sorted(unknown)}")
+    delivery_skill = next(
+        (
+            skill
+            for skill in manifest.get("skills") or []
+            if skill.get("key") == "delivery-policy"
+        ),
+        None,
+    )
+    if not delivery_skill:
+        errors.append("delivery-policy skill is required")
+    else:
+        if "workspace" not in set(delivery_skill.get("targets") or []):
+            errors.append("delivery-policy skill must target workspace")
+        if set(delivery_skill.get("attach_to") or []) != squad_agent_keys:
+            errors.append("delivery-policy skill must attach to every squad agent")
+        delivery_root = root / str(delivery_skill.get("path", ""))
+        delivery_schema_path = delivery_root / "references/project-delivery.schema.json"
+        delivery_example_path = delivery_root / "references/project-delivery.example.json"
+        if not delivery_schema_path.is_file() or not delivery_example_path.is_file():
+            errors.append("delivery-policy skill requires its project schema and example")
+        else:
+            try:
+                delivery_schema = read_json(delivery_schema_path)
+                delivery_example = read_json(delivery_example_path)
+                Draft202012Validator.check_schema(delivery_schema)
+                example_errors = sorted(
+                    Draft202012Validator(delivery_schema).iter_errors(delivery_example),
+                    key=lambda item: tuple(str(part) for part in item.absolute_path),
+                )
+                for item in example_errors:
+                    location = ".".join(str(part) for part in item.absolute_path) or "<root>"
+                    errors.append(f"project delivery example {location}: {item.message}")
+            except (WorkflowError, OSError, json.JSONDecodeError, SchemaError) as exc:
+                errors.append(f"invalid delivery-policy schema or example: {exc}")
     projects = manifest.get("projects") or []
     project_keys = [project.get("key") for project in projects]
     project_titles = [project.get("title") for project in projects]
@@ -389,11 +429,7 @@ def validate_repository(root: Path, deployment_profile: str) -> tuple[dict[str, 
         if unknown_reporters:
             errors.append(f"incidents.reporter_agents reference unknown agents: {sorted(unknown_reporters)}")
         reporter_agents = set(incidents.get("reporter_agents") or [])
-        squad_agents = {
-            str(member.get("agent") or "")
-            for member in squad.get("agent_members") or []
-            if member.get("agent")
-        }
+        squad_agents = squad_agent_keys
         if reporter_agents != squad_agents:
             errors.append(
                 "incidents.reporter_agents must exactly match squad.agent_members agents"
@@ -420,6 +456,7 @@ def validate_repository(root: Path, deployment_profile: str) -> tuple[dict[str, 
         *root.glob("skills/**/*.md"),
         *root.glob("skills/**/*.yaml"),
         *root.glob("skills/**/*.py"),
+        *root.glob("skills/**/*.json"),
         *root.glob("docs/*.md"),
         *root.glob(".github/**/*.yml"),
         *root.glob(".github/**/*.md"),

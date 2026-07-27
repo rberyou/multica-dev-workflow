@@ -141,12 +141,39 @@ class DocumentationTests(unittest.TestCase):
         incidents = (
             ROOT / "skills/multica-workflow-incidents/SKILL.md"
         ).read_text(encoding="utf-8")
+        delivery = (
+            ROOT / "skills/multica-delivery-policy/SKILL.md"
+        ).read_text(encoding="utf-8")
         console = (ROOT / "skills/multica-workflow-console/SKILL.md").read_text(
             encoding="utf-8"
         )
         self.assertIn("(references/incident-contract.md)", incidents)
+        self.assertIn("(references/policy-contract.md)", delivery)
+        self.assertIn("(references/evidence-contract.md)", delivery)
         self.assertLess(len(incidents.splitlines()), 100)
+        self.assertLess(len(delivery.splitlines()), 100)
         self.assertLess(len(console.splitlines()), 50)
+
+    def test_delivery_policy_docs_match_protocol_contract(self):
+        policy_root = ROOT / "skills/multica-delivery-policy"
+        skill = (policy_root / "SKILL.md").read_text(encoding="utf-8")
+        policy = (policy_root / "references/policy-contract.md").read_text(
+            encoding="utf-8"
+        )
+        evidence = (policy_root / "references/evidence-contract.md").read_text(
+            encoding="utf-8"
+        )
+        instructions = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (ROOT / "instructions").rglob("*.md")
+        )
+        for mode in ["branch_only", "lightweight", "isolated"]:
+            self.assertIn(mode, skill + policy + instructions)
+        self.assertIn("multica.delivery.json", policy)
+        self.assertIn("policy_digest", policy + evidence + instructions)
+        self.assertIn("approved_requirement_head_sha", evidence + instructions)
+        self.assertIn("APPROVE REQUIREMENT vN", evidence + instructions)
+        self.assertIn("人工不手工填写 SHA", instructions)
 
     def test_ci_and_agent_guide_run_documentation_tests(self):
         self.assertIn(
@@ -155,6 +182,10 @@ class DocumentationTests(unittest.TestCase):
         )
         self.assertIn(
             "tests.test_docs", (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        )
+        self.assertIn(
+            "tests.test_delivery_policy",
+            (ROOT / "AGENTS.md").read_text(encoding="utf-8"),
         )
 
     def test_runtime_map_documentation_matches_local_state_boundaries(self):

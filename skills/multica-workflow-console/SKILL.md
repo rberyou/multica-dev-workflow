@@ -4,7 +4,7 @@ description: Check repository validity and current Multica workflow drift throug
 metadata:
   managed_by: multica-dev-workflow
   workflow_id: development-delivery
-  version: 2.0.0-dev.1
+  version: 2.0.0-dev.2
 ---
 
 # Multica Workflow Console

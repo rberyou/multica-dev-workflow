@@ -82,11 +82,11 @@ Agent 与你确认 Requirement Draft
   -> 你批准 Plan
   -> 方案负责人拆分任务并完成拆分审查
   -> 集成负责人创建 Implementation 和任务
-  -> 开发、测试、代码 Review Loop、合并任务分支
+  -> 按批准的 workspace/PR 策略开发、测试、代码 Review Loop、合并任务分支
   -> 集成验证
   -> 顶层需求进入 in_review
   -> 你最终批准
-  -> 集成负责人合并需求 PR
+  -> 集成负责人通过 Requirement PR 或本地方式合并需求分支
   -> 顶层需求 done
 ```
 
@@ -94,10 +94,20 @@ Agent 与你确认 Requirement Draft
 
 - 未通过独立 Plan Review，不应请求你审批。
 - 没有 `APPROVE PLAN v<N>`，不得开始实现。
-- 没有代码审查和集成验证，Implementation 不得完成。
+- 没有代码审查和集成验证，Implementation 不得完成；关闭 PR 不会取消这些门禁。
 - 没有 `APPROVE REQUIREMENT v<N>`，不得合并到默认分支。
 - 创建需求的 `CONFIRM REQUIREMENT v<N>` 不能替代 `APPROVE PLAN v<N>` 或 `APPROVE REQUIREMENT v<N>`。
 - 每次人工审批或决策完成后，Agent 应继续跟踪原需求，而不是把审批当作任务终点。
+
+### 项目交付策略
+
+Planner 会从产品仓库的 `multica.delivery.json` 和 Git remote 解析本次交付策略，并把完整快照和 `policy_digest` 写入 Plan。没有配置且存在受支持 GitHub remote 时，默认使用 `lightweight`、关闭 Task PR、启用 Requirement PR；没有任何 remote 时两个 PR 都关闭。不受支持或不明确的 remote 会阻塞 Plan，直到项目显式配置交付能力。
+
+- `branch_only`：使用现有 checkout，开发、审查和集成串行执行。
+- `lightweight`：只创建一个需求 worktree，任务串行执行。
+- `isolated`：每个任务使用独立 worktree，可按任务依赖并行。
+
+所有模式都保留需求分支、任务分支、独立 Review、测试、人工批准和合并记录。关闭 PR 只改变交付载体。Plan 批准后 Agent 不得自行切换模式；项目配置或 remote 能力变化时必须重新 Plan 和审批。
 
 ## 5. 开发执行中你需要操作的三个时刻
 
@@ -145,7 +155,7 @@ DECISION: 采用方案 B，保持旧接口兼容一个版本，并记录废弃�
 - Plan 与 Implementation 均已完成；
 - 集成验证通过；
 - 需求验收条件逐项有结果；
-- Requirement PR、CI、测试和剩余风险清楚；
+- 交付策略摘要、需求 head、可选 Requirement PR/CI、测试和剩余风险清楚；
 - 当前实现仍绑定已批准的 Plan 版本。
 
 确认后评论：
@@ -154,7 +164,7 @@ DECISION: 采用方案 B，保持旧接口兼容一个版本，并记录废弃�
 APPROVE REQUIREMENT v2
 ```
 
-同时提及集成负责人。小队随后才可合并到默认分支。
+同时提及集成负责人。小队会自动把已审查需求 head 绑定到该批准；你不需要填写 SHA。随后才可通过 PR 或本地方式合并到默认分支。
 
 ## 6. 状态的实际意义
 
@@ -196,7 +206,7 @@ Agent 应读取：
 - 顶层需求及父子关系；
 - 最新评论和明确的 Review 结论；
 - metadata 中的 `plan_revision`、`waiting_on`、`blocked_reason`；
-- 当前 assignee、状态、分支、commit、PR 和测试结果。
+- 当前 assignee、状态、交付策略摘要、分支、commit、可选 PR 和测试结果。
 
 ## 8. 需求应该提供什么
 

@@ -49,6 +49,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn("CHANGELOG.md", checked)
         self.assertIn("checksums.txt", assets)
         self.assertIn(f"multica-workflow-incidents-v{VERSION}.zip", assets)
+        self.assertIn(f"multica-delivery-policy-v{VERSION}.zip", assets)
         self.assertNotIn("allow-non-main", release.parser().format_help())
         subparsers = next(
             action

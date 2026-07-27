@@ -61,6 +61,14 @@ class ManifestTests(unittest.TestCase):
         self.assertIn("workspace", skill["targets"])
         self.assertEqual(project["lead"], "leader")
 
+    def test_delivery_policy_skill_is_attached_to_every_squad_agent(self):
+        squad_agents = {item["agent"] for item in self.manifest["squad"]["agent_members"]}
+        skill = next(
+            item for item in self.manifest["skills"] if item["key"] == "delivery-policy"
+        )
+        self.assertEqual(set(skill["attach_to"]), squad_agents)
+        self.assertIn("workspace", skill["targets"])
+
     def test_versions_match_every_active_skill(self):
         version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
         self.assertEqual(self.manifest["workflow"]["version"], version)
@@ -73,6 +81,8 @@ class ManifestTests(unittest.TestCase):
         self.assertIn("tests.test_docs", workflow)
         self.assertIn("tests.test_incidents", workflow)
         self.assertIn("multica-workflow-incidents/scripts/incidents.py", workflow)
+        self.assertIn("tests.test_delivery_policy", workflow)
+        self.assertIn("multica-delivery-policy/scripts/delivery_policy.py", workflow)
         self.assertNotIn("generate_audit_contract.py", workflow)
         self.assertNotIn("release-control-evidence", workflow)
 

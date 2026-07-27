@@ -32,6 +32,10 @@ class PackageSkillsTests(unittest.TestCase):
                     if skill.name == "multica-workflow-incidents":
                         self.assertIn("scripts/incidents.py", names)
                         self.assertIn("references/incident-contract.md", names)
+                    if skill.name == "multica-delivery-policy":
+                        self.assertIn("scripts/delivery_policy.py", names)
+                        self.assertIn("references/project-delivery.schema.json", names)
+                        self.assertIn("references/evidence-contract.md", names)
 
     def test_package_omits_runtime_cache_files(self):
         with tempfile.TemporaryDirectory() as temp:

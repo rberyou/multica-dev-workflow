@@ -4,7 +4,7 @@
   "workflow": {
     "id": "development-delivery",
     "name": "开发交付小队",
-    "version": "2.0.0-dev.1",
+    "version": "2.0.0-dev.2",
     "protocol_revision": "v4",
     "approver_role": "人工审批人"
   },
@@ -22,6 +22,21 @@
       "path": "skills/multica-workflow-manager",
       "targets": ["local"],
       "attach_to": []
+    },
+    {
+      "key": "delivery-policy",
+      "name": "multica-delivery-policy",
+      "path": "skills/multica-delivery-policy",
+      "targets": ["local", "workspace"],
+      "attach_to": [
+        "leader",
+        "planner",
+        "plan-reviewer",
+        "integrator",
+        "developer-a",
+        "developer-b",
+        "code-reviewer"
+      ]
     },
     {
       "key": "workflow-incidents",
@@ -86,7 +101,7 @@
     {
       "key": "developer-a",
       "name": "开发工程师 A",
-      "description": "在独立任务 worktree 中实现、测试并提交 Task PR",
+      "description": "按已批准交付策略实现、测试并提交任务审查",
       "runtime_binding": "codex-worker",
       "instruction_files": ["instructions/common.md", "instructions/roles/developer.md"],
       "max_concurrent_tasks": 1,
@@ -95,7 +110,7 @@
     {
       "key": "developer-b",
       "name": "开发工程师 B",
-      "description": "在独立任务 worktree 中实现、测试并提交 Task PR",
+      "description": "按已批准交付策略实现、测试并提交任务审查",
       "runtime_binding": "codex-worker",
       "instruction_files": ["instructions/common.md", "instructions/roles/developer.md"],
       "max_concurrent_tasks": 1,
