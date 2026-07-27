@@ -1837,7 +1837,7 @@ def apply_plan(root: Path, cli: MulticaCLI, plan_path: Path, approval: str) -> d
     for action in plan.get("actions", []):
         if action.get("type") != "DELETE_RETIRED_AUTOPILOT":
             continue
-        cli.json(["autopilot", "delete", str(action["current_id"])])
+        cli.text(["autopilot", "delete", str(action["current_id"])])
         journal["completed"].append(
             {"type": action["type"], "key": action.get("key"), "at": utc_now()}
         )
@@ -1902,7 +1902,7 @@ def apply_plan(root: Path, cli: MulticaCLI, plan_path: Path, approval: str) -> d
     for action in plan.get("actions", []):
         if action.get("type") != "DELETE_RETIRED_SKILL":
             continue
-        cli.json(["skill", "delete", str(action["current_id"]), "--yes"])
+        cli.text(["skill", "delete", str(action["current_id"]), "--yes"])
         journal["completed"].append(
             {"type": action["type"], "key": action.get("key"), "at": utc_now()}
         )

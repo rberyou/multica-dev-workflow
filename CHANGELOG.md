@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Accept the Multica CLI's text-only success responses when retiring Autopilots and Skills.
 - Scope local Runtime UUID maps by Workspace ID while retaining explicit path overrides.
 - Store Runtime maps as Home-level Workflow/Workspace configuration while keeping Plans, journals, deployment evidence, release Plans, and worktrees repository-local.
 - Reorganize the workflow-manager Skill for progressive disclosure, with separate command and Runtime-map references.

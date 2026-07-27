@@ -95,6 +95,7 @@ class FakeCLI:
         self.profile = "test"
         self.workspace_id = "workspace-test"
         self.calls = []
+        self.text_calls = []
         self.agents = []
         self.squads = []
         self.skills = []
@@ -114,6 +115,22 @@ class FakeCLI:
             },
         ]
         self.user = {"id": "user-test", "name": "Tester"}
+
+    def text(self, args, include_workspace=True, check=True):
+        args = list(args)
+        command = tuple(args)
+        self.calls.append(command)
+        self.text_calls.append(command)
+        if command[:2] == ("autopilot", "delete"):
+            autopilot = next(item for item in self.autopilots if item["id"] == args[2])
+            self.autopilots.remove(autopilot)
+            return f"Autopilot {args[2]} deleted."
+        if command[:2] == ("skill", "delete"):
+            skill_id = args[2]
+            self.skills = [item for item in self.skills if item["id"] != skill_id]
+            self.skill_details.pop(skill_id, None)
+            return f"Skill {skill_id} deleted."
+        raise AssertionError(f"unexpected fake text command: {command}")
 
     def json(self, args, include_workspace=True):
         args = list(args)
@@ -588,6 +605,12 @@ class ReconcileTests(unittest.TestCase):
                 and call[2] == "autopilot-retired"
             )
             self.assertLess(autopilot_index, archive_index)
+            self.assertIn(
+                ("autopilot", "delete", "autopilot-retired"), cli.text_calls
+            )
+            self.assertIn(
+                ("skill", "delete", "skill-retired", "--yes"), cli.text_calls
+            )
             project_index = next(
                 index
                 for index, call in enumerate(cli.calls)
