@@ -40,6 +40,8 @@ python scripts/workflow.py apply --plan <plan-file> --approve <short-digest>
 python scripts/workflow.py verify
 ```
 
+After resolving the target Workspace, `doctor`, `plan`, `drift`, and `verify` automatically use `.multica/runtime-maps/<workspace-id>.json`; `apply` uses the exact path and hash stored in its reviewed Plan. Each Workspace therefore has an independent local Runtime UUID map. If the file is absent, provider selection is automatic and succeeds only when every required provider has a single online Runtime. Use `--runtime-map <path>` only for an explicit override.
+
 Use `--deployment-profile codex-only --rebind-runtimes` only for an intentional Runtime-provider change. Runtime bindings select available execution providers; they are not a security-isolation boundary.
 
 ## Workflow Incidents

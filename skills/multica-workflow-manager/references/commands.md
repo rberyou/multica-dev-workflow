@@ -16,6 +16,18 @@ Add `--allow-dirty` only to inspect a draft Plan from an uncommitted checkout. D
 
 Stop on a missing CLI, authentication failure, workspace ambiguity, Runtime ambiguity, invalid approver roster, an unmarked same-name object without `--adopt`, or any `BLOCKED` action.
 
+After resolving the Workspace, `doctor`, `plan`, `drift`, and `verify` automatically select `.multica/runtime-maps/<workspace-id>.json`. Runtime UUIDs are Workspace-specific, so keep one ignored local file per Workspace. A missing file is treated as an empty map; automatic selection then succeeds only when exactly one online Runtime matches each required provider. Use `--runtime-map <path>` only to override the workspace-scoped default.
+
+```json
+{
+  "bindings": {
+    "codex-orchestrator": {"runtime_id": "<workspace-codex-runtime-id>"},
+    "codex-worker": {"runtime_id": "<workspace-codex-runtime-id>"},
+    "opencode-review": {"runtime_id": "<workspace-opencode-runtime-id>"}
+  }
+}
+```
+
 ## Apply and Verify
 
 ```text
@@ -24,7 +36,7 @@ python scripts/workflow.py verify --workspace <id-or-slug>
 python scripts/workflow.py drift --workspace <id-or-slug>
 ```
 
-Apply rechecks the exact clean Git commit, desired-source hash, Runtime map, workspace, and observed Multica state. `verify` performs a fresh read after mutation.
+Apply rechecks the exact clean Git commit, desired-source hash, selected Runtime map, workspace, and observed Multica state. The Plan stores the resolved map path and hash, so changing that Workspace's map invalidates the Plan. `verify` performs a fresh read after mutation.
 
 Apply refuses `MULTICA_AGENT_ID` or `MULTICA_TASK_ID` by default. `--allow-agent-identity` is a break-glass override that requires explicit review; it is not part of the normal deployment flow.
 

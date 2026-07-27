@@ -125,6 +125,17 @@ class DocumentationTests(unittest.TestCase):
             "tests.test_docs", (ROOT / "AGENTS.md").read_text(encoding="utf-8")
         )
 
+    def test_runtime_map_documentation_is_workspace_scoped(self):
+        commands = (
+            ROOT / "skills/multica-workflow-manager/references/commands.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn(".multica/runtime-maps/<workspace-id>.json", commands)
+        self.assertIn("--runtime-map <path>", commands)
+        documented = "\n".join(
+            path.read_text(encoding="utf-8") for path in documentation_files()
+        )
+        self.assertNotIn("runtime-map.local.json", documented)
+
 
 if __name__ == "__main__":
     unittest.main()

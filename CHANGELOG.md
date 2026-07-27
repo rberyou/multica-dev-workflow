@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Scope local Runtime UUID maps by Workspace ID while retaining explicit path overrides.
+
 ## 2.0.0-dev.1
 
 - Replace protocol v3 maintenance automation with protocol v4 event-driven workflow Incidents.

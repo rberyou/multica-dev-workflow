@@ -1,7 +1,6 @@
 .multica/
 exports/
 build/
-runtime-map.local.json
 *.local.json
 __pycache__/
 *.py[cod]

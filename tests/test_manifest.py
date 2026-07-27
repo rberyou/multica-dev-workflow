@@ -1,5 +1,6 @@
-from pathlib import Path
+import argparse
 import json
+from pathlib import Path
 import sys
 import unittest
 
@@ -97,6 +98,35 @@ class ManifestTests(unittest.TestCase):
                 "close-incident",
             },
         )
+
+    def test_default_runtime_map_path_is_scoped_by_workspace_id(self):
+        args = argparse.Namespace(runtime_map=None)
+        first = workflow_cli.runtime_map_path(args, ROOT, {"id": "workspace-a"})
+        second = workflow_cli.runtime_map_path(args, ROOT, {"id": "workspace-b"})
+        self.assertEqual(
+            first,
+            (ROOT / ".multica/runtime-maps/workspace-a.json").resolve(),
+        )
+        self.assertEqual(
+            second,
+            (ROOT / ".multica/runtime-maps/workspace-b.json").resolve(),
+        )
+        self.assertNotEqual(first, second)
+
+    def test_explicit_runtime_map_overrides_workspace_default(self):
+        override = (ROOT / "custom-runtime-map.json").resolve()
+        args = argparse.Namespace(runtime_map=str(override))
+        self.assertEqual(
+            workflow_cli.runtime_map_path(args, ROOT, {"id": "workspace-a"}),
+            override,
+        )
+
+    def test_runtime_map_path_requires_a_resolved_workspace_id(self):
+        args = argparse.Namespace(runtime_map=None)
+        with self.assertRaisesRegex(
+            workflow_cli.WorkflowError, "resolved workspace has no id"
+        ):
+            workflow_cli.runtime_map_path(args, ROOT, {})
 
 
 if __name__ == "__main__":

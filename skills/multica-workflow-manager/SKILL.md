@@ -15,7 +15,7 @@ Git is desired state and Multica is runtime state. A clean reviewed checkout may
 
 1. Use the repository explicitly provided by the user, or locate `workflow.json` and `scripts/workflow.py` in the current directory or its parents.
 2. Run `python scripts/workflow.py doctor` for the intended profile, workspace, and deployment profile.
-3. Resolve workspace, Runtime, approver, and adoption ambiguity. Do not guess.
+3. Resolve workspace, Runtime, approver, and adoption ambiguity. The default Runtime map is `.multica/runtime-maps/<workspace-id>.json`; use `--runtime-map` only for an explicit override. Do not guess.
 4. Run `python scripts/workflow.py plan` and present all mutation actions and the short digest.
 5. Wait for the exact approval `APPROVE WORKFLOW PLAN <short-digest>`.
 6. Apply the exact Plan and run a fresh `verify`.

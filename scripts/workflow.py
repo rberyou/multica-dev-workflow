@@ -20,6 +20,7 @@ from workflow_lib import (
     git_head,
     install_skills,
     load_deployment_record,
+    load_runtime_map,
     mutation_actions,
     plan_has_blockers,
     redact,
@@ -52,10 +53,15 @@ def context(args: argparse.Namespace, root: Path) -> tuple[MulticaCLI, dict]:
     return cli, workspace
 
 
-def runtime_map_path(args: argparse.Namespace, root: Path) -> Path:
+def runtime_map_path(
+    args: argparse.Namespace, root: Path, workspace: dict
+) -> Path:
     if args.runtime_map:
         return Path(args.runtime_map).expanduser().resolve()
-    return (root / ".multica/runtime-map.local.json").resolve()
+    workspace_id = str(workspace.get("id") or "").strip()
+    if not workspace_id:
+        raise WorkflowError("resolved workspace has no id for Runtime map selection")
+    return (root / ".multica/runtime-maps" / f"{workspace_id}.json").resolve()
 
 
 def action_label(action: dict) -> str:
@@ -82,6 +88,8 @@ def print_plan(plan: dict, path: Path | None = None) -> None:
 def command_doctor(args: argparse.Namespace, root: Path) -> int:
     manifest, profile_doc = validate_repository(root, args.deployment_profile)
     cli, workspace = context(args, root)
+    selected_runtime_map_path = runtime_map_path(args, root, workspace)
+    runtime_map = load_runtime_map(selected_runtime_map_path)
     required = [
         ["agent", "create", "--help"],
         ["agent", "update", "--help"],
@@ -137,6 +145,11 @@ def command_doctor(args: argparse.Namespace, root: Path) -> int:
         f"protocol={manifest['workflow']['protocol_revision']}"
     )
     print(f"Deployment profile: {profile_doc.get('name')}")
+    runtime_map_status = "present" if selected_runtime_map_path.is_file() else "missing"
+    print(
+        f"Runtime map: {selected_runtime_map_path} "
+        f"({runtime_map_status}, {len(runtime_map.get('bindings') or {})} bindings)"
+    )
     print(f"Online runtimes: {json.dumps(providers, ensure_ascii=False, sort_keys=True)}")
     print("Doctor: OK")
     return 0
@@ -165,7 +178,7 @@ def build_from_args(
         cli=cli,
         workspace=workspace,
         deployment_profile=args.deployment_profile,
-        runtime_map_path=runtime_map_path(args, root),
+        runtime_map_path=runtime_map_path(args, root, workspace),
         adopt=bool(getattr(args, "adopt", False)),
         rebind_runtimes=bool(getattr(args, "rebind_runtimes", False)),
         write_archives=write_archives,

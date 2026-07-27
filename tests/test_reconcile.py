@@ -355,7 +355,7 @@ class ReconcileTests(unittest.TestCase):
         with committed_temp_repo() as root:
             cli = FakeCLI()
             workspace = {"id": cli.workspace_id, "name": "Test", "slug": "test"}
-            runtime_map = root / ".multica/runtime-map.local.json"
+            runtime_map = root / ".multica/runtime-maps/workspace-test.json"
             plan = build_plan(
                 root, cli, workspace, "quality", runtime_map, False, False
             )
@@ -383,7 +383,7 @@ class ReconcileTests(unittest.TestCase):
         with committed_temp_repo() as root:
             cli = FakeCLI()
             workspace = {"id": cli.workspace_id, "name": "Test", "slug": "test"}
-            runtime_map = root / ".multica/runtime-map.local.json"
+            runtime_map = root / ".multica/runtime-maps/workspace-test.json"
             plan = build_plan(
                 root, cli, workspace, "quality", runtime_map, False, False
             )
@@ -419,7 +419,7 @@ class ReconcileTests(unittest.TestCase):
                 cli,
                 {"id": cli.workspace_id, "name": "Test", "slug": "test"},
                 "quality",
-                root / ".multica/runtime-map.local.json",
+                root / ".multica/runtime-maps/workspace-test.json",
                 False,
                 False,
                 False,
@@ -433,7 +433,7 @@ class ReconcileTests(unittest.TestCase):
         with committed_temp_repo() as root:
             cli = FakeCLI()
             workspace = {"id": cli.workspace_id, "name": "Test", "slug": "test"}
-            runtime_map = root / ".multica/runtime-map.local.json"
+            runtime_map = root / ".multica/runtime-maps/workspace-test.json"
             initial = build_plan(
                 root, cli, workspace, "quality", runtime_map, False, False
             )
@@ -622,7 +622,7 @@ class ReconcileTests(unittest.TestCase):
         with committed_temp_repo() as root:
             cli = FakeCLI()
             workspace = {"id": cli.workspace_id, "name": "Test", "slug": "test"}
-            runtime_map = root / ".multica/runtime-map.local.json"
+            runtime_map = root / ".multica/runtime-maps/workspace-test.json"
             initial = build_plan(
                 root, cli, workspace, "quality", runtime_map, False, False
             )
