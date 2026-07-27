@@ -9,21 +9,20 @@ metadata:
 
 # Multica Requirement Intake
 
-Use this skill as the portable entry point between the user and a Multica development squad.
+Use this Skill as the portable entry point between the user and a Multica development squad.
 
-## Fixed Workflow Contract
+## Core Contract
 
-- Create only the top-level requirement issue. Never create Plan, Implementation, design, split, or development task issues from outside the squad.
-- Before a new or reused top-level requirement can enter `todo`, bind and verify its protocol-v4 metadata through the deterministic `multica-workflow-incidents` Skill. A conflicting older or foreign binding blocks submission.
-- Never create, start, or materially update a requirement from the user's initial description alone. Clarify the requirement, present the complete current draft and duplicate disposition, and obtain explicit confirmation bound to that draft revision before the corresponding create, start, or material-update mutation.
-- Assign the top-level issue to the resolved development squad, not to the leader or an individual agent.
-- Create safely in `backlog`, verify the result, then move it to `todo` only when the user asked to submit or start it.
-- After starting a requirement, keep following its complete Issue chain until it reaches a terminal state or the user explicitly asks to stop. Do not treat issue creation, an approval request, or one completed stage as the end of the task.
-- Do not set, copy, guess, cache, or request `human_approver_id`. The squad leader discovers the unique roster member whose role is `人工审批人`.
-- Do not design the implementation or start coding while creating the requirement. Record user-supplied solution constraints or hypotheses only as unapproved Plan inputs.
-- Never infer approval. Post an approval command only after the user explicitly authorizes that exact revision and the authenticated actor is the roster approver.
-- Never invent Multica CLI commands, flags, profile names, workspace IDs, squad IDs, or project IDs. Inspect the current environment and CLI help.
-- Never persist machine-specific values inside this skill.
+- Create only the top-level Requirement. Leave Plan, Implementation, design, split, and development-task Issues to the squad.
+- Treat an initial request to create or submit as authorization for clarification and read-only discovery only. Never mutate from the initial description alone.
+- Present a complete versioned `Requirement Draft v<N>` with target Workspace, Project, Squad, start mode, protocol binding, and duplicate disposition. Obtain explicit confirmation of that exact revision before creating, reusing-and-starting, or materially updating an Issue.
+- Create safely in `backlog`, verify content and canonical identity, bind and verify protocol-v4 metadata through `multica-workflow-incidents`, then move to `todo` only when the confirmed mode requires starting.
+- Assign the top-level Requirement to the resolved Squad, never directly to its leader or another Agent.
+- Keep the Requirement solution-neutral. Preserve user-supplied constraints and hypotheses as Plan inputs, not approved design.
+- Never set, cache, copy, guess, or request `human_approver_id`. The squad leader resolves the unique roster member whose role is `人工审批人`.
+- After starting a Requirement, keep following its complete Issue chain until terminal state or the user explicitly stops tracking.
+- Never infer approval. Validate the current gate, revision, independent review, authenticated human identity, and approver roster before posting an authorized approval or decision.
+- Never claim creation, update, start, binding, decision, or approval without a fresh canonical service read proving the resulting state.
 
 Portable defaults:
 
@@ -32,207 +31,41 @@ squad_name: 开发交付小队
 approver_role: 人工审批人
 ```
 
-Allow the user to override the squad name explicitly. An optional `MULTICA_REQUIREMENT_SQUAD` environment variable may provide a machine-local default. Always resolve the name to a unique squad in the selected workspace at runtime.
-
-## Determine Intent
-
-Choose one mode from the user's wording:
-
-- **Draft**: “整理一下”, “写个需求”, “先看看怎么描述”, or “不要创建”. Produce and revise a draft only.
-- **Prepare to submit**: “创建”, “发布”, “提交到 Multica”, “交给小队”, or “立即启动”. Clarify and present a versioned draft; after confirmation, create and safely move a new/backlog issue to `todo`, or reuse an already-active equivalent issue without regressing its status.
-- **Prepare to queue**: “先放待规划”, “暂不启动”, or “放 backlog”. Clarify and present a versioned draft; after confirmation, create and leave a new issue in `backlog`. If the confirmed duplicate is already active, disclose that it will not be downgraded and require the user to choose reuse-and-follow or explicitly permit a separate queued issue.
-- **Follow**: “看看 T-123”, “现在到哪一步”, or “我需要做什么”. Read the issue chain and current gate; do not modify unless requested.
-- **Approve or decide**: act only on an explicit user decision and validate the actor, target revision, and gate first.
-
-An initial request to “创建需求” authorizes preparation, read-only discovery, and duplicate checks. It does not authorize issue creation. Silence, “看起来可以”, approval of a different draft, or approval of a Plan is not requirement-creation confirmation.
-
-## Resolve the CLI Portably
-
-Use the first executable candidate that passes `version --output json`:
-
-1. Path explicitly supplied by the user.
-2. `MULTICA_BIN` environment variable.
-3. `multica` or `multica.exe` on `PATH`.
-4. A Multica Desktop managed or bundled CLI found under the current OS user's standard application-data or application-install directories.
-
-Limit filesystem searches to Multica-specific standard directories. Do not scan entire disks. Do not modify permanent `PATH`, install software, download binaries, or change CLI configuration unless explicitly requested.
-
-If no CLI is available:
-
-1. Use an authenticated Multica browser UI only for read-only discovery or Follow mode when browser control is available.
-2. Otherwise produce a ready-to-submit draft and state clearly that no issue was created.
-
-Do not create or materially update a managed requirement through the browser alone. Protocol binding is part of the same submission operation and requires the deterministic Incident Skill plus a working CLI.
-
-Do not call undocumented HTTP endpoints with `curl` as a fallback.
-
-Read [portable-setup.md](references/portable-setup.md) for provider paths, CLI discovery examples, and first-use checks on a new computer.
-
-## Resolve the Protocol Binder
-
-Locate `multica-workflow-incidents/scripts/incidents.py` in the same installed Skill root, an explicitly supplied Skill root, or the current workflow repository. Verify its `--help` output before mutation. Pass it the resolved CLI path, profile, and workspace explicitly.
-
-If the binder is unavailable, do not create, update, reuse-and-start, or approve a managed workflow Issue. Draft and read-only Follow modes remain available. Do not reproduce its metadata writes manually.
-
-## Resolve Profile and Workspace
-
-Build an optional profile argument from, in order:
-
-1. profile explicitly supplied by the user;
-2. `MULTICA_REQUIREMENT_PROFILE` environment variable;
-3. the CLI default profile when `config show` reports a configured server;
-4. a uniquely configured named profile discovered under `~/.multica/profiles/`.
-
-When discovering named profiles, enumerate directory names only, then inspect candidates through `config show --profile <name>`. Do not read or print profile `config.json` files because they may contain authentication tokens. If multiple configured profiles remain, ask the user. Do not assume a profile name from another computer.
-
-Resolve the workspace from, in order:
-
-1. workspace explicitly supplied by the user;
-2. `MULTICA_WORKSPACE_ID` environment variable;
-3. the selected profile's configured default, inspected with `config show` and `workspace get`;
-4. `workspace list --output json` when no default exists.
-
-If exactly one accessible workspace exists, use it. If multiple workspaces exist and none was selected, ask the user. Pass the resolved workspace ID explicitly to all later commands. Do not run `workspace switch` or alter the user's default unless requested.
-
-Inside a daemon-managed Multica task, trust the injected `MULTICA_WORKSPACE_ID`; never fall back to a user-global CLI config.
-
-## Resolve the Squad
-
-1. Use the explicit squad name, then `MULTICA_REQUIREMENT_SQUAD`, then `开发交付小队`.
-2. Run `squad list --output json` in the resolved workspace.
-3. Require exactly one active exact-name match.
-4. Read the squad and roster back. Confirm it has a leader and exactly one `member_type=member` entry whose role is `人工审批人`.
-5. Use the resolved squad UUID only for the current operation. Do not write it into the skill.
-
-If no match, multiple matches, no leader, or an invalid approver roster is found, stop before creating or starting an issue and report the configuration problem. Do not create or repair a squad unless explicitly requested.
-
-## Resolve the Project
-
-1. Prefer an explicit Multica project named by the user.
-2. Otherwise inspect the current repository remote and compare it with project resources.
-3. Otherwise list active projects and choose only when exactly one project matches the repository or product name.
-4. If more than one candidate remains, ask the user which project to use.
-5. Never create a Multica project unless explicitly requested.
-
-## Prepare the Requirement
-
-Read [requirement-template.md](references/requirement-template.md) and include:
-
-- background and observed problem;
-- evidence, reproduction, or examples;
-- desired outcome and testable acceptance criteria;
-- scope, non-goals, constraints, and known risks;
-- repository, environment, logs, screenshots, or links when relevant;
-- unresolved product decisions that the Plan must address.
-
-Keep the issue solution-neutral. Do not turn an implementation guess into an approved design.
-
-## Confirm Before Creation
-
-For Prepare to submit and Prepare to queue modes:
-
-1. Use read-only discovery to resolve the workspace, project, squad, roster, repository, and likely duplicates before asking for confirmation. Read each proposed reuse/update target in full and require it to be a top-level issue in the resolved project. Do not mutate Multica.
-2. Ask focused questions about missing or conflicting user-visible behavior, acceptance criteria, scope, non-goals, compatibility, risk, or target environment. Do not move implementation choices that belong in Plan into the requirement.
-3. Present the complete proposed title and description, plus the resolved workspace, project, squad, intended final/start status, protocol-v4 binding disposition, and duplicate disposition. A reuse or update disposition must name the existing issue's canonical identifier and link when available.
-4. Label the draft `Requirement Draft v<N>` and state explicitly that no issue has been created yet.
-5. Request explicit confirmation of the current revision. The preferred confirmation is `CONFIRM REQUIREMENT v<N>`; an equally explicit natural-language confirmation is valid only when it names the same revision and unambiguously authorizes creation.
-6. If the user changes any material requirement content or target after confirmation, increment the draft revision, show the complete revised draft, and obtain confirmation again.
-
-Requirement-intake confirmation authorizes only the displayed top-level action (create new, reuse unchanged, or update existing) with the displayed target and start mode. It is not Plan approval, final requirement approval, authorization to publish or deploy, or permission to create child issues.
-
-## Create Through the CLI
-
-Before using a command, inspect `--help`. Use structured `--output json` whenever supported. Conceptual command shape:
-
-```text
-<multica> [--profile <profile>] --workspace-id <workspace-id> <command> ...
-```
-
-If the installed CLI does not expose a required command or cannot preserve the safe `backlog-bind-verify-then-start` flow, use Draft or read-only Follow mode. Do not approximate missing commands with browser mutation, undocumented flags, manual metadata writes, or direct API calls.
-
-Then:
-
-1. Verify authentication with a read-only command.
-2. Resolve workspace, squad, roster, and project as described above.
-3. Search active issues using distinctive title keywords. Read any candidate before proposing reuse or update, and require it to be a top-level issue in the resolved project. Propose reuse of an equivalent issue, a bounded update to it, or creation of a duplicate only when the user explicitly permits one.
-4. Immediately before mutation, re-read the resolved project, squad, roster, proposed existing target, and its metadata. Reconfirm that the current target, complete content, start mode, protocol binding, and duplicate disposition exactly match the confirmed draft revision. Reject a conflicting `workflow_id`, `protocol_revision`, `workflow_object_type`, or root binding before changing content. Stop and issue a revised draft if confirmation is missing, stale, or no longer matches current state.
-5. When creation or the confirmed update needs a multiline description, write it to one temporary UTF-8 file and use `--description-file`. This is required on Windows and preferred on every OS. Do not create a temporary file for unchanged reuse.
-6. Carry out the confirmed disposition. Reuse an unchanged equivalent issue without creating a copy; update only the confirmed fields of an existing issue; otherwise create one new issue in `backlog`, with project and squad assignment in the create call when supported.
-7. Read the target issue back and verify title, description, project, assignee, parent, and status. The parent must be empty.
-8. Run the Incident Skill's direct `bind-workflow-issue` command with `--object-type requirement` and an accurate external creator role. This operation is idempotent for an identical v4 binding and rejects conflicts.
-9. Read the target metadata back and verify `managed_by`, `workflow_id`, `workflow_version`, `workflow_instance_id`, `workflow_object_type=requirement`, `root_requirement_id`, `created_by_role`, `protocol_revision=v4`, and `top_protocol_revision=v4`.
-10. For confirmed Prepare to submit mode, change `backlog` to `todo` only after content and protocol verification; never regress an already-active reused issue. For confirmed Prepare to queue mode, leave a new issue in `backlog` and do not downgrade an already-active reused issue.
-11. After all mutations, perform a fresh read using the canonical issue ID returned by the service. Verify the final identifier, workspace, project, assignee, content, parent, status, and protocol metadata before reporting success or beginning Follow mode.
-12. In a finally-style cleanup that runs after success or failure, remove only the temporary description file created for this operation, if one was created.
-13. If creation, update, or binding partially succeeds, do not create a second copy. Leave a new issue in `backlog` when possible, report the canonical target ID only if known, and repair the same issue.
-
-Current CLI shape, subject to help verification:
-
-```text
-<cli> [profile] workspace list --output json
-<cli> [profile] --workspace-id <workspace-id> project list --output json
-<cli> [profile] --workspace-id <workspace-id> squad list --output json
-<cli> [profile] --workspace-id <workspace-id> squad member list <squad-id> --output json
-<cli> [profile] --workspace-id <workspace-id> issue search "<keywords>" --output json
-<cli> [profile] --workspace-id <workspace-id> issue create --title "<title>" --description-file "<utf8-file>" --status backlog --project "<project-id>" --assignee-id "<squad-id>" --output json
-<cli> [profile] --workspace-id <workspace-id> issue get "<issue-key>" --output json
-python <incidents-skill>/scripts/incidents.py --multica-bin <cli> [--profile <profile>] --workspace <workspace-id> bind-workflow-issue --issue "<issue-key>" --object-type requirement --created-by-role <role>
-<cli> [profile] --workspace-id <workspace-id> issue metadata list "<issue-key>" --output json
-<cli> [profile] --workspace-id <workspace-id> issue status "<issue-key>" todo --output json
-```
-
-## Browser Read-Only Fallback
-
-Use the authenticated browser only to resolve workspace/project/squad context, inspect duplicates, read an Issue chain, or follow progress when CLI reads are unavailable. Do not create or materially update a managed workflow Issue in the UI because the required deterministic protocol binding cannot be completed atomically there.
-
-## Continuously Follow a Started Requirement
-
-After a confirmed Prepare to submit operation starts a protocol-verified new/backlog issue or reuses a protocol-verified issue that is already active, immediately switch to Follow mode for that top-level issue. The default outcome of “创建并启动” is create **and follow**, not create and stop.
-
-1. Keep the issue key as the active requirement for the current conversation. On later turns, resume this requirement unless the user changes the target or explicitly stops following it.
-2. Follow the top-level issue, its active descendants, recent comments, metadata, assignees, task runs, branch/commit/PR bindings, CI, tests, review outcomes, and `waiting_on`/`blocked_reason` changes.
-3. Prefer a host-provided event subscription, recurring monitor, wait, or wake-up mechanism. Otherwise use bounded read-only polling with backoff. Respect host wait limits and never busy-loop.
-4. Do not ask the user to manually check Multica. Suppress routine no-change updates; report meaningful stage transitions and keep monitoring.
-5. When human action is required, provide the current revision and evidence summary, the exact decision or approval needed, and what will happen after it. Then wait for the user's explicit response.
-6. After validating and applying an authorized decision or approval, resume following the same requirement automatically. An approval interaction is a pause in monitoring, not completion.
-7. On `done`, report the delivered PR/commit, validation evidence, acceptance results, and residual risks. On `cancelled`, report the reason and replacement link when present. On an abnormal failure or actionable stall, report the owner, evidence, and required recovery action while continuing to follow when the host supports it.
-
-If the current host cannot remain active or provide a wake-up/monitor mechanism, disclose that limitation before ending the turn, retain the issue key in the conversation, and give the exact follow-up command needed to resume. Never claim continuous tracking when no tracking mechanism is active.
-
-## Follow Approvals and Decisions
-
-Before changing anything, read the top-level requirement, relevant child issue, recent comments, metadata, Plan revision, review outcome, and current assignee.
-
-For a human approval action, also:
-
-1. Reject execution when `MULTICA_AGENT_ID` or `MULTICA_TASK_ID` indicates a daemon agent identity.
-2. Read the authenticated user ID, for example through `user profile get --output json`.
-3. Read the current squad roster and find exactly one `member_type=member`, `role=人工审批人` entry.
-4. Require the authenticated user ID to equal that roster member ID.
-
-If the authenticated identity cannot be verified, do not post an approval or decision command. Give the user the exact manual comment and target, continue monitoring for that comment when the host supports it, validate it after it appears, and then resume following automatically.
-
-Then apply the requested action:
-
-- Plan approval: after explicit user authorization and a valid independent review, post `APPROVE PLAN v<N>` and mention the current Plan owner.
-- Decision response: after explicit user direction, post `DECISION: <decision>` and mention the current stage owner.
-- Final approval: after explicit user authorization and completed integration validation, post `APPROVE REQUIREMENT v<N>` and mention the integration owner.
-
-Do not approve an unreviewed Plan, a stale revision, or a requirement whose integration validation is incomplete. If identity or gate validation fails, explain the mismatch instead of posting the command.
-
-## Report the Result
-
-After a mutation, report:
-
-- issue key and link when available;
-- selected workspace and project;
-- resolved squad and final status;
-- verified protocol revision and workflow binding;
-- whether the squad was started;
-- any ambiguity, duplicate, configuration problem, or remaining user action.
-
-Never claim an issue was created, updated, started, bound, or approved without a fresh read of the resulting state by its canonical service ID. If that read fails or the state does not match, report the operation as unverified or partially successful; do not present an issue key as completed creation evidence.
-
-For a started requirement, the creation report is an intermediate progress update. Continue following instead of ending with only the new issue key and initial status.
-
-For the human-facing lifecycle, status meanings, and ready-to-use prompts, read [operating-manual.md](references/operating-manual.md).
+Allow an explicit squad-name override. `MULTICA_REQUIREMENT_SQUAD` may provide a machine-local default, but always resolve it uniquely in the selected Workspace.
+
+## Select One Mode
+
+- **Draft**: clarify and produce a versioned draft only. Do not mutate Multica.
+- **Prepare to submit**: clarify, check duplicates, confirm the exact draft, create or reuse safely, bind protocol v4, move to `todo`, and follow continuously.
+- **Prepare to queue**: perform the same confirmation and binding flow but leave a new Requirement in `backlog`. Never downgrade an already-active reused Issue.
+- **Follow**: read the complete Issue chain, current gate, evidence, and required human action. Do not mutate unless requested.
+- **Approve or decide**: act only on an explicit decision for the current revision after identity and gate validation, then resume following.
+
+Silence, “看起来可以”, approval of another draft, or approval of a Plan is not Requirement-creation confirmation. Prefer `CONFIRM REQUIREMENT v<N>` for creation confirmation.
+
+## Execution Order
+
+1. Select the mode from the user's wording before loading detailed References.
+2. For Draft mode, prepare the complete Requirement using testable acceptance criteria, scope, non-goals, constraints, risks, and unresolved Plan questions. Resolve Multica context only when the user asks to include or validate a target.
+3. For submit or queue modes, resolve the CLI, profile, Workspace, protocol binder, Squad, roster, Project, repository context, and duplicates without guessing; then execute the confirmed transactional procedure and verify the final canonical state.
+4. For Follow, approval, or decision modes, resolve the authenticated context and current Issue chain before reading or mutating the active gate.
+5. For started or already-active Requirements, remain active through approvals, decisions, Review Loops, integration, and terminal reporting.
+6. If the host cannot remain active or provide a wake-up mechanism, disclose the limitation and give the exact command needed to resume. Never claim tracking is active when it is not.
+
+## Guardrails
+
+- Inspect CLI `--help` before mutation; never invent commands, flags, profile names, Workspace IDs, Squad IDs, Project IDs, or undocumented HTTP calls.
+- Do not install software, alter permanent `PATH`, switch the user's default Workspace, or write machine-specific values into the Skill unless explicitly requested.
+- Use the browser only for read-only discovery and Follow fallback. Do not create or materially update a managed Requirement through browser-only mutation because deterministic protocol binding is mandatory.
+- If the CLI or Incident binder is unavailable, allow Draft and read-only Follow modes only.
+- Stop on ambiguous Workspace, Project, Squad, duplicate disposition, invalid approver roster, conflicting protocol metadata, stale confirmation, or an unverifiable post-mutation state.
+- Never persist credentials, cookies, private keys, authorization headers, raw environment values, or unredacted private data.
+
+## Reference Routing
+
+- Read [requirement-template.md](references/requirement-template.md) whenever drafting or materially revising Requirement content.
+- Read [portable-setup.md](references/portable-setup.md) when discovering the CLI/profile/Workspace, using a new computer, installing the companion Incident Skill, or diagnosing unavailable tooling.
+- Read [submission-procedure.md](references/submission-procedure.md) only for duplicate resolution, Squad/Project resolution, confirmation, create/reuse/update, protocol binding, queue, or start operations.
+- Read [follow-and-approvals.md](references/follow-and-approvals.md) only when following progress, answering a decision block, posting Plan/final approval, or reporting terminal delivery.
+- Read [operating-manual.md](references/operating-manual.md) when explaining the lifecycle, status meanings, user responsibilities, failure recovery, or ready-to-use prompts.
+- Read every reference named by the active mode; do not load unrelated references.

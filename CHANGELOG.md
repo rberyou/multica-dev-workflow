@@ -4,6 +4,7 @@
 
 - Scope local Runtime UUID maps by Workspace ID while retaining explicit path overrides.
 - Reorganize the workflow-manager Skill for progressive disclosure, with separate command and Runtime-map references.
+- Reorganize Requirement Intake so drafting, portable setup, submission, following, approvals, and user guidance load only for the active mode.
 
 ## 2.0.0-dev.1
 

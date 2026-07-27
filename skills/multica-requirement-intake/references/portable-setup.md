@@ -1,5 +1,15 @@
 # 可移植安装与首次配置
 
+## 目录
+
+- Skill 目录
+- CLI 发现顺序
+- 可选环境变量
+- 新电脑首次验证
+- 同 Workspace 与新 Workspace
+- Profile 与 Workspace 选择
+- 打包检查
+
 ## 1. Skill 目录
 
 优先把完整目录放在跨工具共享位置：
@@ -17,7 +27,9 @@ multica-requirement-intake/
 └── references/
     ├── operating-manual.md
     ├── portable-setup.md
-    └── requirement-template.md
+    ├── requirement-template.md
+    ├── submission-procedure.md
+    └── follow-and-approvals.md
 ```
 
 如果工具没有扫描共享目录，可使用其原生位置：
@@ -106,11 +118,23 @@ multica version --output json
 
 ## 6. Profile 与 workspace 选择
 
-- profile 由当前电脑的 CLI 配置决定，不能从旧电脑复制名称后盲用。
-- 默认 profile 未配置时，可以只枚举 `~/.multica/profiles/` 的子目录名，并逐个运行 `multica --profile <name> config show`。不要直接读取或输出 `config.json`，其中可能包含 Token。
-- 有默认 workspace 时仍应读取并确认它。
-- 有多个 workspace 且用户未指定时，必须询问，不能根据旧 UUID 猜测。
-- 不应为了执行一次需求创建而修改全局默认 workspace；优先为命令显式传入 workspace ID。
+按以下顺序解析 profile：
+
+1. 用户在当前请求中明确指定的 profile。
+2. `MULTICA_REQUIREMENT_PROFILE`。
+3. `config show` 表明已配置服务的 CLI 默认 profile。
+4. `~/.multica/profiles/` 中唯一配置有效的命名 profile。
+
+发现命名 profile 时，只枚举子目录名并逐个运行 `multica --profile <name> config show`。不要直接读取或输出 `config.json`，其中可能包含 Token。多个有效 profile 仍无法唯一选择时必须询问用户；不能从旧电脑复制名称后盲用。
+
+按以下顺序解析 workspace：
+
+1. 用户在当前请求中明确指定的 workspace。
+2. `MULTICA_WORKSPACE_ID`。
+3. 通过 `config show` 和 `workspace get` 验证的当前 profile 默认 workspace。
+4. `workspace list --output json` 返回的唯一可访问 workspace。
+
+在 daemon-managed Multica 任务中，必须信任注入的 `MULTICA_WORKSPACE_ID`，不得回退到用户全局 CLI 配置。有多个 workspace 且没有明确选择时必须询问，不能根据旧 UUID 猜测。把解析出的 workspace ID 显式传给所有后续命令；不要为了单次操作执行 `workspace switch` 或修改全局默认 workspace。
 
 ## 7. 打包检查
 

@@ -108,13 +108,45 @@ class DocumentationTests(unittest.TestCase):
         self.assertNotIn("由 Audit", content)
 
     def test_requirement_intake_requires_protocol_binding_before_start(self):
-        content = (
-            ROOT / "skills/multica-requirement-intake/SKILL.md"
+        skill_root = ROOT / "skills/multica-requirement-intake"
+        skill = (skill_root / "SKILL.md").read_text(encoding="utf-8")
+        submission = (skill_root / "references/submission-procedure.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("multica-workflow-incidents", skill)
+        self.assertIn("bind-workflow-issue", submission)
+        self.assertIn("Browser Read-Only Fallback", submission)
+        self.assertNotIn("Create Through the Browser", skill + submission)
+        portable = (skill_root / "references/portable-setup.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("用户在当前请求中明确指定的 profile", portable)
+        self.assertIn("用户在当前请求中明确指定的 workspace", portable)
+        self.assertIn("daemon-managed Multica 任务", portable)
+        self.assertIn("不得回退到用户全局 CLI 配置", portable)
+
+    def test_active_skills_use_proportionate_progressive_disclosure(self):
+        intake_root = ROOT / "skills/multica-requirement-intake"
+        intake = (intake_root / "SKILL.md").read_text(encoding="utf-8")
+        for reference in [
+            "requirement-template.md",
+            "portable-setup.md",
+            "submission-procedure.md",
+            "follow-and-approvals.md",
+            "operating-manual.md",
+        ]:
+            self.assertIn(f"(references/{reference})", intake)
+        self.assertLess(len(intake.splitlines()), 100)
+
+        incidents = (
+            ROOT / "skills/multica-workflow-incidents/SKILL.md"
         ).read_text(encoding="utf-8")
-        self.assertIn("multica-workflow-incidents", content)
-        self.assertIn("bind-workflow-issue", content)
-        self.assertIn("Browser Read-Only Fallback", content)
-        self.assertNotIn("Create Through the Browser", content)
+        console = (ROOT / "skills/multica-workflow-console/SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("(references/incident-contract.md)", incidents)
+        self.assertLess(len(incidents.splitlines()), 100)
+        self.assertLess(len(console.splitlines()), 50)
 
     def test_ci_and_agent_guide_run_documentation_tests(self):
         self.assertIn(
