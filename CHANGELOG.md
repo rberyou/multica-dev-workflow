@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Scope local Runtime UUID maps by Workspace ID while retaining explicit path overrides.
+- Store Runtime maps as Home-level Workflow/Workspace configuration while keeping Plans, journals, deployment evidence, release Plans, and worktrees repository-local.
 - Reorganize the workflow-manager Skill for progressive disclosure, with separate command and Runtime-map references.
 - Reorganize Requirement Intake so drafting, portable setup, submission, following, approvals, and user guidance load only for the active mode.
 

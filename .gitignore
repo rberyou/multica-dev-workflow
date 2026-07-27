@@ -1,4 +1,6 @@
+# Project-local workflow Plans, journals, deployment evidence, release Plans, and worktrees.
 .multica/
+# Project-local diagnostic exports and generated packages.
 exports/
 build/
 *.local.json

@@ -29,6 +29,19 @@ def completed(stdout: str = "", returncode: int = 0) -> subprocess.CompletedProc
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_release_plans_stay_in_checkout(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "repo"
+            root.mkdir()
+            path = release.save_plan(
+                root,
+                {
+                    "version": VERSION,
+                    "release_plan_digest": "a" * 64,
+                },
+            )
+            self.assertEqual(path.parent, root / ".multica/release-plans")
+
     def test_repository_versions_and_expected_assets_match(self):
         checked = release.verify_versions(ROOT, VERSION)
         assets = release.expected_assets(ROOT, VERSION)

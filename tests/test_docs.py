@@ -157,7 +157,7 @@ class DocumentationTests(unittest.TestCase):
             "tests.test_docs", (ROOT / "AGENTS.md").read_text(encoding="utf-8")
         )
 
-    def test_runtime_map_documentation_is_workspace_scoped(self):
+    def test_runtime_map_documentation_matches_local_state_boundaries(self):
         skill_root = ROOT / "skills/multica-workflow-manager"
         skill = (skill_root / "SKILL.md").read_text(encoding="utf-8")
         commands = (skill_root / "references/commands.md").read_text(encoding="utf-8")
@@ -168,7 +168,15 @@ class DocumentationTests(unittest.TestCase):
         self.assertIn("[runtime-maps.md](references/runtime-maps.md)", skill)
         self.assertIn("current Codex task", commands)
         self.assertIn("not a Multica Issue", commands)
-        self.assertIn(".multica/runtime-maps/<workspace-id>.json", runtime_maps)
+        self.assertIn(
+            "~/.multica/workflows/<workflow-id>/runtime-maps/<workspace-id>.json",
+            runtime_maps,
+        )
+        self.assertIn("<repo>/.multica/plans/", commands)
+        self.assertIn("<repo>/.multica/deployments/", commands)
+        self.assertNotIn(".multica/runtime-maps/<workspace-id>.json", runtime_maps)
+        self.assertIn("does not fall back to the old checkout path", runtime_maps)
+        self.assertIn("saved deployment Plan", runtime_maps)
         self.assertIn("--runtime-map <path>", runtime_maps)
         self.assertIn("multica --profile", runtime_maps)
         documented = "\n".join(

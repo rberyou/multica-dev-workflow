@@ -44,24 +44,42 @@ def add_context_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--runtime-map")
 
 
-def context(args: argparse.Namespace, root: Path) -> tuple[MulticaCLI, dict]:
+def context(args: argparse.Namespace, root: Path) -> tuple[MulticaCLI, dict, dict, dict]:
+    manifest, profile_doc = validate_repository(root, args.deployment_profile)
     binary = discover_multica(args.multica_bin)
     profile = resolve_profile(binary, args.profile)
     cli = MulticaCLI(binary=binary, profile=profile)
     workspace = resolve_workspace(cli, args.workspace)
-    validate_repository(root, args.deployment_profile)
-    return cli, workspace
+    return cli, workspace, manifest, profile_doc
 
 
 def runtime_map_path(
-    args: argparse.Namespace, root: Path, workspace: dict
+    args: argparse.Namespace,
+    workspace: dict,
+    workflow_id: str,
+    home: Path | None = None,
 ) -> Path:
     if args.runtime_map:
         return Path(args.runtime_map).expanduser().resolve()
+    workflow_id = str(workflow_id or "").strip()
+    if not workflow_id or any(
+        character in workflow_id for character in ("/", "\\")
+    ):
+        raise WorkflowError("workflow id is not safe for Runtime map selection")
     workspace_id = str(workspace.get("id") or "").strip()
     if not workspace_id:
         raise WorkflowError("resolved workspace has no id for Runtime map selection")
-    return (root / ".multica/runtime-maps" / f"{workspace_id}.json").resolve()
+    if any(character in workspace_id for character in ("/", "\\")):
+        raise WorkflowError("resolved workspace id is not safe for Runtime map selection")
+    home_root = (home if home is not None else Path.home()).expanduser().resolve()
+    return (
+        home_root
+        / ".multica"
+        / "workflows"
+        / workflow_id
+        / "runtime-maps"
+        / f"{workspace_id}.json"
+    ).resolve()
 
 
 def action_label(action: dict) -> str:
@@ -86,9 +104,10 @@ def print_plan(plan: dict, path: Path | None = None) -> None:
 
 
 def command_doctor(args: argparse.Namespace, root: Path) -> int:
-    manifest, profile_doc = validate_repository(root, args.deployment_profile)
-    cli, workspace = context(args, root)
-    selected_runtime_map_path = runtime_map_path(args, root, workspace)
+    cli, workspace, manifest, profile_doc = context(args, root)
+    selected_runtime_map_path = runtime_map_path(
+        args, workspace, str(manifest["workflow"]["id"])
+    )
     runtime_map = load_runtime_map(selected_runtime_map_path)
     required = [
         ["agent", "create", "--help"],
@@ -141,7 +160,8 @@ def command_doctor(args: argparse.Namespace, root: Path) -> int:
     print(f"Profile: {cli.profile or '<default>'}")
     print(f"Workspace: {workspace.get('name')} ({workspace.get('id')})")
     print(
-        f"Workflow: {manifest['workflow']['version']} "
+        f"Workflow: {manifest['workflow']['id']} "
+        f"version={manifest['workflow']['version']} "
         f"protocol={manifest['workflow']['protocol_revision']}"
     )
     print(f"Deployment profile: {profile_doc.get('name')}")
@@ -156,7 +176,7 @@ def command_doctor(args: argparse.Namespace, root: Path) -> int:
 
 
 def command_export(args: argparse.Namespace, root: Path) -> int:
-    cli, workspace = context(args, root)
+    cli, workspace, _, _ = context(args, root)
     state = redact(fetch_state(cli))
     stamp = utc_now().replace(":", "").replace("-", "")
     slug = str(workspace.get("slug") or workspace.get("name") or workspace.get("id"))
@@ -172,13 +192,15 @@ def command_export(args: argparse.Namespace, root: Path) -> int:
 def build_from_args(
     args: argparse.Namespace, root: Path, write_archives: bool = True
 ) -> tuple[dict, MulticaCLI, dict]:
-    cli, workspace = context(args, root)
+    cli, workspace, manifest, _ = context(args, root)
     plan = build_plan(
         root=root,
         cli=cli,
         workspace=workspace,
         deployment_profile=args.deployment_profile,
-        runtime_map_path=runtime_map_path(args, root, workspace),
+        runtime_map_path=runtime_map_path(
+            args, workspace, str(manifest["workflow"]["id"])
+        ),
         adopt=bool(getattr(args, "adopt", False)),
         rebind_runtimes=bool(getattr(args, "rebind_runtimes", False)),
         write_archives=write_archives,
@@ -274,7 +296,7 @@ def command_install_skills(args: argparse.Namespace, root: Path) -> int:
 
 
 def command_incidents(args: argparse.Namespace, root: Path) -> int:
-    cli, workspace = context(args, root)
+    cli, workspace, _, _ = context(args, root)
     command = [
         sys.executable,
         str(root / "skills/multica-workflow-incidents/scripts/incidents.py"),

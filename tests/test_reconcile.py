@@ -20,6 +20,8 @@ from workflow_lib import (  # noqa: E402
     _runtime_choice,
     apply_plan,
     build_plan,
+    deployment_evidence_record_path,
+    deployment_record_path,
     install_skills,
     load_deployment_record,
     mutation_actions,
@@ -44,6 +46,18 @@ def flag(args, name, default=None):
         return args[args.index(name) + 1]
     except ValueError:
         return default
+
+
+def runtime_map_for(root: Path, workspace_id: str = "workspace-test") -> Path:
+    return (
+        root.parent
+        / "home"
+        / ".multica"
+        / "workflows"
+        / "development-delivery"
+        / "runtime-maps"
+        / f"{workspace_id}.json"
+    )
 
 
 @contextmanager
@@ -315,6 +329,23 @@ class FakeCLI:
 
 
 class ReconcileTests(unittest.TestCase):
+    def test_project_execution_state_stays_in_checkout(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "repo"
+            root.mkdir()
+            plan_path = save_plan(root, {"plan_digest": "a" * 64})
+            self.assertEqual(plan_path.parent, root / ".multica/plans")
+            self.assertEqual(
+                deployment_record_path(root, "workspace-test").parent,
+                root / ".multica/deployments",
+            )
+            self.assertEqual(
+                deployment_evidence_record_path(
+                    root, "workspace-test", "b" * 64
+                ).parent.parent,
+                root / ".multica/deployments",
+            )
+
     def test_marker_and_redaction_helpers(self):
         rendered = render_marker("wf", "agent.leader", "abc", "body\n")
         self.assertEqual(parse_marker(rendered)["object_key"], "agent.leader")
@@ -355,7 +386,7 @@ class ReconcileTests(unittest.TestCase):
         with committed_temp_repo() as root:
             cli = FakeCLI()
             workspace = {"id": cli.workspace_id, "name": "Test", "slug": "test"}
-            runtime_map = root / ".multica/runtime-maps/workspace-test.json"
+            runtime_map = runtime_map_for(root)
             plan = build_plan(
                 root, cli, workspace, "quality", runtime_map, False, False
             )
@@ -372,7 +403,12 @@ class ReconcileTests(unittest.TestCase):
             self.assertEqual(len(cli.projects), 1)
             self.assertEqual(len(cli.squads), 1)
             self.assertEqual(len(cli.skills), 2)
-            self.assertIsNotNone(load_deployment_record(root, cli.workspace_id))
+            deployment_record = load_deployment_record(root, cli.workspace_id)
+            self.assertIsNotNone(deployment_record)
+            self.assertEqual(
+                Path(deployment_record["journal"]).parent,
+                root / ".multica/journals",
+            )
             second = build_plan(
                 root, cli, workspace, "quality", runtime_map, False, False, False
             )
@@ -383,7 +419,7 @@ class ReconcileTests(unittest.TestCase):
         with committed_temp_repo() as root:
             cli = FakeCLI()
             workspace = {"id": cli.workspace_id, "name": "Test", "slug": "test"}
-            runtime_map = root / ".multica/runtime-maps/workspace-test.json"
+            runtime_map = runtime_map_for(root)
             plan = build_plan(
                 root, cli, workspace, "quality", runtime_map, False, False
             )
@@ -419,7 +455,7 @@ class ReconcileTests(unittest.TestCase):
                 cli,
                 {"id": cli.workspace_id, "name": "Test", "slug": "test"},
                 "quality",
-                root / ".multica/runtime-maps/workspace-test.json",
+                runtime_map_for(root),
                 False,
                 False,
                 False,
@@ -433,7 +469,7 @@ class ReconcileTests(unittest.TestCase):
         with committed_temp_repo() as root:
             cli = FakeCLI()
             workspace = {"id": cli.workspace_id, "name": "Test", "slug": "test"}
-            runtime_map = root / ".multica/runtime-maps/workspace-test.json"
+            runtime_map = runtime_map_for(root)
             initial = build_plan(
                 root, cli, workspace, "quality", runtime_map, False, False
             )
@@ -622,7 +658,7 @@ class ReconcileTests(unittest.TestCase):
         with committed_temp_repo() as root:
             cli = FakeCLI()
             workspace = {"id": cli.workspace_id, "name": "Test", "slug": "test"}
-            runtime_map = root / ".multica/runtime-maps/workspace-test.json"
+            runtime_map = runtime_map_for(root)
             initial = build_plan(
                 root, cli, workspace, "quality", runtime_map, False, False
             )

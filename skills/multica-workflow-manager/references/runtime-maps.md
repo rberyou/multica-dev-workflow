@@ -5,6 +5,7 @@
 - Purpose and selection
 - Deployment profiles
 - New Workspace initialization
+- Moving existing checkout maps
 - Switching Workspaces
 - Intentional rebinding
 - Failure interpretation
@@ -16,10 +17,12 @@ Runtime binding keys in `workflow.json` are portable logical names. Deployment p
 After resolving the Workspace, `doctor`, `plan`, `drift`, and `verify` automatically select:
 
 ```text
-.multica/runtime-maps/<workspace-id>.json
+~/.multica/workflows/<workflow-id>/runtime-maps/<workspace-id>.json
 ```
 
-Runtime UUIDs are Workspace-specific. Never copy a map between Workspaces or commit it to Git. Use `--runtime-map <path>` only as an explicit override. A missing file is an empty map. Existing compatible Agent bindings are preserved; when a new binding must be selected, automatic selection succeeds only when exactly one online Runtime matches the required provider.
+Runtime UUIDs are machine- and Workspace-specific, while binding names are Workflow-specific. The two path namespaces allow multiple checkouts of one Workflow to share local configuration without colliding with another Workflow or Workspace. Never copy a map between Workspaces or commit it to Git. Use `--runtime-map <path>` only as an explicit override. A missing file is an empty map. Existing compatible Agent bindings are preserved; when a new binding must be selected, automatic selection succeeds only when exactly one online Runtime matches the required provider.
+
+Plans, journals, deployment evidence, release Plans, and worktrees are repository-specific and remain under `<repo>/.multica/`; they do not belong beside the Home-level Runtime maps.
 
 ## Deployment Profiles
 
@@ -49,7 +52,7 @@ multica --profile <cli-profile> --workspace-id <workspace-id> runtime list --out
 
 3. Select online Runtime UUIDs that match the deployment profile. If more than one Runtime matches, use device, owner, custom name, and intended execution location to resolve the choice; do not guess.
 
-4. Create `.multica/runtime-maps/<workspace-id>.json`. For `quality`:
+4. Create `~/.multica/workflows/<workflow-id>/runtime-maps/<workspace-id>.json`. Use the `Workflow` ID printed by `doctor`; for this repository it is `development-delivery`. For `quality`:
 
 ```json
 {
@@ -71,9 +74,15 @@ multica --profile <cli-profile> --workspace-id <workspace-id> runtime list --out
 
 6. Generate and review a clean Plan. Do not Apply until the exact digest is approved.
 
+## Moving Existing Checkout Maps
+
+When upgrading a checkout that stored maps under `<repo>/.multica/runtime-maps/`, move each `<workspace-id>.json` file to `~/.multica/workflows/<workflow-id>/runtime-maps/`. Do not leave two active copies or merge maps from different Workspaces.
+
+The reconciler does not fall back to the old checkout path. Every saved deployment Plan that references the old absolute path is stale after the move; run `doctor`, generate a fresh Plan, and approve its new digest.
+
 ## Switching Workspaces
 
-Use the target Workspace in every command. The reconciler selects its map by resolved Workspace ID, so no `--runtime-map` flag is needed during normal switching.
+Use the target Workspace in every command. The reconciler selects its Home-level map by Workflow ID and resolved Workspace ID, so no `--runtime-map` flag is needed during normal switching or when changing repository checkouts.
 
 Each Plan stores the selected map's absolute path and hash. Editing or replacing that file invalidates only Plans that reference it. Separate files allow Plans for different Workspaces to coexist without overwriting each other's Runtime selection.
 

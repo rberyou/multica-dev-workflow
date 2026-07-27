@@ -4,7 +4,7 @@ Workspace deployment and formal release are separate operations.
 
 ## Workspace Deployment
 
-Any reviewed clean Git checkout may be deployed with `workflow.py plan`, explicit digest approval, `apply`, and `verify`. A branch may be ahead of `main`; no tag or GitHub Release is required. The default Runtime map is selected after Workspace resolution from `.multica/runtime-maps/<workspace-id>.json`; `--runtime-map` remains an explicit override. The Plan binds the exact source commit, source hash, Runtime map, workspace, and observed state.
+Any reviewed clean Git checkout may be deployed with `workflow.py plan`, explicit digest approval, `apply`, and `verify`. A branch may be ahead of `main`; no tag or GitHub Release is required. The default Runtime map is selected after Workspace resolution from `~/.multica/workflows/<workflow-id>/runtime-maps/<workspace-id>.json`; `--runtime-map` remains an explicit override. The Plan binds the exact source commit, source hash, absolute Runtime-map path, Workspace, and observed state. Deployment and release Plans, journals, and evidence remain repository-specific under `<repo>/.multica/`.
 
 ## Formal Release
 

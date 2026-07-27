@@ -35,7 +35,9 @@ There is no Observation inbox, maintenance decision object, maintenance case, or
 
 ## Deployment and Release
 
-Workspace deployment consumes the current clean checkout and remains digest-approved and stale-state checked. Runtime UUID selection is local and workspace-scoped at `.multica/runtime-maps/<workspace-id>.json`, preventing one Workspace's Runtime identities from being reused in another. This supports rapid deployment before formal publishing.
+Workspace deployment consumes the current clean checkout and remains digest-approved and stale-state checked. Runtime UUID selection is machine-level configuration stored at `~/.multica/workflows/<workflow-id>/runtime-maps/<workspace-id>.json`. Workflow and Workspace namespacing prevents unrelated workflows or Workspaces from reusing Runtime identities, while multiple checkouts of the same workflow share the intended local selection.
+
+Repository-specific execution artifacts remain under `<repo>/.multica/`: deployment Plans, Apply journals, immutable deployment evidence, formal release Plans, and local worktrees. Diagnostic snapshots remain under `<repo>/exports/`. This keeps portable source separate from both machine configuration and checkout-bound evidence.
 
 A formal Release is a separate optional packaging action from clean `main`. It creates Skill archives, a repository archive, checksums, a tag, and a GitHub Release through the authenticated human host.
 

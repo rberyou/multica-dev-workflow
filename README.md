@@ -22,6 +22,30 @@ The rationale and exact boundaries are recorded in [docs/workflow-design.md](doc
 python -m pip install -r requirements.txt
 ```
 
+## Local State Layout
+
+Machine-level configuration lives under the current user's Home directory:
+
+```text
+~/.multica/profiles/
+~/.multica/workflows/<workflow-id>/runtime-maps/<workspace-id>.json
+```
+
+Profiles select the Multica server and authentication context. Runtime maps select concrete Runtime UUIDs for one Workflow and Workspace, so every checkout of the same Workflow uses the same local selection.
+
+Repository-specific generated state remains inside the workflow checkout:
+
+```text
+<repo>/.multica/plans/
+<repo>/.multica/journals/
+<repo>/.multica/deployments/
+<repo>/.multica/release-plans/
+<repo>/.multica/worktrees/
+<repo>/exports/
+```
+
+These files bind source commits, Plans, Apply execution, deployment evidence, releases, worktrees, or diagnostic snapshots to this repository. Neither area is committed to Git.
+
 ## Deploy the Current Checkout
 
 The checkout does not need a Git tag or GitHub Release. It must be clean so the Plan can bind an exact commit and source hash.
@@ -40,7 +64,7 @@ python scripts/workflow.py apply --plan <plan-file> --approve <short-digest>
 python scripts/workflow.py verify
 ```
 
-After resolving the target Workspace, `doctor`, `plan`, `drift`, and `verify` automatically use `.multica/runtime-maps/<workspace-id>.json`; `apply` uses the exact path and hash stored in its reviewed Plan. Each Workspace therefore has an independent local Runtime UUID map. If the file is absent, provider selection is automatic and succeeds only when every required provider has a single online Runtime. Use `--runtime-map <path>` only for an explicit override.
+After resolving the target Workspace, `doctor`, `plan`, `drift`, and `verify` automatically use `~/.multica/workflows/<workflow-id>/runtime-maps/<workspace-id>.json`; `apply` uses the exact path and hash stored in its reviewed Plan. Workflow and Workspace namespacing prevents unrelated projects or Workspaces from sharing Runtime identities while allowing multiple checkouts of this workflow to share the intended machine-level selection. If the file is absent, provider selection is automatic and succeeds only when every required provider has a single online Runtime. Use `--runtime-map <path>` only for an explicit override.
 
 Use `--deployment-profile codex-only --rebind-runtimes` only for an intentional Runtime-provider change. Runtime bindings select available execution providers; they are not a security-isolation boundary.
 

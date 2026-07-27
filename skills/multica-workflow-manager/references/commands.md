@@ -3,6 +3,7 @@
 ## Contents
 
 - Context selectors
+- Local state layout
 - Workspace command responsibilities
 - Workspace deployment approval
 - Failure and retirement behavior
@@ -19,7 +20,29 @@ Install repository dependencies once with `python -m pip install -r requirements
 | `--profile <name>` | Select a Multica CLI configuration profile. It isolates server/auth configuration, daemon state, and known Workspaces. It is not a model profile. |
 | `--workspace <id-or-slug>` | Select the target Multica Workspace. Workspace UUIDs and object UUIDs must remain local. |
 | `--deployment-profile <name>` | Select the repository policy that maps logical Runtime bindings to providers, models, and thinking levels. |
-| `--runtime-map <path>` | Override the default Workspace-specific Runtime map path. Use only when explicitly required. |
+| `--runtime-map <path>` | Override the default Workflow/Workspace-specific Runtime map path. Use only when explicitly required. |
+
+## Local State Layout
+
+Keep machine configuration in the current user's Home directory:
+
+| Location | Ownership |
+|---|---|
+| `~/.multica/profiles/` | Multica server and authentication profiles. |
+| `~/.multica/workflows/<workflow-id>/runtime-maps/<workspace-id>.json` | Concrete Runtime selection shared by checkouts of the same Workflow on this machine. |
+
+Keep checkout-bound execution state in the repository:
+
+| Location | Ownership |
+|---|---|
+| `<repo>/.multica/plans/` | Digest-bound Workspace deployment Plans. |
+| `<repo>/.multica/journals/` | Apply progress and recovery journals. |
+| `<repo>/.multica/deployments/` | Latest and immutable deployment evidence. |
+| `<repo>/.multica/release-plans/` | Formal GitHub Release Plans. |
+| `<repo>/.multica/worktrees/` | Optional local worktrees created for this workflow repository. |
+| `<repo>/exports/` | Redacted diagnostic Workspace snapshots. |
+
+Neither area belongs in Git. Do not place checkout-bound Plans or evidence in Home, and do not place Runtime UUID maps inside a repository checkout.
 
 ## Workspace Command Responsibilities
 

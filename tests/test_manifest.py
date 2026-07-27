@@ -99,25 +99,43 @@ class ManifestTests(unittest.TestCase):
             },
         )
 
-    def test_default_runtime_map_path_is_scoped_by_workspace_id(self):
+    def test_default_runtime_map_path_is_scoped_by_workflow_and_workspace(self):
         args = argparse.Namespace(runtime_map=None)
-        first = workflow_cli.runtime_map_path(args, ROOT, {"id": "workspace-a"})
-        second = workflow_cli.runtime_map_path(args, ROOT, {"id": "workspace-b"})
+        home = ROOT / "test-home"
+        first = workflow_cli.runtime_map_path(
+            args, {"id": "workspace-a"}, "development-delivery", home
+        )
+        second = workflow_cli.runtime_map_path(
+            args, {"id": "workspace-b"}, "development-delivery", home
+        )
         self.assertEqual(
             first,
-            (ROOT / ".multica/runtime-maps/workspace-a.json").resolve(),
+            (
+                home
+                / ".multica/workflows/development-delivery/runtime-maps/workspace-a.json"
+            ).resolve(),
         )
         self.assertEqual(
             second,
-            (ROOT / ".multica/runtime-maps/workspace-b.json").resolve(),
+            (
+                home
+                / ".multica/workflows/development-delivery/runtime-maps/workspace-b.json"
+            ).resolve(),
         )
         self.assertNotEqual(first, second)
+
+        other_workflow = workflow_cli.runtime_map_path(
+            args, {"id": "workspace-a"}, "another-workflow", home
+        )
+        self.assertNotEqual(first, other_workflow)
 
     def test_explicit_runtime_map_overrides_workspace_default(self):
         override = (ROOT / "custom-runtime-map.json").resolve()
         args = argparse.Namespace(runtime_map=str(override))
         self.assertEqual(
-            workflow_cli.runtime_map_path(args, ROOT, {"id": "workspace-a"}),
+            workflow_cli.runtime_map_path(
+                args, {"id": "workspace-a"}, "development-delivery"
+            ),
             override,
         )
 
@@ -126,7 +144,25 @@ class ManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(
             workflow_cli.WorkflowError, "resolved workspace has no id"
         ):
-            workflow_cli.runtime_map_path(args, ROOT, {})
+            workflow_cli.runtime_map_path(args, {}, "development-delivery")
+
+    def test_runtime_map_path_rejects_unsafe_workspace_id(self):
+        args = argparse.Namespace(runtime_map=None)
+        with self.assertRaisesRegex(
+            workflow_cli.WorkflowError, "workspace id is not safe"
+        ):
+            workflow_cli.runtime_map_path(
+                args, {"id": "../workspace-a"}, "development-delivery"
+            )
+
+    def test_runtime_map_path_rejects_unsafe_workflow_id(self):
+        args = argparse.Namespace(runtime_map=None)
+        with self.assertRaisesRegex(
+            workflow_cli.WorkflowError, "workflow id is not safe"
+        ):
+            workflow_cli.runtime_map_path(
+                args, {"id": "workspace-a"}, "../development-delivery"
+            )
 
 
 if __name__ == "__main__":
