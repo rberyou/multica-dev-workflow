@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Scope local Runtime UUID maps by Workspace ID while retaining explicit path overrides.
+- Reorganize the workflow-manager Skill for progressive disclosure, with separate command and Runtime-map references.
 
 ## 2.0.0-dev.1
 

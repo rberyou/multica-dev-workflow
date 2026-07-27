@@ -126,11 +126,19 @@ class DocumentationTests(unittest.TestCase):
         )
 
     def test_runtime_map_documentation_is_workspace_scoped(self):
-        commands = (
-            ROOT / "skills/multica-workflow-manager/references/commands.md"
-        ).read_text(encoding="utf-8")
-        self.assertIn(".multica/runtime-maps/<workspace-id>.json", commands)
-        self.assertIn("--runtime-map <path>", commands)
+        skill_root = ROOT / "skills/multica-workflow-manager"
+        skill = (skill_root / "SKILL.md").read_text(encoding="utf-8")
+        commands = (skill_root / "references/commands.md").read_text(encoding="utf-8")
+        runtime_maps = (skill_root / "references/runtime-maps.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("[commands.md](references/commands.md)", skill)
+        self.assertIn("[runtime-maps.md](references/runtime-maps.md)", skill)
+        self.assertIn("current Codex task", commands)
+        self.assertIn("not a Multica Issue", commands)
+        self.assertIn(".multica/runtime-maps/<workspace-id>.json", runtime_maps)
+        self.assertIn("--runtime-map <path>", runtime_maps)
+        self.assertIn("multica --profile", runtime_maps)
         documented = "\n".join(
             path.read_text(encoding="utf-8") for path in documentation_files()
         )
