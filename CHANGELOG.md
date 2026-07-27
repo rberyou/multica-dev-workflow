@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 2.0.0-dev.2
+
+- Add configurable `branch_only`, `lightweight`, and `isolated` development checkout modes.
+- Make Task PR and Requirement PR independent project/Plan selections while preserving Review, test, approval, and merge evidence in local-only delivery.
+- Add the portable `multica-delivery-policy` Skill for project policy validation, redacted remote-capability snapshots, Plan digests, and clean-workspace guards.
+- Change unconfigured PR-capable projects to `lightweight`, Task PR disabled, and Requirement PR enabled; projects without a remote disable both PRs.
 - Accept the Multica CLI's text-only success responses when retiring Autopilots and Skills.
 - Scope local Runtime UUID maps by Workspace ID while retaining explicit path overrides.
 - Store Runtime maps as Home-level Workflow/Workspace configuration while keeping Plans, journals, deployment evidence, release Plans, and worktrees repository-local.

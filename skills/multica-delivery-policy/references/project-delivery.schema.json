@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/rberyou/multica-dev-workflow/main/skills/multica-delivery-policy/references/project-delivery.schema.json",
+  "title": "Multica Project Delivery Policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "workflow_id"],
+  "properties": {
+    "$schema": {"type": "string"},
+    "schema_version": {"const": 1},
+    "workflow_id": {"const": "development-delivery"},
+    "workspace_modes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allowed", "default"],
+      "properties": {
+        "allowed": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"enum": ["branch_only", "lightweight", "isolated"]}
+        },
+        "default": {"enum": ["branch_only", "lightweight", "isolated"]}
+      }
+    },
+    "task_pr": {"$ref": "#/$defs/pr_policy"},
+    "requirement_pr": {"$ref": "#/$defs/pr_policy"},
+    "remote": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
+        "provider": {"enum": ["auto", "github", "none"]},
+        "allow_direct_default_push": {"type": "boolean"}
+      }
+    }
+  },
+  "$defs": {
+    "pr_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["constraint", "default"],
+      "properties": {
+        "constraint": {"enum": ["optional", "required", "forbidden"]},
+        "default": {"type": "boolean"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"constraint": {"const": "required"}}},
+          "then": {"properties": {"default": {"const": true}}}
+        },
+        {
+          "if": {"properties": {"constraint": {"const": "forbidden"}}},
+          "then": {"properties": {"default": {"const": false}}}
+        }
+      ]
+    }
+  }
+}

@@ -419,7 +419,7 @@ class ReconcileTests(unittest.TestCase):
             self.assertEqual(len(cli.agents), 7)
             self.assertEqual(len(cli.projects), 1)
             self.assertEqual(len(cli.squads), 1)
-            self.assertEqual(len(cli.skills), 2)
+            self.assertEqual(len(cli.skills), 3)
             deployment_record = load_deployment_record(root, cli.workspace_id)
             self.assertIsNotNone(deployment_record)
             self.assertEqual(
@@ -632,6 +632,7 @@ class ReconcileTests(unittest.TestCase):
             self.assertEqual(
                 {item["skill"] for item in results},
                 {
+                    "multica-delivery-policy",
                     "multica-requirement-intake",
                     "multica-workflow-manager",
                     "multica-workflow-incidents",

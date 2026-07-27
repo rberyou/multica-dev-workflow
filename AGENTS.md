@@ -23,9 +23,10 @@ python -m pip install -r requirements.txt check-jsonschema
 Run the validation loop:
 
 ```powershell
-python -m unittest tests.test_manifest tests.test_docs tests.test_incidents tests.test_package_skills tests.test_reconcile tests.test_release -v
-python -m py_compile scripts/workflow.py scripts/workflow_lib.py scripts/package_skills.py scripts/release.py skills/multica-workflow-incidents/scripts/incidents.py skills/multica-workflow-console/scripts/workflow_console.py
-check-jsonschema --schemafile workflow.schema.json workflow.json
+python -m unittest tests.test_manifest tests.test_docs tests.test_delivery_policy tests.test_incidents tests.test_package_skills tests.test_reconcile tests.test_release -v
+python -m py_compile scripts/workflow.py scripts/workflow_lib.py scripts/package_skills.py scripts/release.py skills/multica-delivery-policy/scripts/delivery_policy.py skills/multica-workflow-incidents/scripts/incidents.py skills/multica-workflow-console/scripts/workflow_console.py
+python -m check_jsonschema --schemafile workflow.schema.json workflow.json
+python -m check_jsonschema --schemafile skills/multica-delivery-policy/references/project-delivery.schema.json skills/multica-delivery-policy/references/project-delivery.example.json
 ```
 
 Inspect a checkout with `python scripts/workflow.py doctor`, then `export`, `plan`, `drift`, and `verify`. The default machine-level Runtime map is workflow- and workspace-scoped at `~/.multica/workflows/<workflow-id>/runtime-maps/<workspace-id>.json`; repository Plans, journals, deployment evidence, release Plans, and worktrees remain under the checkout's `.multica/`. Use `--runtime-map` only for an explicit override. Deploy a reviewed checkout with `apply` only after the exact `APPROVE WORKFLOW PLAN <short-digest>` approval. Any source, runtime-map, or observed-state change invalidates the Plan.

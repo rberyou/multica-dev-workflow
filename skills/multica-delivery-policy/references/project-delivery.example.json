@@ -1,0 +1,22 @@
+{
+  "$schema": "./project-delivery.schema.json",
+  "schema_version": 1,
+  "workflow_id": "development-delivery",
+  "workspace_modes": {
+    "allowed": ["branch_only", "lightweight", "isolated"],
+    "default": "lightweight"
+  },
+  "task_pr": {
+    "constraint": "optional",
+    "default": false
+  },
+  "requirement_pr": {
+    "constraint": "optional",
+    "default": true
+  },
+  "remote": {
+    "name": "origin",
+    "provider": "auto",
+    "allow_direct_default_push": false
+  }
+}

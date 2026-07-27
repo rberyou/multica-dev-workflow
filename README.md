@@ -6,11 +6,15 @@ Protocol v4 deliberately keeps the system small:
 
 - seven ordinary development Agents, including independent Plan and Code Reviewers;
 - no Observer, maintenance-specific Agent, scheduled scan, or background maintenance loop;
-- no secure execution environment or environment-isolation contract;
+- no secure execution environment; Git branch/worktree isolation is a configurable delivery policy rather than a security boundary;
 - event-driven workflow Incidents created only when a discovered problem must survive the current task;
 - Incident fixes implemented and reviewed through an ordinary Requirement;
 - workspace deployment from any reviewed clean Git checkout, independent of formal releases;
 - optional formal releases created directly from a reviewed clean `main` checkout.
+
+Each managed development Agent also receives `multica-delivery-policy`. A product repository may commit `multica.delivery.json` to constrain and default its checkout topology, Task PR, Requirement PR, and direct-default-push capability. The Requirement Plan freezes the resolved policy and redacted remote-capability snapshot by digest.
+
+Without project configuration, a supported GitHub remote resolves to `lightweight`, Task PR disabled, and Requirement PR enabled. Without any remote, both PRs are disabled and delivery remains local. An unsupported or ambiguous remote blocks planning until the project declares a valid policy. `branch_only` and `lightweight` are serial and require the acting Agents to share the same repository filesystem; `isolated` permits independent Task worktrees and DAG parallelism. Review, tests, human approval, and merge evidence remain mandatory in every mode.
 
 When a reviewed workspace Plan is applied, previously managed Agents, Skills, and scheduled automations that are absent from v4 desired state are retired. Retired Agents are removed from the managed Squad roster before archival. Historical Projects and their Issue records are preserved; a Project led by a retiring Agent is reassigned to the current development leader first.
 
@@ -45,6 +49,8 @@ Repository-specific generated state remains inside the workflow checkout:
 ```
 
 These files bind source commits, Plans, Apply execution, deployment evidence, releases, worktrees, or diagnostic snapshots to this repository. Neither area is committed to Git.
+
+By contrast, `multica.delivery.json` belongs to an application repository that opts into explicit delivery policy. It is portable, reviewed project source and must not be stored under the ignored `.multica/` generated-state directory.
 
 ## Deploy the Current Checkout
 
