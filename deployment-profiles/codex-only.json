@@ -3,19 +3,19 @@
   "bindings": {
     "codex-orchestrator": {
       "provider": "codex",
-      "model": "gpt-5.5",
+      "model": "gpt-5.6-sol",
       "thinking_level": "xhigh",
       "required_status": "online"
     },
     "codex-worker": {
       "provider": "codex",
-      "model": "gpt-5.5",
-      "thinking_level": "",
+      "model": "gpt-5.6-sol",
+      "thinking_level": "medium",
       "required_status": "online"
     },
     "opencode-review": {
       "provider": "codex",
-      "model": "gpt-5.5",
+      "model": "gpt-5.6-sol",
       "thinking_level": "high",
       "required_status": "online"
     }
