@@ -83,6 +83,21 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn("checksums.txt", assets)
         self.assertIn(f"multica-workflow-incidents-v{VERSION}.zip", assets)
         self.assertIn(f"multica-delivery-policy-v{VERSION}.zip", assets)
+        self.assertEqual(
+            release.DEPLOYMENT_BUNDLE_PATHS,
+            [
+                "VERSION",
+                "requirements.txt",
+                "workflow.json",
+                "workflow.schema.json",
+                "deployment-profiles",
+                "instructions",
+                "scripts/package_skills.py",
+                "scripts/workflow.py",
+                "scripts/workflow_lib.py",
+                "skills",
+            ],
+        )
         self.assertNotIn("allow-non-main", release.parser().format_help())
         subparsers = next(
             action
@@ -177,7 +192,36 @@ class ReleaseTests(unittest.TestCase):
                     Path(temp) / f"multica-dev-workflow-v{VERSION}.zip"
                 )
                 with zipfile.ZipFile(repository_asset) as archive:
-                    self.assertNotIn(".git/", archive.namelist())
+                    names = set(archive.namelist())
+                    self.assertNotIn(".git/", names)
+                    for excluded in [
+                        ".github/",
+                        "docs/",
+                        "tests/",
+                        "AGENTS.md",
+                        "CHANGELOG.md",
+                        "README.md",
+                        "scripts/release.py",
+                    ]:
+                        self.assertFalse(
+                            excluded in names
+                            or any(name.startswith(excluded) for name in names),
+                            excluded,
+                        )
+                    for required in [
+                        "VERSION",
+                        "requirements.txt",
+                        "workflow.json",
+                        "workflow.schema.json",
+                        "deployment-profiles/quality.json",
+                        "instructions/common.md",
+                        "scripts/package_skills.py",
+                        "scripts/workflow.py",
+                        "scripts/workflow_lib.py",
+                        "skills/multica-workflow-manager/SKILL.md",
+                        "release-manifest.json",
+                    ]:
+                        self.assertIn(required, names)
                     release_manifest = json.loads(
                         archive.read("release-manifest.json").decode("utf-8")
                     )

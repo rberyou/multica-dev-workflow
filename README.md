@@ -99,4 +99,4 @@ git fetch --tags
 python scripts/release.py verify-tag --tag <v-version>
 ```
 
-`publish` rebuilds the digest-bound assets and uses the authenticated human host's `gh release create`; the separate `package` command is only a local preview. The repository ZIP contains `release-manifest.json` and is directly deployable after extraction, without cloning the source repository. No release workflow, protected publishing environment, dispatcher, or publisher service is required. See [docs/release-policy.md](docs/release-policy.md).
+`publish` rebuilds the digest-bound assets and uses the authenticated human host's `gh release create`; the separate `package` command is only a local preview. The repository ZIP contains only the workflow manifest and schema, deployment profiles, runtime instructions, required deployment scripts, active Skills, version and dependency declaration, plus `release-manifest.json`. It excludes `.github`, tests, top-level development documentation, and release-only tooling, and is directly deployable after extraction without cloning the source repository. See [docs/release-policy.md](docs/release-policy.md).

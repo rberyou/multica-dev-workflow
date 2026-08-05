@@ -24,6 +24,18 @@ SEMVER_RE = re.compile(
     r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
     r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
 )
+DEPLOYMENT_BUNDLE_PATHS = [
+    "VERSION",
+    "requirements.txt",
+    "workflow.json",
+    "workflow.schema.json",
+    "deployment-profiles",
+    "instructions",
+    "scripts/package_skills.py",
+    "scripts/workflow.py",
+    "scripts/workflow_lib.py",
+    "skills",
+]
 
 
 class ReleaseError(RuntimeError):
@@ -189,6 +201,8 @@ def build_repository_archive(
                 "--output",
                 str(source_archive),
                 str(plan["source_commit"]),
+                "--",
+                *DEPLOYMENT_BUNDLE_PATHS,
             ],
             root,
         )

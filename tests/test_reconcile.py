@@ -550,9 +550,9 @@ class ReconcileTests(unittest.TestCase):
                 False,
             )
             plan_path = save_plan(root, plan)
-            readme = root / "README.md"
-            readme.write_text(
-                readme.read_text(encoding="utf-8") + "\nchanged\n",
+            instructions = root / "instructions/common.md"
+            instructions.write_text(
+                instructions.read_text(encoding="utf-8") + "\nchanged\n",
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(WorkflowError, "file changed"):

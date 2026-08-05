@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 2.0.0-dev.4
+
+- Restrict the deployable workflow archive to the manifest, schema, deployment profiles, runtime instructions, required deployment scripts, Skills, version, and dependency declaration.
+- Exclude GitHub metadata, tests, top-level development documentation, and release-only tooling from the deployable archive.
+
 ## 2.0.0-dev.3
 
 - Allow a verified formal Release Bundle to be planned, applied, and verified without a Git checkout.

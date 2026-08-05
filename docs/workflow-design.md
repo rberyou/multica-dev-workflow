@@ -53,7 +53,7 @@ Workspace deployment consumes either a clean Git checkout or an extracted, verif
 
 Source-local execution artifacts remain under `<source>/.multica/`: deployment Plans, Apply journals, immutable deployment evidence, formal release Plans, and local worktrees. Diagnostic snapshots remain under `<source>/exports/`. Generated directories are excluded from Release Bundle verification, while changes to published workflow files invalidate the source. This keeps portable source separate from both machine configuration and execution evidence.
 
-A formal Release is a separate optional packaging action from clean `main`. It creates Skill archives, a directly deployable repository archive with an internal release manifest, checksums, a tag, and a GitHub Release through the authenticated human host.
+A formal Release is a separate optional packaging action from clean `main`. It creates Skill archives, a directly deployable allowlisted workflow archive with an internal release manifest, checksums, a tag, and a GitHub Release through the authenticated human host. CI configuration, tests, development-only documentation, and release tooling are not deployment inputs and are excluded from that archive.
 
 ## Compatibility
 

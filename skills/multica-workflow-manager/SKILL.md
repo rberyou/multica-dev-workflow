@@ -4,7 +4,7 @@ description: Plan, deploy, verify, and inspect a packaged Multica development wo
 metadata:
   managed_by: multica-dev-workflow
   workflow_id: development-delivery
-  version: 2.0.0-dev.3
+  version: 2.0.0-dev.4
 ---
 
 # Multica Workflow Manager

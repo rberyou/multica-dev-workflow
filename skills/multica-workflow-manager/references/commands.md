@@ -116,7 +116,7 @@ git fetch --tags
 python scripts/release.py verify-tag --tag <v-version>
 ```
 
-Formal Release is optional and separate from Workspace deployment. It requires a clean `main` checkout with matching VERSION, workflow version, active Skill versions, and Changelog heading. `publish` rebuilds assets, adds `release-manifest.json` to the repository archive, refuses a daemon-managed Agent identity, and uses the authenticated human host's `gh release create`. The extracted repository archive is then a deployable source without a Git clone.
+Formal Release is optional and separate from Workspace deployment. It requires a clean `main` checkout with matching VERSION, workflow version, active Skill versions, and Changelog heading. `publish` rebuilds assets and creates an allowlisted workflow archive containing only the manifest, schema, deployment profiles, runtime instructions, required deployment scripts, active Skills, version, dependency declaration, and `release-manifest.json`. GitHub metadata, tests, top-level development documentation, and release tooling are excluded. The command refuses a daemon-managed Agent identity and uses the authenticated human host's `gh release create`. The extracted workflow archive is then a deployable source without a Git clone.
 
 ## Local Skill Installation
 
