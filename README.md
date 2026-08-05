@@ -9,7 +9,7 @@ Protocol v4 deliberately keeps the system small:
 - no secure execution environment; Git branch/worktree isolation is a configurable delivery policy rather than a security boundary;
 - event-driven workflow Incidents created only when a discovered problem must survive the current task;
 - Incident fixes implemented and reviewed through an ordinary Requirement;
-- workspace deployment from any reviewed clean Git checkout, independent of formal releases;
+- workspace deployment from either a reviewed clean Git checkout or a verified formal Release Bundle;
 - optional formal releases created directly from a reviewed clean `main` checkout.
 
 Each managed development Agent also receives `multica-delivery-policy`. A product repository may commit `multica.delivery.json` to constrain and default its checkout topology, Task PR, Requirement PR, and direct-default-push capability. The Requirement Plan freezes the resolved policy and redacted remote-capability snapshot by digest.
@@ -35,26 +35,26 @@ Machine-level configuration lives under the current user's Home directory:
 ~/.multica/workflows/<workflow-id>/runtime-maps/<workspace-id>.json
 ```
 
-Profiles select the Multica server and authentication context. Runtime maps select concrete Runtime UUIDs for one Workflow and Workspace, so every checkout of the same Workflow uses the same local selection.
+Profiles select the Multica server and authentication context. Runtime maps select concrete Runtime UUIDs for one Workflow and Workspace, so every source copy of the same Workflow uses the same local selection.
 
-Repository-specific generated state remains inside the workflow checkout:
+Deployment-source generated state remains beside the Git checkout or extracted Release Bundle:
 
 ```text
-<repo>/.multica/plans/
-<repo>/.multica/journals/
-<repo>/.multica/deployments/
-<repo>/.multica/release-plans/
-<repo>/.multica/worktrees/
-<repo>/exports/
+<source>/.multica/plans/
+<source>/.multica/journals/
+<source>/.multica/deployments/
+<source>/.multica/release-plans/
+<source>/.multica/worktrees/
+<source>/exports/
 ```
 
-These files bind source commits, Plans, Apply execution, deployment evidence, releases, worktrees, or diagnostic snapshots to this repository. Neither area is committed to Git.
+These files bind the immutable source identity, Plans, Apply execution, deployment evidence, releases, worktrees, or diagnostic snapshots to this source directory. They are never part of a formal Release Bundle or committed to Git.
 
 By contrast, `multica.delivery.json` belongs to an application repository that opts into explicit delivery policy. It is portable, reviewed project source and must not be stored under the ignored `.multica/` generated-state directory.
 
-## Deploy the Current Checkout
+## Deploy a Checkout or Release Bundle
 
-The checkout does not need a Git tag or GitHub Release. It must be clean so the Plan can bind an exact commit and source hash.
+A Git checkout does not need a tag or GitHub Release, but it must be clean. A formal repository ZIP may instead be extracted and deployed directly without `.git`; its internal `release-manifest.json` binds the release tag, source commit, and SHA-256 hash of every published file. Any changed or undeclared workflow file blocks planning or Apply.
 
 ```text
 python scripts/workflow.py doctor
@@ -70,7 +70,7 @@ python scripts/workflow.py apply --plan <plan-file> --approve <short-digest>
 python scripts/workflow.py verify
 ```
 
-After resolving the target Workspace, `doctor`, `plan`, `drift`, and `verify` automatically use `~/.multica/workflows/<workflow-id>/runtime-maps/<workspace-id>.json`; `apply` uses the exact path and hash stored in its reviewed Plan. Workflow and Workspace namespacing prevents unrelated projects or Workspaces from sharing Runtime identities while allowing multiple checkouts of this workflow to share the intended machine-level selection. If the file is absent, provider selection is automatic and succeeds only when every required provider has a single online Runtime. Use `--runtime-map <path>` only for an explicit override.
+After resolving the target Workspace, `doctor`, `plan`, `drift`, and `verify` automatically use `~/.multica/workflows/<workflow-id>/runtime-maps/<workspace-id>.json`; `apply` uses the exact path and hash stored in its reviewed Plan. Workflow and Workspace namespacing prevents unrelated projects or Workspaces from sharing Runtime identities while allowing Git checkouts and extracted Release Bundles to share the intended machine-level selection. If the file is absent, provider selection is automatic and succeeds only when every required provider has a single online Runtime. Use `--runtime-map <path>` only for an explicit override.
 
 Use `--deployment-profile codex-only --rebind-runtimes` only for an intentional Runtime-provider change. Runtime bindings select available execution providers; they are not a security-isolation boundary.
 
@@ -99,4 +99,4 @@ git fetch --tags
 python scripts/release.py verify-tag --tag <v-version>
 ```
 
-`publish` rebuilds the digest-bound assets and uses the authenticated human host's `gh release create`; the separate `package` command is only a local preview. No release workflow, protected publishing environment, dispatcher, or publisher service is required. See [docs/release-policy.md](docs/release-policy.md).
+`publish` rebuilds the digest-bound assets and uses the authenticated human host's `gh release create`; the separate `package` command is only a local preview. The repository ZIP contains `release-manifest.json` and is directly deployable after extraction, without cloning the source repository. No release workflow, protected publishing environment, dispatcher, or publisher service is required. See [docs/release-policy.md](docs/release-policy.md).

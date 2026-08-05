@@ -11,9 +11,11 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 from typing import Any
+import zipfile
 
-from package_skills import build_archive
+from package_skills import FIXED_ZIP_TIME, build_archive
 from workflow_lib import WorkflowError, read_json, repo_root, utc_now, validate_repository, write_json
 
 
@@ -170,6 +172,74 @@ def sha256_file(path: Path) -> str:
     return value.hexdigest()
 
 
+def sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def build_repository_archive(
+    root: Path, plan: dict[str, Any], output: Path
+) -> dict[str, Any]:
+    with tempfile.TemporaryDirectory() as temp:
+        source_archive = Path(temp) / "source.zip"
+        run(
+            [
+                "git",
+                "archive",
+                "--format=zip",
+                "--output",
+                str(source_archive),
+                str(plan["source_commit"]),
+            ],
+            root,
+        )
+        with zipfile.ZipFile(source_archive) as archive:
+            entries = [
+                (item, archive.read(item.filename))
+                for item in archive.infolist()
+            ]
+    file_hashes = {
+        item.filename: sha256_bytes(data)
+        for item, data in entries
+        if not item.is_dir()
+    }
+    try:
+        workflow = json.loads(
+            next(data for item, data in entries if item.filename == "workflow.json")
+        )
+    except (StopIteration, json.JSONDecodeError) as exc:
+        raise ReleaseError("repository archive has no valid workflow.json") from exc
+    workflow_version = str((workflow.get("workflow") or {}).get("version") or "")
+    if workflow_version != str(plan.get("version") or ""):
+        raise ReleaseError(
+            "repository archive workflow version differs from the release Plan"
+        )
+    if str(plan.get("tag") or "") != f"v{workflow_version}":
+        raise ReleaseError("repository archive tag differs from its workflow version")
+    release_manifest = {
+        "schema_version": 1,
+        "workflow_id": str((workflow.get("workflow") or {}).get("id") or ""),
+        "workflow_version": workflow_version,
+        "release_tag": str(plan["tag"]),
+        "source_commit": str(plan["source_commit"]),
+        "files": dict(sorted(file_hashes.items())),
+    }
+    release_manifest["bundle_digest"] = digest(release_manifest)
+    manifest_bytes = (
+        json.dumps(release_manifest, ensure_ascii=False, indent=2) + "\n"
+    ).encode("utf-8")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(
+        output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9
+    ) as archive:
+        for item, data in entries:
+            archive.writestr(item, data)
+        info = zipfile.ZipInfo("release-manifest.json", FIXED_ZIP_TIME)
+        info.compress_type = zipfile.ZIP_DEFLATED
+        info.external_attr = (0o100644 & 0xFFFF) << 16
+        archive.writestr(info, manifest_bytes)
+    return release_manifest
+
+
 def package_release(root: Path, plan: dict[str, Any], directory: Path) -> list[Path]:
     version = str(plan["version"])
     tag = str(plan["tag"])
@@ -181,17 +251,7 @@ def package_release(root: Path, plan: dict[str, Any], directory: Path) -> list[P
         build_archive(root / str(skill["path"]), output)
         assets.append(output)
     repository_asset = directory / f"multica-dev-workflow-{tag}.zip"
-    run(
-        [
-            "git",
-            "archive",
-            "--format=zip",
-            "--output",
-            str(repository_asset),
-            str(plan["source_commit"]),
-        ],
-        root,
-    )
+    build_repository_archive(root, plan, repository_asset)
     assets.append(repository_asset)
     checksums = directory / "checksums.txt"
     checksums.write_text(

@@ -31,18 +31,18 @@ Keep machine configuration in the current user's Home directory:
 | `~/.multica/profiles/` | Multica server and authentication profiles. |
 | `~/.multica/workflows/<workflow-id>/runtime-maps/<workspace-id>.json` | Concrete Runtime selection shared by checkouts of the same Workflow on this machine. |
 
-Keep checkout-bound execution state in the repository:
+Keep execution state beside the selected Git checkout or extracted Release Bundle:
 
 | Location | Ownership |
 |---|---|
-| `<repo>/.multica/plans/` | Digest-bound Workspace deployment Plans. |
-| `<repo>/.multica/journals/` | Apply progress and recovery journals. |
-| `<repo>/.multica/deployments/` | Latest and immutable deployment evidence. |
-| `<repo>/.multica/release-plans/` | Formal GitHub Release Plans. |
-| `<repo>/.multica/worktrees/` | Optional local worktrees created for this workflow repository. |
-| `<repo>/exports/` | Redacted diagnostic Workspace snapshots. |
+| `<source>/.multica/plans/` | Digest-bound Workspace deployment Plans. |
+| `<source>/.multica/journals/` | Apply progress and recovery journals. |
+| `<source>/.multica/deployments/` | Latest and immutable deployment evidence. |
+| `<source>/.multica/release-plans/` | Formal GitHub Release Plans created from Git source. |
+| `<source>/.multica/worktrees/` | Optional local worktrees created from Git source. |
+| `<source>/exports/` | Redacted diagnostic Workspace snapshots. |
 
-Neither area belongs in Git. Do not place checkout-bound Plans or evidence in Home, and do not place Runtime UUID maps inside a repository checkout.
+Neither area belongs in Git or a Release Bundle. Do not place source-local Plans or evidence in Home, and do not place Runtime UUID maps inside a source directory.
 
 ## Workspace Command Responsibilities
 
@@ -91,7 +91,7 @@ If Apply partially mutates state and stops, retain the journal and generate a fr
 
 Apply refuses `MULTICA_AGENT_ID` or `MULTICA_TASK_ID` by default. Use `--allow-agent-identity` only as an explicitly reviewed break-glass action.
 
-A reviewed clean checkout on any branch may be deployed without a tag or GitHub Release. The deployment record binds its source commit and Plan digest.
+A reviewed clean checkout on any branch may be deployed without a tag or GitHub Release. An extracted formal repository archive may also be deployed without `.git`; `release-manifest.json` verifies every published file. The deployment record binds the portable source identity, provenance commit, and Plan digest.
 
 ## Incident Wrappers
 
@@ -116,7 +116,7 @@ git fetch --tags
 python scripts/release.py verify-tag --tag <v-version>
 ```
 
-Formal Release is optional and separate from Workspace deployment. It requires a clean `main` checkout with matching VERSION, workflow version, active Skill versions, and Changelog heading. `publish` rebuilds assets, refuses a daemon-managed Agent identity, and uses the authenticated human host's `gh release create`.
+Formal Release is optional and separate from Workspace deployment. It requires a clean `main` checkout with matching VERSION, workflow version, active Skill versions, and Changelog heading. `publish` rebuilds assets, adds `release-manifest.json` to the repository archive, refuses a daemon-managed Agent identity, and uses the authenticated human host's `gh release create`. The extracted repository archive is then a deployable source without a Git clone.
 
 ## Local Skill Installation
 

@@ -20,9 +20,9 @@ After resolving the Workspace, `doctor`, `plan`, `drift`, and `verify` automatic
 ~/.multica/workflows/<workflow-id>/runtime-maps/<workspace-id>.json
 ```
 
-Runtime UUIDs are machine- and Workspace-specific, while binding names are Workflow-specific. The two path namespaces allow multiple checkouts of one Workflow to share local configuration without colliding with another Workflow or Workspace. Never copy a map between Workspaces or commit it to Git. Use `--runtime-map <path>` only as an explicit override. A missing file is an empty map. Existing compatible Agent bindings are preserved; when a new binding must be selected, automatic selection succeeds only when exactly one online Runtime matches the required provider.
+Runtime UUIDs are machine- and Workspace-specific, while binding names are Workflow-specific. The two path namespaces allow Git checkouts and extracted Release Bundles of one Workflow to share local configuration without colliding with another Workflow or Workspace. Never copy a map between Workspaces or include it in Git or a Release Bundle. Use `--runtime-map <path>` only as an explicit override. A missing file is an empty map. Existing compatible Agent bindings are preserved; when a new binding must be selected, automatic selection succeeds only when exactly one online Runtime matches the required provider.
 
-Plans, journals, deployment evidence, release Plans, and worktrees are repository-specific and remain under `<repo>/.multica/`; they do not belong beside the Home-level Runtime maps.
+Plans, journals, deployment evidence, release Plans, and worktrees are source-local and remain under `<source>/.multica/`; they do not belong beside the Home-level Runtime maps or inside the published Bundle.
 
 ## Deployment Profiles
 
@@ -38,7 +38,7 @@ Do not treat a deployment profile as an isolation boundary.
 
 ## New Workspace Initialization
 
-1. From the workflow checkout, resolve the Workspace and expected map path:
+1. From the workflow Git checkout or extracted Release Bundle, resolve the Workspace and expected map path:
 
 ```text
 python scripts/workflow.py doctor --profile <cli-profile> --workspace <id-or-slug> --deployment-profile quality

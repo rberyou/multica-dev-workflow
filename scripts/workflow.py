@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CLI for planning and deploying the Git-managed Multica workflow."""
+"""CLI for planning and deploying the packaged Multica workflow."""
 
 from __future__ import annotations
 
@@ -16,8 +16,6 @@ from workflow_lib import (
     build_plan,
     discover_multica,
     fetch_state,
-    git_dirty,
-    git_head,
     install_skills,
     load_deployment_record,
     load_runtime_map,
@@ -29,6 +27,7 @@ from workflow_lib import (
     resolve_workspace,
     run_process,
     save_plan,
+    source_identity,
     summarize_actions,
     utc_now,
     validate_repository,
@@ -46,6 +45,7 @@ def add_context_args(parser: argparse.ArgumentParser) -> None:
 
 def context(args: argparse.Namespace, root: Path) -> tuple[MulticaCLI, dict, dict, dict]:
     manifest, profile_doc = validate_repository(root, args.deployment_profile)
+    source_identity(root)
     binary = discover_multica(args.multica_bin)
     profile = resolve_profile(binary, args.profile)
     cli = MulticaCLI(binary=binary, profile=profile)
@@ -98,7 +98,7 @@ def print_plan(plan: dict, path: Path | None = None) -> None:
         print(f"Plan file: {path}")
     print(f"Plan digest: {plan['plan_digest']}")
     if plan.get("draft"):
-        print("DRAFT: commit the reviewed files and generate a new Plan before Apply")
+        print("DRAFT: restore a reviewed immutable source and generate a new Plan before Apply")
     else:
         print(f"Approval: APPROVE WORKFLOW PLAN {plan['plan_digest'][:12]}")
 
@@ -153,9 +153,14 @@ def command_doctor(args: argparse.Namespace, root: Path) -> int:
         if runtime.get("status") == "online":
             provider = str(runtime.get("provider", "unknown"))
             providers[provider] = providers.get(provider, 0) + 1
-    print(f"Repository: {root}")
-    print(f"Git HEAD: {git_head(root)}")
-    print(f"Git dirty: {git_dirty(root)}")
+    print(f"Source root: {root}")
+    source, source_dirty = source_identity(root)
+    print(f"Source: {source.get('type')} {source.get('id')}")
+    if source.get("git_commit"):
+        print(f"Source commit: {source.get('git_commit')}")
+    if source.get("release_tag"):
+        print(f"Release tag: {source.get('release_tag')}")
+    print(f"Source dirty: {source_dirty}")
     print(f"Multica CLI: {cli.binary}")
     print(f"Profile: {cli.profile or '<default>'}")
     print(f"Workspace: {workspace.get('name')} ({workspace.get('id')})")
@@ -209,9 +214,10 @@ def build_from_args(
 
 
 def command_plan(args: argparse.Namespace, root: Path) -> int:
-    if git_dirty(root) and not args.allow_dirty:
+    _, source_dirty = source_identity(root)
+    if source_dirty and not args.allow_dirty:
         raise WorkflowError(
-            "working tree is dirty; commit/review changes or pass --allow-dirty for a draft Plan"
+            "deployment source is dirty; commit/review changes or pass --allow-dirty for a draft Plan"
         )
     plan, _, _ = build_from_args(args, root)
     path = save_plan(root, plan)
@@ -285,6 +291,7 @@ def command_apply(args: argparse.Namespace, root: Path) -> int:
 
 
 def command_install_skills(args: argparse.Namespace, root: Path) -> int:
+    source_identity(root)
     target = (
         Path(args.target).expanduser().resolve()
         if args.target

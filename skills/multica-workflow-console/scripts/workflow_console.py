@@ -15,14 +15,14 @@ def locate_repo(explicit: str | None) -> Path:
         root = Path(explicit).expanduser().resolve()
         if (root / "workflow.json").is_file() and (root / "scripts/workflow.py").is_file():
             return root
-        raise RuntimeError("--repo is not a multica-dev-workflow checkout")
+        raise RuntimeError("--repo is not a multica-dev-workflow source")
     for candidate in [Path.cwd(), *Path.cwd().parents]:
         if (candidate / "workflow.json").is_file() and (candidate / "scripts/workflow.py").is_file():
             return candidate
     configured = os.environ.get("MULTICA_WORKFLOW_REPO")
     if configured:
         return locate_repo(configured)
-    raise RuntimeError("workflow repository was not found; pass --repo or set MULTICA_WORKFLOW_REPO")
+    raise RuntimeError("workflow source was not found; pass --repo or set MULTICA_WORKFLOW_REPO")
 
 
 def main() -> int:

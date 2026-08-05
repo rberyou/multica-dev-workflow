@@ -30,9 +30,12 @@ from workflow_lib import (  # noqa: E402
     redact,
     render_marker,
     save_plan,
+    source_identity,
     strip_marker,
+    validate_release_bundle,
     validate_repository,
 )
+import release  # noqa: E402
 
 
 CONSOLE_PATH = ROOT / "skills/multica-workflow-console/scripts/workflow_console.py"
@@ -87,6 +90,33 @@ def committed_temp_repo():
             check=True,
             capture_output=True,
         )
+        yield root
+
+
+@contextmanager
+def released_temp_bundle():
+    with committed_temp_repo() as repository:
+        source_commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repository,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        version = (repository / "VERSION").read_text(encoding="utf-8").strip()
+        archive = repository.parent / "workflow-release.zip"
+        release.build_repository_archive(
+            repository,
+            {
+                "version": version,
+                "tag": f"v{version}",
+                "source_commit": source_commit,
+            },
+            archive,
+        )
+        root = repository.parent / "released"
+        with zipfile.ZipFile(archive) as package:
+            package.extractall(root)
         yield root
 
 
@@ -431,6 +461,102 @@ class ReconcileTests(unittest.TestCase):
             )
             self.assertFalse(plan_has_blockers(second))
             self.assertEqual(mutation_actions(second), [])
+
+    def test_release_bundle_plans_and_applies_without_git(self):
+        with released_temp_bundle() as root:
+            self.assertFalse((root / ".git").exists())
+            extracted_check = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import json,sys; from pathlib import Path; "
+                        "sys.path.insert(0, 'scripts'); "
+                        "from workflow_lib import source_identity; "
+                        "print(json.dumps(source_identity(Path('.'))[0]))"
+                    ),
+                ],
+                cwd=root,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(
+                json.loads(extracted_check.stdout)["type"], "release_bundle"
+            )
+            release_manifest = validate_release_bundle(root)
+            source, dirty = source_identity(root)
+            self.assertEqual(source["type"], "release_bundle")
+            self.assertEqual(source["id"], release_manifest["bundle_digest"])
+            self.assertFalse(dirty)
+
+            cli = FakeCLI()
+            workspace = {"id": cli.workspace_id, "name": "Test", "slug": "test"}
+            runtime_map = runtime_map_for(root)
+            plan = build_plan(
+                root, cli, workspace, "quality", runtime_map, False, False
+            )
+            self.assertFalse(plan["draft"])
+            self.assertEqual(plan["source"], source)
+            apply_plan(root, cli, save_plan(root, plan), plan["plan_digest"][:12])
+            deployment_record = load_deployment_record(root, cli.workspace_id)
+            self.assertEqual(deployment_record["source"], source)
+
+    def test_release_bundle_rejects_changed_or_undeclared_source(self):
+        with released_temp_bundle() as root:
+            workflow_path = root / "workflow.json"
+            workflow_path.write_text(
+                workflow_path.read_text(encoding="utf-8") + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(WorkflowError, "file changed"):
+                source_identity(root)
+
+        with released_temp_bundle() as root:
+            extra_profile = root / "deployment-profiles/extra.json"
+            extra_profile.write_text("{}\n", encoding="utf-8")
+            with self.assertRaisesRegex(WorkflowError, "undeclared workflow file"):
+                source_identity(root)
+
+        with released_temp_bundle() as root:
+            manifest_path = root / "release-manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["workflow_version"] = "9.9.9"
+            manifest["bundle_digest"] = release.digest(
+                {
+                    key: value
+                    for key, value in manifest.items()
+                    if key != "bundle_digest"
+                }
+            )
+            manifest_path.write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(WorkflowError, "workflow_version"):
+                source_identity(root)
+
+    def test_release_bundle_change_invalidates_an_approved_plan(self):
+        with released_temp_bundle() as root:
+            cli = FakeCLI()
+            workspace = {"id": cli.workspace_id, "name": "Test", "slug": "test"}
+            plan = build_plan(
+                root,
+                cli,
+                workspace,
+                "quality",
+                runtime_map_for(root),
+                False,
+                False,
+            )
+            plan_path = save_plan(root, plan)
+            readme = root / "README.md"
+            readme.write_text(
+                readme.read_text(encoding="utf-8") + "\nchanged\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(WorkflowError, "file changed"):
+                apply_plan(root, cli, plan_path, plan["plan_digest"][:12])
 
     def test_apply_rejects_changed_multica_state(self):
         with committed_temp_repo() as root:

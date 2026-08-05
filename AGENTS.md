@@ -29,7 +29,7 @@ python -m check_jsonschema --schemafile workflow.schema.json workflow.json
 python -m check_jsonschema --schemafile skills/multica-delivery-policy/references/project-delivery.schema.json skills/multica-delivery-policy/references/project-delivery.example.json
 ```
 
-Inspect a checkout with `python scripts/workflow.py doctor`, then `export`, `plan`, `drift`, and `verify`. The default machine-level Runtime map is workflow- and workspace-scoped at `~/.multica/workflows/<workflow-id>/runtime-maps/<workspace-id>.json`; repository Plans, journals, deployment evidence, release Plans, and worktrees remain under the checkout's `.multica/`. Use `--runtime-map` only for an explicit override. Deploy a reviewed checkout with `apply` only after the exact `APPROVE WORKFLOW PLAN <short-digest>` approval. Any source, runtime-map, or observed-state change invalidates the Plan.
+Inspect a Git checkout or extracted formal Release Bundle with `python scripts/workflow.py doctor`, then `export`, `plan`, `drift`, and `verify`. The default machine-level Runtime map is workflow- and workspace-scoped at `~/.multica/workflows/<workflow-id>/runtime-maps/<workspace-id>.json`; Plans, journals, deployment evidence, release Plans, and worktrees remain under the selected source's `.multica/`. Use `--runtime-map` only for an explicit override. Deploy reviewed source with `apply` only after the exact `APPROVE WORKFLOW PLAN <short-digest>` approval. Any source, runtime-map, or observed-state change invalidates the Plan.
 
 ## Coding and Testing
 

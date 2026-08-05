@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 2.0.0-dev.3
+
+- Allow a verified formal Release Bundle to be planned, applied, and verified without a Git checkout.
+- Add an internal `release-manifest.json` that binds the release tag, source commit, and SHA-256 hash of every published workflow file.
+- Bind deployment Plans, journals, and deployment evidence to a portable source identity while retaining compatibility with Git-based deployment Plans.
+
 ## 2.0.0-dev.2
 
 - Add configurable `branch_only`, `lightweight`, and `isolated` development checkout modes.

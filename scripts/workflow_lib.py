@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Core reconciliation logic for the Git-managed Multica workflow."""
+"""Core reconciliation logic for the packaged Multica workflow."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import platform
 import re
 import shutil
@@ -32,6 +32,19 @@ UUID_RE = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F
 WORKFLOW_VERSION_LITERAL_RE = re.compile(
     r"\bworkflow_version=([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?)\b"
 )
+RELEASE_MANIFEST_NAME = "release-manifest.json"
+RELEASE_PROTECTED_DIRECTORIES = {
+    "deployment-profiles",
+    "instructions",
+    "scripts",
+    "skills",
+}
+RELEASE_PROTECTED_FILES = {
+    "VERSION",
+    "requirements.txt",
+    "workflow.json",
+    "workflow.schema.json",
+}
 
 
 class WorkflowError(RuntimeError):
@@ -274,6 +287,112 @@ def git_head(root: Path) -> str:
 def git_dirty(root: Path) -> bool:
     result = run_process(["git", "status", "--porcelain"], cwd=root)
     return bool(result.stdout.strip())
+
+
+def _release_path(root: Path, relative: str) -> Path:
+    posix = PurePosixPath(relative)
+    if posix.is_absolute() or not posix.parts or ".." in posix.parts:
+        raise WorkflowError(f"release manifest contains an unsafe path: {relative}")
+    path = root.joinpath(*posix.parts).resolve()
+    try:
+        path.relative_to(root.resolve())
+    except ValueError as exc:
+        raise WorkflowError(
+            f"release manifest path escapes the bundle: {relative}"
+        ) from exc
+    return path
+
+
+def validate_release_bundle(root: Path) -> dict[str, Any]:
+    manifest_path = root / RELEASE_MANIFEST_NAME
+    manifest = read_json(manifest_path)
+    if not isinstance(manifest, dict):
+        raise WorkflowError("release manifest must be a JSON object")
+    if manifest.get("schema_version") != 1:
+        raise WorkflowError("release manifest schema_version must be 1")
+    files = manifest.get("files")
+    if not isinstance(files, dict) or not files:
+        raise WorkflowError("release manifest must contain file hashes")
+    expected_digest = str(manifest.get("bundle_digest") or "")
+    payload = {
+        key: value for key, value in manifest.items() if key != "bundle_digest"
+    }
+    if not expected_digest or sha256_value(payload) != expected_digest:
+        raise WorkflowError("release manifest digest is invalid or was modified")
+
+    workflow_doc = read_json(root / "workflow.json")
+    workflow = workflow_doc.get("workflow") if isinstance(workflow_doc, dict) else {}
+    if not isinstance(workflow, dict):
+        workflow = {}
+    if str(manifest.get("workflow_id") or "") != str(workflow.get("id") or ""):
+        raise WorkflowError("release manifest workflow_id does not match workflow.json")
+    if str(manifest.get("workflow_version") or "") != str(
+        workflow.get("version") or ""
+    ):
+        raise WorkflowError(
+            "release manifest workflow_version does not match workflow.json"
+        )
+    if not str(manifest.get("release_tag") or ""):
+        raise WorkflowError("release manifest has no release_tag")
+    if not re.fullmatch(r"[0-9a-f]{40}", str(manifest.get("source_commit") or "")):
+        raise WorkflowError("release manifest has an invalid source_commit")
+
+    declared: set[str] = set()
+    for relative, expected_hash in files.items():
+        relative_text = str(relative)
+        path = _release_path(root, relative_text)
+        if not path.is_file():
+            raise WorkflowError(f"release bundle is missing file: {relative_text}")
+        if not re.fullmatch(r"[0-9a-f]{64}", str(expected_hash)):
+            raise WorkflowError(
+                f"release manifest has an invalid hash for {relative_text}"
+            )
+        if sha256_file(path) != expected_hash:
+            raise WorkflowError(f"release bundle file changed: {relative_text}")
+        declared.add(PurePosixPath(relative_text).as_posix())
+
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(root).as_posix()
+        parts = PurePosixPath(relative).parts
+        if relative == RELEASE_MANIFEST_NAME or not parts:
+            continue
+        if parts[0] in {
+            ".git",
+            ".multica",
+            ".pytest_cache",
+            ".venv",
+            "build",
+            "exports",
+        } or "__pycache__" in parts or path.suffix == ".pyc":
+            continue
+        protected = (
+            parts[0] in RELEASE_PROTECTED_DIRECTORIES
+            or relative in RELEASE_PROTECTED_FILES
+        )
+        if protected and relative not in declared:
+            raise WorkflowError(
+                f"release bundle contains an undeclared workflow file: {relative}"
+            )
+    return manifest
+
+
+def source_identity(root: Path) -> tuple[dict[str, str], bool]:
+    if (root / RELEASE_MANIFEST_NAME).is_file():
+        manifest = validate_release_bundle(root)
+        return (
+            {
+                "type": "release_bundle",
+                "id": str(manifest["bundle_digest"]),
+                "release_tag": str(manifest.get("release_tag") or ""),
+                "git_commit": str(manifest.get("source_commit") or ""),
+            },
+            False,
+        )
+    commit = git_head(root)
+    dirty = commit == "UNCOMMITTED" or git_dirty(root)
+    return {"type": "git", "id": commit, "git_commit": commit}, dirty
 
 
 def runtime_instruction_versions(
@@ -1474,14 +1593,16 @@ def build_plan(
             else:
                 actions.append({"type": "WARNING", "key": "roster", "reason": f"preserving unmanaged roster member with role {role or '<empty>'}"})
 
-    source_commit = git_head(root)
+    source, source_dirty = source_identity(root)
+    source_commit = str(source.get("git_commit") or "")
     manifest_hash = desired_source_hash(root, manifest, profile)
     runtime_map_hash = sha256_value(runtime_map)
     plan = {
         "schema_version": 1,
         "created_at": utc_now(),
+        "source": source,
         "source_commit": source_commit,
-        "draft": source_commit == "UNCOMMITTED" or git_dirty(root),
+        "draft": source_dirty,
         "workflow_version": workflow["version"],
         "workflow_id": workflow_id,
         "profile": cli.profile,
@@ -1722,6 +1843,8 @@ def finalize_deployment_record(
         "applied_actor": applied_actor,
         "journal": str(journal_path),
     }
+    if plan.get("source"):
+        expected_record["source"] = plan.get("source")
     if record_path.is_file():
         deployment_record = read_json(record_path)
         if not isinstance(deployment_record, dict) or any(
@@ -1759,13 +1882,27 @@ def apply_plan(root: Path, cli: MulticaCLI, plan_path: Path, approval: str) -> d
     if approval not in {expected_digest, expected_digest[:12]}:
         raise WorkflowError("approval digest does not match the plan")
     if plan.get("draft"):
-        raise WorkflowError("draft plans created from an uncommitted or dirty worktree cannot be applied")
+        raise WorkflowError(
+            "draft plans created from an uncommitted or dirty source cannot be applied"
+        )
     if plan_has_blockers(plan):
         raise WorkflowError("plan contains BLOCKED actions")
-    if git_head(root) != plan.get("source_commit"):
-        raise WorkflowError("Git HEAD changed after planning; generate a new plan")
-    if git_dirty(root):
-        raise WorkflowError("working tree is dirty; apply requires the exact reviewed checkout")
+    planned_source = plan.get("source")
+    if isinstance(planned_source, dict):
+        current_source, source_dirty = source_identity(root)
+        if current_source != planned_source:
+            raise WorkflowError("deployment source changed after planning")
+        if source_dirty:
+            raise WorkflowError(
+                "deployment source is dirty; apply requires the exact reviewed source"
+            )
+    else:
+        if git_head(root) != plan.get("source_commit"):
+            raise WorkflowError("Git HEAD changed after planning; generate a new plan")
+        if git_dirty(root):
+            raise WorkflowError(
+                "working tree is dirty; apply requires the exact reviewed checkout"
+            )
     manifest, profile = validate_repository(root, str(plan["deployment_profile"]))
     if desired_source_hash(root, manifest, profile) != plan.get("manifest_hash"):
         raise WorkflowError("manifest or deployment profile changed after planning")
@@ -1778,8 +1915,15 @@ def apply_plan(root: Path, cli: MulticaCLI, plan_path: Path, approval: str) -> d
         if isinstance(existing_journal, dict) and existing_journal.get("finished_at"):
             if (
                 str(existing_journal.get("plan_digest") or "") != expected_digest
-                or str(existing_journal.get("source_commit") or "")
-                != str(plan.get("source_commit") or "")
+                or (
+                    plan.get("source")
+                    and existing_journal.get("source") != plan.get("source")
+                )
+                or (
+                    not plan.get("source")
+                    and str(existing_journal.get("source_commit") or "")
+                    != str(plan.get("source_commit") or "")
+                )
                 or existing_journal.get("workspace") != plan.get("workspace")
             ):
                 raise WorkflowError("completed apply journal differs from the deployment Plan")
@@ -1793,6 +1937,7 @@ def apply_plan(root: Path, cli: MulticaCLI, plan_path: Path, approval: str) -> d
     journal = {
         "started_at": utc_now(),
         "plan_digest": expected_digest,
+        "source": plan.get("source"),
         "source_commit": plan["source_commit"],
         "workspace": plan["workspace"],
         "applied_actor": os.environ.get("MULTICA_AGENT_ID") or "human_host",

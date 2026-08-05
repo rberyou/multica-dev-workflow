@@ -203,8 +203,10 @@ class DocumentationTests(unittest.TestCase):
             "~/.multica/workflows/<workflow-id>/runtime-maps/<workspace-id>.json",
             runtime_maps,
         )
-        self.assertIn("<repo>/.multica/plans/", commands)
-        self.assertIn("<repo>/.multica/deployments/", commands)
+        self.assertIn("<source>/.multica/plans/", commands)
+        self.assertIn("<source>/.multica/deployments/", commands)
+        self.assertIn("release-manifest.json", commands)
+        self.assertIn("without `.git`", commands)
         self.assertNotIn(".multica/runtime-maps/<workspace-id>.json", runtime_maps)
         self.assertIn("does not fall back to the old checkout path", runtime_maps)
         self.assertIn("saved deployment Plan", runtime_maps)

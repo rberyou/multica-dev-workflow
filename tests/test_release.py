@@ -1,11 +1,14 @@
 from pathlib import Path
 import argparse
+from contextlib import contextmanager
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,17 +18,47 @@ import release  # noqa: E402
 
 
 VERSION = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
-HEAD = subprocess.run(
-    ["git", "rev-parse", "HEAD"],
-    cwd=ROOT,
-    check=True,
-    capture_output=True,
-    text=True,
-).stdout.strip()
 
 
 def completed(stdout: str = "", returncode: int = 0) -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess([], returncode, stdout=stdout, stderr="")
+
+
+@contextmanager
+def committed_temp_repo():
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp) / "repo"
+        shutil.copytree(
+            ROOT,
+            root,
+            ignore=shutil.ignore_patterns(
+                ".git", ".multica", "exports", "build", "__pycache__", "*.pyc"
+            ),
+        )
+        subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"],
+            cwd=root,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Test"], cwd=root, check=True
+        )
+        subprocess.run(["git", "add", "."], cwd=root, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "test"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+        )
+        source_commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        yield root, source_commit
 
 
 class ReleaseTests(unittest.TestCase):
@@ -122,19 +155,60 @@ class ReleaseTests(unittest.TestCase):
                 release.verify_plan(ROOT, plan)
 
     def test_package_release_creates_exact_assets_and_checksums(self):
-        plan = {
-            "version": VERSION,
-            "tag": f"v{VERSION}",
-            "source_commit": HEAD,
-            "expected_assets": release.expected_assets(ROOT, VERSION),
-        }
-        with tempfile.TemporaryDirectory() as temp:
-            assets = release.package_release(ROOT, plan, Path(temp))
-            self.assertEqual(sorted(path.name for path in assets), plan["expected_assets"])
-            checksums = (Path(temp) / "checksums.txt").read_text(encoding="utf-8")
-            for name in plan["expected_assets"]:
-                if name != "checksums.txt":
-                    self.assertIn(name, checksums)
+        with committed_temp_repo() as (root, source_commit):
+            plan = {
+                "version": VERSION,
+                "tag": f"v{VERSION}",
+                "source_commit": source_commit,
+                "expected_assets": release.expected_assets(root, VERSION),
+            }
+            with tempfile.TemporaryDirectory() as temp:
+                assets = release.package_release(root, plan, Path(temp))
+                self.assertEqual(
+                    sorted(path.name for path in assets), plan["expected_assets"]
+                )
+                checksums = (Path(temp) / "checksums.txt").read_text(
+                    encoding="utf-8"
+                )
+                for name in plan["expected_assets"]:
+                    if name != "checksums.txt":
+                        self.assertIn(name, checksums)
+                repository_asset = (
+                    Path(temp) / f"multica-dev-workflow-v{VERSION}.zip"
+                )
+                with zipfile.ZipFile(repository_asset) as archive:
+                    self.assertNotIn(".git/", archive.namelist())
+                    release_manifest = json.loads(
+                        archive.read("release-manifest.json").decode("utf-8")
+                    )
+                self.assertEqual(release_manifest["source_commit"], source_commit)
+                self.assertEqual(
+                    release.digest(
+                        {
+                            key: value
+                            for key, value in release_manifest.items()
+                            if key != "bundle_digest"
+                        }
+                    ),
+                    release_manifest["bundle_digest"],
+                )
+                self.assertIn("workflow.json", release_manifest["files"])
+
+    def test_repository_archive_rejects_version_mismatch(self):
+        with committed_temp_repo() as (root, source_commit):
+            with tempfile.TemporaryDirectory() as temp:
+                with self.assertRaisesRegex(
+                    release.ReleaseError, "workflow version differs"
+                ):
+                    release.build_repository_archive(
+                        root,
+                        {
+                            "version": "9.9.9",
+                            "tag": "v9.9.9",
+                            "source_commit": source_commit,
+                        },
+                        Path(temp) / "workflow.zip",
+                    )
 
     def test_publish_uses_human_host_gh_release_create(self):
         plan = {
