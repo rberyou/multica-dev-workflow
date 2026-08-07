@@ -81,7 +81,7 @@ This is not a Multica Issue or GitHub comment. If the user operates the terminal
 
 Apply accepts only the full Plan digest or its first 12 characters. It also rechecks the clean Git commit, desired-source hash, Runtime map hash, Workspace identity, and observed Multica state. Any change requires a fresh Plan and approval.
 
-Do not confuse this gate with development approvals. `APPROVE PLAN vN` and `APPROVE REQUIREMENT vN` are comments on the corresponding Multica workflow Issues from the configured human approver.
+Do not confuse this gate with development approvals. `APPROVE PLAN vN` is posted on the current Plan approval target. `APPROVE REQUIREMENT vN` is posted only on the top-level Requirement after its revision/head/policy-bound final gate is open.
 
 ## Failure and Retirement Behavior
 

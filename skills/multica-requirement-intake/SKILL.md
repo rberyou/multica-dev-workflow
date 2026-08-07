@@ -22,6 +22,7 @@ Use this Skill as the portable entry point between the user and a Multica develo
 - Never set, cache, copy, guess, or request `human_approver_id`. The squad leader resolves the unique roster member whose role is `人工审批人`.
 - After starting a Requirement, keep following its complete Issue chain until terminal state or the user explicitly stops tracking.
 - Never infer approval. Validate the current gate, revision, independent review, authenticated human identity, and approver roster before posting an authorized approval or decision.
+- Post final approval only on the top-level Requirement. Require root `in_review`, Plan and Implementation `done`, integration validation `done`, and an open revision/head/policy-bound final approval gate. A child or early approval is invalid and must not create approval metadata.
 - Never claim creation, update, start, binding, decision, or approval without a fresh canonical service read proving the resulting state.
 
 Portable defaults:

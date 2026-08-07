@@ -27,6 +27,10 @@ All modes retain Requirement and Task branches:
 
 Task PR and Requirement PR are independent selections constrained by project and remote capability. When a PR is disabled, immutable Git base/head SHAs, independent Review, tests, approval comments, merge method, and merged commit replace PR evidence. A repository without any remote performs no push, PR, or remote CI operation; an unsupported remote requires explicit local/direct-push project policy. This checkout isolation is not a secure execution environment.
 
+Protocol v4 assigns parent status by workflow object. Plan and Implementation become `done` when their internal work closes. Only the top-level Requirement becomes `in_review`, after Implementation is `done` and Leader opens a final approval gate bound to the current Plan revision, reviewed head, and policy digest. Final approval is accepted only on that root Issue. Integrator records approval and delivery evidence, explicitly wakes Leader, and never writes the root status; Leader alone converges delivery to `done`. Generic platform Stage comments are event notifications and cannot override these semantics or reopen a completed Requirement.
+
+Requirement delivery targets the Plan-defined branch, which may be non-default. Terminal verification preserves independent default and target baselines and covers Requirement PR, direct-push, and no-remote local-only evidence. Duplicate approvals never repeat a merge; when delivery is complete but the root remains non-terminal, they recover the Leader handoff.
+
 ## Event-Driven Incident Boundary
 
 The active Agent already observes the commands, state transitions, Review results, and failures involved in its task. It should repair local mistakes immediately. Durable recording is only useful when the issue outlives that execution context.

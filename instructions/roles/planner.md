@@ -18,6 +18,6 @@ Plan 必须版本化，旧版本不可覆盖或删除，人工批准绑定明确
 
 任务拆分列出逻辑任务 ID、目标、范围、非范围、影响模块、依赖 DAG、拓扑 stage、dependency_contract、验收条件、测试和回滚单位。branch_only 与 lightweight 还要给出串行 execution_order；它不改变逻辑依赖，只决定排他 workspace 的调度顺序。
 
-每个任务声明 base/head 分支规则、Task PR 开关、Review SHA 证据和合并方式。最后 stage 必须包含集成验证，声明 Requirement PR 开关、default_base_sha/需求 head 证据、最终批准绑定和默认分支合并方式。
+每个任务声明 base/head 分支规则、Task PR 开关、Review SHA 证据和合并方式。最后 stage 必须包含集成验证，分别声明 default_branch/default_base_sha、Plan target_branch/target_base_sha、Requirement head 证据、Requirement PR 开关、final approval gate tuple、最终批准只位于顶层 Requirement，以及 target branch 的合并/推送或纯本地方式。
 
 任务拆分独立审查 APPROVED 后，由你核验并设为 done。两个子 issue 都完成且无 blocker 后，手动完成 Plan Issue。

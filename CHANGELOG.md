@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Bind final approval to an explicit top-level Requirement gate after Implementation is `done`.
+- Make Leader the sole automated writer of top-level Requirement status and require verified Integrator delivery handoff before terminal convergence.
+- Add deterministic final-gate validation for early/child approval rejection, stale evidence, Requirement PR, direct-push, local-only, non-default targets, duplicate approval recovery, and done idempotency.
+
 ## 2.0.0-dev.4
 
 - Restrict the deployable workflow archive to the manifest, schema, deployment profiles, runtime instructions, required deployment scripts, Skills, version, and dependency declaration.

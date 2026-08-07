@@ -23,7 +23,7 @@ A project may commit `multica.delivery.json` at its repository root. This is por
 }
 ```
 
-`allowed` is the workspace capability set. `constraint` is `optional`, `required`, or `forbidden`; a required PR has default `true`, and a forbidden PR has default `false`. `allow_direct_default_push` is an explicit project capability, not permission for an Agent to bypass repository protection.
+`allowed` is the workspace capability set. `constraint` is `optional`, `required`, or `forbidden`; a required PR has default `true`, and a forbidden PR has default `false`. `allow_direct_default_push` is the portable schema field retained by protocol v4. Its normalized capability is `direct_target_push`: it authorizes a Plan to select direct push for its explicit target branch, including a reviewed non-default branch. It is not permission for an Agent to bypass repository protection.
 
 ## Defaults and Remote Capability
 
@@ -33,7 +33,7 @@ Remote selection uses the configured name, otherwise `origin`, otherwise the onl
 
 Repository URL recognition proves configuration, not credentials or current availability. Before push or PR mutation, the acting Agent must verify authentication and remote state. A transient failure after approval blocks the Issue; it never changes the selected mode.
 
-When no selected remote exists, both PR values resolve to disabled unless the Plan or project requires one, in which case resolution fails. A selected remote without a supported PR provider cannot use PR defaults; the project must explicitly select local delivery and declare `allow_direct_default_push=true` when its default branch must also be updated remotely. The Integrator must still verify that direct push is actually permitted before delivery.
+When no selected remote exists, both PR values resolve to disabled unless the Plan or project requires one, in which case resolution fails. A selected remote without a supported PR provider cannot use PR defaults; the project must explicitly select local delivery and declare `allow_direct_default_push=true` when its Plan target branch must be updated remotely. The Integrator must still verify that direct push to the exact target branch is actually permitted before delivery.
 
 ## Workspace Modes
 

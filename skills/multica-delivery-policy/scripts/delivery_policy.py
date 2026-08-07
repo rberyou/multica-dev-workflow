@@ -16,8 +16,12 @@ CONFIG_NAME = "multica.delivery.json"
 WORKSPACE_MODES = ("branch_only", "lightweight", "isolated")
 PR_CONSTRAINTS = ("optional", "required", "forbidden")
 PROVIDERS = ("auto", "github", "none")
+FINAL_ACTIONS = ("open", "approve", "delivery", "handoff", "converge")
+DELIVERY_MODES = ("requirement_pr", "direct_push", "local_only")
+HANDOFF_OUTCOMES = ("queued", "coalesced", "deferred")
 REMOTE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 FULL_SHA_RE = re.compile(r"^[0-9a-fA-F]{40,64}$")
+DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 
 DEFAULT_POLICY: dict[str, Any] = {
     "schema_version": 1,
@@ -260,7 +264,7 @@ def repository_capabilities(root: Path, policy: dict[str, Any]) -> dict[str, Any
     if not selected and provider != "none":
         raise DeliveryPolicyError("a PR provider requires a selected remote")
     if not selected and direct_push:
-        raise DeliveryPolicyError("direct default-branch push cannot be enabled without a remote")
+        raise DeliveryPolicyError("direct target-branch push cannot be enabled without a remote")
     fingerprint = (
         digest(
             {
@@ -279,6 +283,7 @@ def repository_capabilities(root: Path, policy: dict[str, Any]) -> dict[str, Any
         "remote_fingerprint": fingerprint,
         "remote_provider": provider,
         "pull_request_capable": bool(selected and provider == "github"),
+        "direct_target_push": bool(selected and direct_push),
         "direct_default_push": bool(selected and direct_push),
     }
 
@@ -333,7 +338,7 @@ def resolve_policy(
         capabilities["pull_request_capable"],
     )
     if capabilities["remote_configured"] and not requirement_value:
-        if not capabilities["direct_default_push"]:
+        if not capabilities["direct_target_push"]:
             raise DeliveryPolicyError(
                 "requirement_pr=disabled with a remote requires "
                 "remote.allow_direct_default_push=true"
@@ -433,6 +438,632 @@ def verify_snapshot(repo: Path, snapshot: Any, config: str | None = None) -> dic
     }
 
 
+def _is_sha(value: Any) -> bool:
+    return isinstance(value, str) and FULL_SHA_RE.fullmatch(value) is not None
+
+
+def _is_digest(value: Any) -> bool:
+    return isinstance(value, str) and DIGEST_RE.fullmatch(value) is not None
+
+
+def _add(reasons: list[str], condition: bool, message: str) -> None:
+    if not condition:
+        reasons.append(message)
+
+
+def _root_reasons(root: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    issue_id = root.get("issue_id")
+    _add(reasons, isinstance(issue_id, str) and bool(issue_id), "root issue_id is missing")
+    _add(
+        reasons,
+        root.get("workflow_object_type") == "requirement",
+        "final approval is only valid for a top-level Requirement",
+    )
+    _add(
+        reasons,
+        root.get("root_requirement_id") == issue_id,
+        "root_requirement_id must equal the target Requirement issue_id",
+    )
+    _add(reasons, root.get("plan_status") == "done", "Plan must be done")
+    _add(
+        reasons,
+        root.get("implementation_status") == "done",
+        "Implementation must be done before final approval",
+    )
+    _add(
+        reasons,
+        root.get("integration_validation_status") == "done",
+        "integration validation must be done",
+    )
+    _add(
+        reasons,
+        root.get("integration_review_status") == "approved",
+        "integration Review is not approved",
+    )
+    _add(reasons, root.get("tests_passed") is True, "required tests are not complete")
+    _add(
+        reasons,
+        root.get("acceptance_complete") is True,
+        "Requirement acceptance evidence is incomplete",
+    )
+    _add(reasons, root.get("policy_valid") is True, "delivery policy is not current")
+    _add(reasons, root.get("blockers_clear") is True, "Requirement blockers are not clear")
+    _add(
+        reasons,
+        root.get("dependencies_satisfied") is True,
+        "dependency contract is not satisfied",
+    )
+    revision = root.get("plan_revision")
+    _add(
+        reasons,
+        isinstance(revision, int) and not isinstance(revision, bool) and revision > 0,
+        "plan_revision must be a positive integer",
+    )
+    _add(
+        reasons,
+        _is_digest(root.get("delivery_policy_digest")),
+        "delivery_policy_digest is invalid",
+    )
+    _add(
+        reasons,
+        _is_sha(root.get("reviewed_commit_sha")),
+        "reviewed_commit_sha is invalid",
+    )
+    _add(
+        reasons,
+        isinstance(root.get("human_approver_id"), str)
+        and bool(root.get("human_approver_id")),
+        "human_approver_id is missing",
+    )
+    _add(
+        reasons,
+        isinstance(root.get("target_branch"), str) and bool(root.get("target_branch")),
+        "target_branch is missing",
+    )
+    _add(reasons, _is_sha(root.get("target_base_sha")), "target_base_sha is invalid")
+    _add(
+        reasons,
+        isinstance(root.get("default_branch"), str)
+        and bool(root.get("default_branch")),
+        "default_branch is missing",
+    )
+    _add(
+        reasons,
+        _is_sha(root.get("default_base_sha")),
+        "default_base_sha is invalid",
+    )
+    return reasons
+
+
+def _gate_matches(root: dict[str, Any], state: str) -> bool:
+    return (
+        root.get("final_approval_gate_state") == state
+        and root.get("final_approval_gate_revision") == root.get("plan_revision")
+        and root.get("final_approval_gate_reviewed_commit_sha")
+        == root.get("reviewed_commit_sha")
+        and root.get("final_approval_gate_policy_digest")
+        == root.get("delivery_policy_digest")
+    )
+
+
+def _approval_matches(root: dict[str, Any]) -> bool:
+    return (
+        root.get("approval_author_type") == "member"
+        and root.get("approval_author_id") == root.get("human_approver_id")
+        and isinstance(root.get("approval_comment_id"), str)
+        and bool(root.get("approval_comment_id"))
+        and root.get("approval_revision") == root.get("plan_revision")
+        and root.get("approved_requirement_head_sha")
+        == root.get("reviewed_commit_sha")
+        and root.get("approved_delivery_policy_digest")
+        == root.get("delivery_policy_digest")
+    )
+
+
+def _delivery_reasons(
+    root: dict[str, Any], delivery_value: Any
+) -> list[str]:
+    reasons: list[str] = []
+    if not isinstance(delivery_value, dict):
+        return ["delivery evidence is missing"]
+    delivery = delivery_value
+    mode = delivery.get("mode")
+    _add(reasons, mode in DELIVERY_MODES, "delivery mode is invalid")
+    _add(reasons, delivery.get("state") == "complete", "delivery state is not complete")
+    _add(
+        reasons,
+        delivery.get("plan_revision") == root.get("plan_revision"),
+        "delivery Plan revision drifted",
+    )
+    _add(
+        reasons,
+        delivery.get("delivery_policy_digest") == root.get("delivery_policy_digest"),
+        "delivery policy digest drifted",
+    )
+    reviewed = root.get("reviewed_commit_sha")
+    target_base = root.get("target_base_sha")
+    default_base = root.get("default_base_sha")
+    merged = delivery.get("merged_commit_sha")
+    _add(
+        reasons,
+        delivery.get("reviewed_commit_sha") == reviewed,
+        "delivered Requirement head does not match reviewed head",
+    )
+    _add(
+        reasons,
+        delivery.get("current_requirement_head_sha") == reviewed,
+        "current Requirement head drifted after Review",
+    )
+    _add(
+        reasons,
+        delivery.get("target_branch") == root.get("target_branch"),
+        "delivery target branch changed",
+    )
+    _add(
+        reasons,
+        delivery.get("verified_target_base_sha") == target_base,
+        "target branch baseline drifted",
+    )
+    _add(
+        reasons,
+        delivery.get("verified_default_base_sha") == default_base,
+        "default branch baseline drifted",
+    )
+    _add(reasons, _is_sha(merged), "merged_commit_sha is invalid")
+    _add(
+        reasons,
+        isinstance(delivery.get("merge_method"), str)
+        and bool(delivery.get("merge_method")),
+        "merge_method is missing",
+    )
+    _add(
+        reasons,
+        delivery.get("merge_parent_target_sha") == target_base,
+        "merge target parent does not match target_base_sha",
+    )
+    _add(
+        reasons,
+        delivery.get("merge_parent_requirement_sha") == reviewed,
+        "merge Requirement parent does not match reviewed head",
+    )
+    _add(
+        reasons,
+        _is_sha(delivery.get("reviewed_tree_sha")),
+        "reviewed_tree_sha is invalid",
+    )
+    _add(
+        reasons,
+        delivery.get("merged_tree_sha") == delivery.get("reviewed_tree_sha"),
+        "merged tree does not match the reviewed Requirement tree",
+    )
+    _add(
+        reasons,
+        delivery.get("local_target_sha") == merged,
+        "local target branch does not contain the recorded merge commit",
+    )
+
+    requirement_pr_enabled = root.get("requirement_pr_enabled") is True
+    remote_configured = root.get("remote_configured") is True
+    if mode == "requirement_pr":
+        _add(reasons, requirement_pr_enabled, "Requirement PR delivery is not enabled")
+        _add(reasons, remote_configured, "Requirement PR delivery requires a remote")
+        _add(
+            reasons,
+            isinstance(delivery.get("pr_url"), str) and bool(delivery.get("pr_url")),
+            "Requirement PR URL is missing",
+        )
+        _add(
+            reasons,
+            isinstance(delivery.get("pr_number"), int)
+            and not isinstance(delivery.get("pr_number"), bool)
+            and delivery.get("pr_number") > 0,
+            "Requirement PR number is invalid",
+        )
+        _add(
+            reasons,
+            delivery.get("required_checks_passed") is True,
+            "Requirement PR required checks are not complete",
+        )
+        _add(reasons, delivery.get("pr_merged") is True, "Requirement PR is not merged")
+        _add(
+            reasons,
+            delivery.get("pr_base_branch") == root.get("target_branch"),
+            "Requirement PR base is not the Plan target branch",
+        )
+        _add(
+            reasons,
+            delivery.get("pr_head_sha") == reviewed,
+            "Requirement PR head does not match reviewed head",
+        )
+        _add(
+            reasons,
+            delivery.get("pr_merge_commit_sha") == merged,
+            "Requirement PR merge commit does not match delivery evidence",
+        )
+        _add(
+            reasons,
+            delivery.get("remote_target_sha") == merged,
+            "remote target branch does not contain the PR merge commit",
+        )
+    elif mode == "direct_push":
+        _add(reasons, not requirement_pr_enabled, "direct push conflicts with Requirement PR")
+        _add(reasons, remote_configured, "direct push requires a remote")
+        _add(
+            reasons,
+            isinstance(delivery.get("remote_name"), str)
+            and bool(delivery.get("remote_name")),
+            "direct push remote name is missing",
+        )
+        _add(
+            reasons,
+            delivery.get("remote_verified") is True,
+            "direct push remote/auth state is not verified",
+        )
+        _add(
+            reasons,
+            root.get("direct_target_push") is True
+            or root.get("direct_default_push") is True,
+            "project policy does not allow direct target-branch push",
+        )
+        _add(reasons, delivery.get("push_completed") is True, "target push is incomplete")
+        _add(
+            reasons,
+            delivery.get("remote_target_sha") == merged,
+            "remote target branch does not contain the merge commit",
+        )
+    elif mode == "local_only":
+        _add(reasons, not requirement_pr_enabled, "local-only delivery conflicts with Requirement PR")
+        _add(reasons, not remote_configured, "local-only delivery requires no remote")
+        _add(
+            reasons,
+            delivery.get("push_completed") in (None, False),
+            "local-only delivery must not record a push",
+        )
+        _add(
+            reasons,
+            delivery.get("remote_target_sha") in (None, ""),
+            "local-only delivery must not record a remote target SHA",
+        )
+    return reasons
+
+
+def _rejected(action: str, reasons: list[str], *, retry_required: bool = False) -> dict[str, Any]:
+    return {
+        "allowed": False,
+        "action": action,
+        "outcome": "rejected",
+        "reasons": reasons,
+        "metadata_updates": {},
+        "status_write": None,
+        "merge_required": False,
+        "resume_delivery": False,
+        "wake_leader": False,
+        "retry_required": retry_required,
+    }
+
+
+def final_gate_transition(snapshot: Any, action: str) -> dict[str, Any]:
+    data = _require_object(snapshot, "final gate snapshot")
+    root = _require_object(data.get("root"), "final gate snapshot.root")
+    if action not in FINAL_ACTIONS:
+        raise DeliveryPolicyError(f"unsupported final gate action: {action}")
+    if root.get("status") == "done":
+        return {
+            "allowed": True,
+            "action": action,
+            "outcome": "already_done",
+            "reasons": [],
+            "metadata_updates": {},
+            "status_write": None,
+            "merge_required": False,
+            "resume_delivery": False,
+            "wake_leader": False,
+            "retry_required": False,
+        }
+
+    reasons = _root_reasons(root)
+    actor_role = data.get("actor_role")
+    if action == "open":
+        _add(reasons, actor_role == "leader", "only Leader may open the final approval gate")
+        _add(
+            reasons,
+            root.get("status") in {"in_progress", "in_review"},
+            "Requirement must be active before opening final approval",
+        )
+        if reasons:
+            return _rejected(action, reasons)
+        if _gate_matches(root, "accepted") and _approval_matches(root):
+            return {
+                "allowed": True,
+                "action": action,
+                "outcome": "already_accepted",
+                "reasons": [],
+                "metadata_updates": {},
+                "status_write": None,
+                "merge_required": False,
+                "resume_delivery": False,
+                "wake_leader": False,
+                "retry_required": False,
+            }
+        if _gate_matches(root, "open"):
+            outcome = "already_open"
+            updates: dict[str, Any] = {}
+        else:
+            outcome = "gate_opened"
+            updates = {
+                "final_approval_gate_state": "open",
+                "final_approval_gate_revision": root["plan_revision"],
+                "final_approval_gate_reviewed_commit_sha": root["reviewed_commit_sha"],
+                "final_approval_gate_policy_digest": root["delivery_policy_digest"],
+            }
+        return {
+            "allowed": True,
+            "action": action,
+            "outcome": outcome,
+            "reasons": [],
+            "metadata_updates": updates,
+            "status_write": "in_review" if root.get("status") != "in_review" else None,
+            "merge_required": False,
+            "resume_delivery": False,
+            "wake_leader": False,
+            "retry_required": False,
+        }
+
+    if action == "approve":
+        event = data.get("event")
+        if not isinstance(event, dict):
+            reasons.append("approval event is missing")
+            event = {}
+        _add(reasons, actor_role == "integrator", "only Integrator records final approval")
+        _add(reasons, root.get("status") == "in_review", "Requirement must be in_review")
+        _add(
+            reasons,
+            event.get("issue_id") == root.get("issue_id"),
+            "approval comment must be posted on the top-level Requirement",
+        )
+        _add(reasons, event.get("author_type") == "member", "approval author_type must be member")
+        _add(
+            reasons,
+            event.get("author_id") == root.get("human_approver_id"),
+            "approval author does not match human_approver_id",
+        )
+        _add(
+            reasons,
+            event.get("revision") == root.get("plan_revision"),
+            "approval revision is stale",
+        )
+        _add(
+            reasons,
+            event.get("command")
+            == f"APPROVE REQUIREMENT v{root.get('plan_revision')}",
+            "approval command does not match the current Requirement revision",
+        )
+        _add(
+            reasons,
+            isinstance(event.get("comment_id"), str) and bool(event.get("comment_id")),
+            "approval comment_id is missing",
+        )
+        if reasons:
+            return _rejected(action, reasons)
+        if _gate_matches(root, "accepted") and _approval_matches(root):
+            delivery_ready = not _delivery_reasons(root, data.get("delivery"))
+            return {
+                "allowed": True,
+                "action": action,
+                "outcome": "duplicate_approval",
+                "reasons": [],
+                "metadata_updates": {},
+                "status_write": None,
+                "merge_required": False,
+                "resume_delivery": not delivery_ready,
+                "wake_leader": delivery_ready,
+                "retry_required": False,
+            }
+        if not _gate_matches(root, "open"):
+            return _rejected(action, ["the current final approval gate is not open"])
+        updates = {
+            "approval_author_type": "member",
+            "approval_author_id": event["author_id"],
+            "approval_comment_id": event["comment_id"],
+            "approval_revision": root["plan_revision"],
+            "approved_requirement_head_sha": root["reviewed_commit_sha"],
+            "approved_delivery_policy_digest": root["delivery_policy_digest"],
+            "final_approval_gate_state": "accepted",
+        }
+        return {
+            "allowed": True,
+            "action": action,
+            "outcome": "approval_accepted",
+            "reasons": [],
+            "metadata_updates": updates,
+            "status_write": None,
+            "merge_required": True,
+            "resume_delivery": False,
+            "wake_leader": False,
+            "retry_required": False,
+        }
+
+    if action == "delivery":
+        _add(reasons, actor_role == "integrator", "only Integrator records delivery")
+        _add(reasons, root.get("status") == "in_review", "Requirement must remain in_review during delivery")
+        _add(reasons, _gate_matches(root, "accepted"), "final approval gate is not accepted")
+        _add(reasons, _approval_matches(root), "current final approval evidence is invalid")
+        reasons.extend(_delivery_reasons(root, data.get("delivery")))
+        if reasons:
+            return _rejected(action, reasons)
+        delivery = data["delivery"]
+        updates = {
+            "delivery_state": "complete",
+            "delivery_mode": delivery["mode"],
+            "delivery_revision": root["plan_revision"],
+            "delivered_requirement_head_sha": root["reviewed_commit_sha"],
+            "delivered_delivery_policy_digest": root["delivery_policy_digest"],
+            "delivery_default_branch": root["default_branch"],
+            "delivery_default_base_sha": root["default_base_sha"],
+            "delivery_target_branch": root["target_branch"],
+            "delivery_target_base_sha": root["target_base_sha"],
+            "delivery_merge_parent_target_sha": delivery["merge_parent_target_sha"],
+            "delivery_merge_parent_requirement_sha": delivery[
+                "merge_parent_requirement_sha"
+            ],
+            "delivery_reviewed_tree_sha": delivery["reviewed_tree_sha"],
+            "delivery_merged_tree_sha": delivery["merged_tree_sha"],
+            "delivery_local_target_sha": delivery["local_target_sha"],
+            "merge_method": delivery["merge_method"],
+            "merged_commit_sha": delivery["merged_commit_sha"],
+        }
+        if delivery["mode"] == "requirement_pr":
+            updates.update(
+                {
+                    "requirement_pr_url": delivery["pr_url"],
+                    "requirement_pr_number": delivery["pr_number"],
+                    "requirement_pr_base_branch": delivery["pr_base_branch"],
+                    "requirement_pr_head_sha": delivery["pr_head_sha"],
+                    "requirement_pr_checks_passed": delivery[
+                        "required_checks_passed"
+                    ],
+                    "requirement_pr_merge_commit_sha": delivery[
+                        "pr_merge_commit_sha"
+                    ],
+                    "delivery_remote_target_sha": delivery["remote_target_sha"],
+                }
+            )
+        elif delivery["mode"] == "direct_push":
+            updates.update(
+                {
+                    "delivery_remote_name": delivery["remote_name"],
+                    "delivery_remote_verified": delivery["remote_verified"],
+                    "delivery_push_completed": delivery["push_completed"],
+                    "delivery_remote_target_sha": delivery["remote_target_sha"],
+                }
+            )
+        return {
+            "allowed": True,
+            "action": action,
+            "outcome": "delivery_complete",
+            "reasons": [],
+            "metadata_updates": updates,
+            "status_write": None,
+            "merge_required": False,
+            "resume_delivery": False,
+            "wake_leader": True,
+            "retry_required": False,
+        }
+
+    if action == "handoff":
+        handoff = data.get("handoff")
+        if not isinstance(handoff, dict):
+            reasons.append("delivery handoff evidence is missing")
+            handoff = {}
+        _add(reasons, actor_role == "integrator", "only Integrator records delivery handoff")
+        _add(reasons, root.get("status") == "in_review", "Requirement must remain in_review before Leader convergence")
+        _add(reasons, _gate_matches(root, "accepted"), "final approval gate is not accepted")
+        _add(reasons, _approval_matches(root), "current final approval evidence is invalid")
+        _add(reasons, root.get("delivery_state") == "complete", "delivery evidence is not recorded on the Requirement")
+        _add(
+            reasons,
+            root.get("delivery_revision") == root.get("plan_revision"),
+            "recorded delivery revision is stale",
+        )
+        _add(
+            reasons,
+            root.get("delivered_requirement_head_sha")
+            == root.get("reviewed_commit_sha"),
+            "recorded delivered head is stale",
+        )
+        _add(
+            reasons,
+            root.get("delivered_delivery_policy_digest")
+            == root.get("delivery_policy_digest"),
+            "recorded delivery policy digest is stale",
+        )
+        _add(
+            reasons,
+            handoff.get("issue_id") == root.get("issue_id"),
+            "delivery completion comment must be posted on the top-level Requirement",
+        )
+        role = handoff.get("mentioned_role")
+        _add(reasons, role in {"leader", "squad"}, "delivery handoff must mention Leader or Squad")
+        _add(
+            reasons,
+            isinstance(handoff.get("comment_id"), str) and bool(handoff.get("comment_id")),
+            "delivery handoff comment_id is missing",
+        )
+        outcomes = handoff.get("trigger_outcomes")
+        matched_outcome: str | None = None
+        if isinstance(outcomes, list):
+            acceptable_roles = {"leader"} if role == "leader" else {"leader", "squad"}
+            for item in outcomes:
+                if not isinstance(item, dict):
+                    continue
+                outcome = item.get("status") or item.get("outcome")
+                recipient = item.get("recipient_role") or item.get("role")
+                if recipient in acceptable_roles and outcome in HANDOFF_OUTCOMES:
+                    matched_outcome = outcome
+                    break
+        _add(
+            reasons,
+            matched_outcome is not None,
+            "trigger_outcomes did not confirm queued, coalesced, or deferred Leader delivery",
+        )
+        if reasons:
+            return _rejected(action, reasons, retry_required=True)
+        return {
+            "allowed": True,
+            "action": action,
+            "outcome": "leader_handoff_confirmed",
+            "reasons": [],
+            "metadata_updates": {
+                "delivery_handoff_comment_id": handoff["comment_id"],
+                "delivery_handoff_target": role,
+                "delivery_handoff_trigger_outcome": matched_outcome,
+            },
+            "status_write": None,
+            "merge_required": False,
+            "resume_delivery": False,
+            "wake_leader": True,
+            "retry_required": False,
+        }
+
+    _add(reasons, actor_role == "leader", "only Leader may complete the Requirement")
+    _add(reasons, root.get("status") == "in_review", "Requirement must be in_review before completion")
+    _add(reasons, _gate_matches(root, "accepted"), "final approval gate is not accepted")
+    _add(reasons, _approval_matches(root), "current final approval evidence is invalid")
+    _add(reasons, root.get("delivery_state") == "complete", "delivery_state is not complete")
+    _add(
+        reasons,
+        root.get("delivery_revision") == root.get("plan_revision"),
+        "recorded delivery revision is stale",
+    )
+    _add(
+        reasons,
+        root.get("delivered_requirement_head_sha") == root.get("reviewed_commit_sha"),
+        "recorded delivered head is stale",
+    )
+    _add(
+        reasons,
+        root.get("delivered_delivery_policy_digest")
+        == root.get("delivery_policy_digest"),
+        "recorded delivery policy digest is stale",
+    )
+    reasons.extend(_delivery_reasons(root, data.get("delivery")))
+    if reasons:
+        return _rejected(action, reasons)
+    return {
+        "allowed": True,
+        "action": action,
+        "outcome": "requirement_done",
+        "reasons": [],
+        "metadata_updates": {"final_approval_gate_state": "closed"},
+        "status_write": "done",
+        "merge_required": False,
+        "resume_delivery": False,
+        "wake_leader": False,
+        "retry_required": False,
+    }
+
+
 def git_operation_markers(root: Path) -> list[str]:
     markers = [
         "MERGE_HEAD",
@@ -496,7 +1127,9 @@ def print_json(value: Any) -> None:
 
 
 def parser() -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser(description="Resolve Multica project delivery policy")
+    result = argparse.ArgumentParser(
+        description="Resolve delivery policy and validate protocol-v4 final delivery"
+    )
     subparsers = result.add_subparsers(dest="command", required=True)
 
     resolve = subparsers.add_parser("resolve")
@@ -516,6 +1149,10 @@ def parser() -> argparse.ArgumentParser:
     guard.add_argument("--workspace-mode", required=True, choices=WORKSPACE_MODES)
     guard.add_argument("--expected-branch")
     guard.add_argument("--expected-head")
+
+    final_gate = subparsers.add_parser("final-gate")
+    final_gate.add_argument("--action", required=True, choices=FINAL_ACTIONS)
+    final_gate.add_argument("--snapshot", required=True)
     return result
 
 
@@ -548,6 +1185,11 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
             return 0
+        if args.command == "final-gate":
+            snapshot = json.loads(Path(args.snapshot).read_text(encoding="utf-8"))
+            result = final_gate_transition(snapshot, args.action)
+            print_json(result)
+            return 0 if result["allowed"] else 1
     except (DeliveryPolicyError, OSError, json.JSONDecodeError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2

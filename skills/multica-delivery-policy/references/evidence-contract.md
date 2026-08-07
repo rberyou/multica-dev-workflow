@@ -19,13 +19,16 @@ Without Task PR, the Code Reviewer compares `base_commit_sha...reviewed_commit_s
 
 Integration validation records:
 
-- the current default branch and `default_base_sha`;
+- the repository default branch and `default_base_sha`;
+- the Plan-defined target branch and `target_base_sha`, which may be non-default;
 - the Requirement branch and `reviewed_commit_sha`;
 - the delivery-policy digest, Plan revision, acceptance results, tests, reviewer, and Review comment;
 - Requirement PR/CI evidence only when enabled.
 
-The existing human command remains `APPROVE REQUIREMENT vN`. When accepting that comment, the workflow records `approval_comment_id`, `approval_revision`, and `approved_requirement_head_sha` from the already-reviewed integration evidence. The human does not manually type a SHA.
+After integration validation, Integrator completes the Implementation as `done`. Leader then moves only the top-level Requirement to `in_review` and opens the revision/head/policy-bound final approval gate. The existing human command remains `APPROVE REQUIREMENT vN`, but it is valid only on that top-level Requirement while the gate is open. When accepting that comment, Integrator records `approval_comment_id`, `approval_revision`, `approved_requirement_head_sha`, and the approved policy digest from the already-reviewed integration evidence. The human does not manually type a SHA. A child or early approval writes no approval metadata.
 
-Before merge, the Integrator requires the current Requirement head to equal both `reviewed_commit_sha` and `approved_requirement_head_sha`. If the default branch no longer equals `default_base_sha`, synchronize the Requirement branch and repeat integration tests, Code Review, and human approval.
+Before merge, the Integrator requires the current Requirement head to equal both `reviewed_commit_sha` and `approved_requirement_head_sha`. If the recorded default or target baseline changed, synchronize the Requirement branch and repeat integration tests, Code Review, gate opening, and human approval.
 
-With Requirement PR, merge through the reviewed PR and record its merge commit. Without Requirement PR, merge locally with the Plan-defined method, record `merge_method` and `merged_commit_sha`, then push the default branch only when a remote exists and the project explicitly permits direct default-branch push. Without a remote, perform no push, PR, or remote-CI operation.
+With Requirement PR, merge through the reviewed PR into `target_branch` and record its merge commit. Without Requirement PR, merge locally with the Plan-defined method, record `merge_method` and `merged_commit_sha`, then push `target_branch` only when a remote exists and the project explicitly permits direct push. Without a remote, perform no push, PR, or remote-CI operation.
+
+Integrator records delivery on the top-level Requirement but does not change its status. Integrator posts a delivery-complete comment there, mentions Leader or Squad, and verifies `trigger_outcomes` is `queued`, `coalesced`, or `deferred`. Leader alone performs the final `done` transition. Repeated approval never repeats a merge; if delivery is complete and the root is still non-terminal, it triggers a new Leader handoff.

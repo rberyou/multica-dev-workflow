@@ -1,3 +1,4 @@
+import copy
 import importlib.util
 import json
 from pathlib import Path
@@ -20,6 +21,123 @@ SPEC = importlib.util.spec_from_file_location("delivery_policy", POLICY_PATH)
 delivery_policy = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader
 SPEC.loader.exec_module(delivery_policy)
+
+
+REVIEWED_SHA = "1" * 40
+TARGET_BASE_SHA = "2" * 40
+DEFAULT_BASE_SHA = "3" * 40
+MERGED_SHA = "4" * 40
+TREE_SHA = "5" * 40
+POLICY_DIGEST = "6" * 64
+
+
+def final_gate_snapshot(
+    mode: str = "direct_push", *, target_branch: str = "release/v2"
+) -> dict:
+    requirement_pr_enabled = mode == "requirement_pr"
+    remote_configured = mode != "local_only"
+    root = {
+        "issue_id": "R-1",
+        "root_requirement_id": "R-1",
+        "workflow_object_type": "requirement",
+        "status": "in_progress",
+        "plan_status": "done",
+        "implementation_status": "done",
+        "integration_validation_status": "done",
+        "integration_review_status": "approved",
+        "tests_passed": True,
+        "acceptance_complete": True,
+        "policy_valid": True,
+        "blockers_clear": True,
+        "dependencies_satisfied": True,
+        "plan_revision": 2,
+        "delivery_policy_digest": POLICY_DIGEST,
+        "reviewed_commit_sha": REVIEWED_SHA,
+        "human_approver_id": "human-1",
+        "target_branch": target_branch,
+        "target_base_sha": TARGET_BASE_SHA,
+        "default_branch": "main",
+        "default_base_sha": DEFAULT_BASE_SHA,
+        "requirement_pr_enabled": requirement_pr_enabled,
+        "remote_configured": remote_configured,
+        "direct_target_push": mode == "direct_push",
+        "direct_default_push": mode == "direct_push",
+        "final_approval_gate_state": "closed",
+    }
+    event = {
+        "issue_id": "R-1",
+        "author_type": "member",
+        "author_id": "human-1",
+        "comment_id": "approval-1",
+        "revision": 2,
+        "command": "APPROVE REQUIREMENT v2",
+    }
+    delivery = {
+        "state": "complete",
+        "mode": mode,
+        "plan_revision": 2,
+        "delivery_policy_digest": POLICY_DIGEST,
+        "reviewed_commit_sha": REVIEWED_SHA,
+        "current_requirement_head_sha": REVIEWED_SHA,
+        "target_branch": target_branch,
+        "verified_target_base_sha": TARGET_BASE_SHA,
+        "verified_default_base_sha": DEFAULT_BASE_SHA,
+        "merge_method": "merge_commit" if requirement_pr_enabled else "local_no_ff",
+        "merged_commit_sha": MERGED_SHA,
+        "merge_parent_target_sha": TARGET_BASE_SHA,
+        "merge_parent_requirement_sha": REVIEWED_SHA,
+        "reviewed_tree_sha": TREE_SHA,
+        "merged_tree_sha": TREE_SHA,
+        "local_target_sha": MERGED_SHA,
+    }
+    if mode == "requirement_pr":
+        delivery.update(
+            {
+                "pr_merged": True,
+                "pr_url": "https://github.com/example/project/pull/7",
+                "pr_number": 7,
+                "required_checks_passed": True,
+                "pr_base_branch": target_branch,
+                "pr_head_sha": REVIEWED_SHA,
+                "pr_merge_commit_sha": MERGED_SHA,
+                "remote_target_sha": MERGED_SHA,
+            }
+        )
+    elif mode == "direct_push":
+        delivery.update(
+            {
+                "push_completed": True,
+                "remote_name": "origin",
+                "remote_verified": True,
+                "remote_target_sha": MERGED_SHA,
+            }
+        )
+    else:
+        delivery["push_completed"] = False
+    return {
+        "actor_role": "leader",
+        "root": root,
+        "event": event,
+        "delivery": delivery,
+    }
+
+
+def apply_transition(snapshot: dict, result: dict) -> dict:
+    updated = copy.deepcopy(snapshot)
+    updated["root"].update(result["metadata_updates"])
+    if result["status_write"]:
+        updated["root"]["status"] = result["status_write"]
+    return updated
+
+
+def open_and_approve(snapshot: dict) -> dict:
+    opened = delivery_policy.final_gate_transition(snapshot, "open")
+    assert opened["allowed"]
+    snapshot = apply_transition(snapshot, opened)
+    snapshot["actor_role"] = "integrator"
+    approved = delivery_policy.final_gate_transition(snapshot, "approve")
+    assert approved["allowed"]
+    return apply_transition(snapshot, approved)
 
 
 def run_git(repo: Path, *args: str) -> str:
@@ -182,6 +300,7 @@ class DeliveryPolicyTests(unittest.TestCase):
             result = delivery_policy.resolve_policy(repo)
         self.assertFalse(result["effective"]["task_pr"])
         self.assertFalse(result["effective"]["requirement_pr"])
+        self.assertTrue(result["capabilities"]["direct_target_push"])
         self.assertTrue(result["capabilities"]["direct_default_push"])
 
     def test_project_constraints_reject_disallowed_selection(self):
@@ -273,6 +392,237 @@ class DeliveryPolicyTests(unittest.TestCase):
                     expected_branch=branch,
                     expected_head=head,
                 )
+
+    def test_final_gate_requires_done_implementation_before_root_review(self):
+        snapshot = final_gate_snapshot()
+        snapshot["root"]["implementation_status"] = "in_review"
+        rejected = delivery_policy.final_gate_transition(snapshot, "open")
+        self.assertFalse(rejected["allowed"])
+        self.assertIn(
+            "Implementation must be done before final approval",
+            rejected["reasons"],
+        )
+        self.assertEqual(rejected["metadata_updates"], {})
+
+        snapshot["root"]["implementation_status"] = "done"
+        opened = delivery_policy.final_gate_transition(snapshot, "open")
+        self.assertTrue(opened["allowed"])
+        self.assertEqual(opened["status_write"], "in_review")
+        self.assertEqual(
+            opened["metadata_updates"]["final_approval_gate_state"], "open"
+        )
+
+    def test_early_and_child_approvals_are_rejected_without_metadata(self):
+        snapshot = final_gate_snapshot()
+        snapshot["actor_role"] = "integrator"
+        early = delivery_policy.final_gate_transition(snapshot, "approve")
+        self.assertFalse(early["allowed"])
+        self.assertEqual(early["metadata_updates"], {})
+
+        snapshot = final_gate_snapshot()
+        opened = delivery_policy.final_gate_transition(snapshot, "open")
+        snapshot = apply_transition(snapshot, opened)
+        snapshot["actor_role"] = "integrator"
+        snapshot["event"]["issue_id"] = "I-1"
+        child = delivery_policy.final_gate_transition(snapshot, "approve")
+        self.assertFalse(child["allowed"])
+        self.assertIn(
+            "approval comment must be posted on the top-level Requirement",
+            child["reasons"],
+        )
+        self.assertEqual(child["metadata_updates"], {})
+
+    def test_normal_top_level_approval_binds_current_gate_tuple(self):
+        snapshot = final_gate_snapshot()
+        opened = delivery_policy.final_gate_transition(snapshot, "open")
+        snapshot = apply_transition(snapshot, opened)
+        snapshot["actor_role"] = "integrator"
+        approved = delivery_policy.final_gate_transition(snapshot, "approve")
+        self.assertTrue(approved["allowed"])
+        self.assertEqual(approved["outcome"], "approval_accepted")
+        self.assertTrue(approved["merge_required"])
+        self.assertEqual(
+            approved["metadata_updates"]["approved_requirement_head_sha"],
+            REVIEWED_SHA,
+        )
+        self.assertEqual(
+            approved["metadata_updates"]["approved_delivery_policy_digest"],
+            POLICY_DIGEST,
+        )
+
+        snapshot = apply_transition(snapshot, approved)
+        snapshot["actor_role"] = "leader"
+        repeated_open = delivery_policy.final_gate_transition(snapshot, "open")
+        self.assertTrue(repeated_open["allowed"])
+        self.assertEqual(repeated_open["outcome"], "already_accepted")
+        self.assertEqual(repeated_open["metadata_updates"], {})
+
+        invalid = final_gate_snapshot()
+        invalid = apply_transition(
+            invalid, delivery_policy.final_gate_transition(invalid, "open")
+        )
+        invalid["actor_role"] = "integrator"
+        invalid["event"]["command"] = "APPROVE REQUIREMENT v1"
+        rejected = delivery_policy.final_gate_transition(invalid, "approve")
+        self.assertFalse(rejected["allowed"])
+        self.assertEqual(rejected["metadata_updates"], {})
+
+    def test_delivery_modes_and_non_default_target_branch_converge(self):
+        for mode in delivery_policy.DELIVERY_MODES:
+            with self.subTest(mode=mode):
+                snapshot = open_and_approve(final_gate_snapshot(mode))
+                delivered = delivery_policy.final_gate_transition(snapshot, "delivery")
+                self.assertTrue(delivered["allowed"])
+                self.assertTrue(delivered["wake_leader"])
+                self.assertIsNone(delivered["status_write"])
+                self.assertEqual(
+                    delivered["metadata_updates"]["delivery_target_branch"],
+                    "release/v2",
+                )
+                self.assertEqual(
+                    delivered["metadata_updates"][
+                        "delivery_merge_parent_requirement_sha"
+                    ],
+                    REVIEWED_SHA,
+                )
+                snapshot = apply_transition(snapshot, delivered)
+                snapshot["actor_role"] = "leader"
+                converged = delivery_policy.final_gate_transition(
+                    snapshot, "converge"
+                )
+                self.assertTrue(converged["allowed"])
+                self.assertEqual(converged["status_write"], "done")
+
+    def test_delivery_handoff_requires_confirmed_leader_routing(self):
+        for outcome in delivery_policy.HANDOFF_OUTCOMES:
+            with self.subTest(outcome=outcome):
+                snapshot = open_and_approve(final_gate_snapshot())
+                delivered = delivery_policy.final_gate_transition(snapshot, "delivery")
+                snapshot = apply_transition(snapshot, delivered)
+                snapshot["handoff"] = {
+                    "issue_id": "R-1",
+                    "comment_id": "delivery-comment",
+                    "mentioned_role": "leader",
+                    "trigger_outcomes": [
+                        {"recipient_role": "leader", "status": outcome}
+                    ],
+                }
+                handoff = delivery_policy.final_gate_transition(snapshot, "handoff")
+                self.assertTrue(handoff["allowed"])
+                self.assertEqual(
+                    handoff["metadata_updates"]["delivery_handoff_trigger_outcome"],
+                    outcome,
+                )
+
+        snapshot["handoff"]["trigger_outcomes"] = []
+        missing = delivery_policy.final_gate_transition(snapshot, "handoff")
+        self.assertFalse(missing["allowed"])
+        self.assertTrue(missing["retry_required"])
+
+    def test_duplicate_approval_never_remerges_and_recovers_lost_wake(self):
+        pending = open_and_approve(final_gate_snapshot())
+        pending["delivery"]["state"] = "pending"
+        pending["event"]["comment_id"] = "approval-pending-duplicate"
+        resume = delivery_policy.final_gate_transition(pending, "approve")
+        self.assertTrue(resume["allowed"])
+        self.assertFalse(resume["merge_required"])
+        self.assertTrue(resume["resume_delivery"])
+        self.assertFalse(resume["wake_leader"])
+
+        snapshot = open_and_approve(final_gate_snapshot())
+        delivered = delivery_policy.final_gate_transition(snapshot, "delivery")
+        snapshot = apply_transition(snapshot, delivered)
+        snapshot["event"]["comment_id"] = "approval-duplicate"
+        duplicate = delivery_policy.final_gate_transition(snapshot, "approve")
+        self.assertTrue(duplicate["allowed"])
+        self.assertEqual(duplicate["outcome"], "duplicate_approval")
+        self.assertFalse(duplicate["merge_required"])
+        self.assertFalse(duplicate["resume_delivery"])
+        self.assertTrue(duplicate["wake_leader"])
+        self.assertEqual(duplicate["metadata_updates"], {})
+
+    def test_stale_or_missing_terminal_evidence_blocks_completion(self):
+        cases = {
+            "dependency": ("root", "dependencies_satisfied", False),
+            "tests": ("root", "tests_passed", False),
+            "reviewed head": (
+                "delivery",
+                "current_requirement_head_sha",
+                "7" * 40,
+            ),
+            "policy digest": (
+                "delivery",
+                "delivery_policy_digest",
+                "8" * 64,
+            ),
+            "target baseline": (
+                "delivery",
+                "verified_target_base_sha",
+                "9" * 40,
+            ),
+            "merge evidence": ("delivery", "merged_commit_sha", None),
+        }
+        for name, (section, key, value) in cases.items():
+            with self.subTest(name=name):
+                snapshot = open_and_approve(final_gate_snapshot())
+                snapshot[section][key] = value
+                result = delivery_policy.final_gate_transition(snapshot, "delivery")
+                self.assertFalse(result["allowed"])
+                self.assertEqual(result["metadata_updates"], {})
+
+    def test_revision_review_and_policy_drift_invalidate_approval_gate(self):
+        cases = {
+            "revision": ("plan_revision", 3),
+            "reviewed head": ("reviewed_commit_sha", "a" * 40),
+            "policy digest": ("delivery_policy_digest", "b" * 64),
+        }
+        for name, (key, value) in cases.items():
+            with self.subTest(name=name):
+                snapshot = final_gate_snapshot()
+                opened = delivery_policy.final_gate_transition(snapshot, "open")
+                snapshot = apply_transition(snapshot, opened)
+                snapshot["root"][key] = value
+                snapshot["actor_role"] = "integrator"
+                if key == "plan_revision":
+                    snapshot["event"]["revision"] = value
+                result = delivery_policy.final_gate_transition(snapshot, "approve")
+                self.assertFalse(result["allowed"])
+                self.assertEqual(result["metadata_updates"], {})
+
+    def test_accepted_approval_expires_after_root_tuple_drift(self):
+        cases = {
+            "revision": ("plan_revision", 3),
+            "reviewed head": ("reviewed_commit_sha", "c" * 40),
+            "policy digest": ("delivery_policy_digest", "d" * 64),
+        }
+        for name, (key, value) in cases.items():
+            with self.subTest(name=name):
+                snapshot = open_and_approve(final_gate_snapshot())
+                snapshot["root"][key] = value
+                result = delivery_policy.final_gate_transition(snapshot, "delivery")
+                self.assertFalse(result["allowed"])
+                self.assertIn(
+                    "final approval gate is not accepted",
+                    result["reasons"],
+                )
+                self.assertEqual(result["metadata_updates"], {})
+
+    def test_done_requirement_is_idempotent_and_never_reopened(self):
+        snapshot = open_and_approve(final_gate_snapshot())
+        delivered = delivery_policy.final_gate_transition(snapshot, "delivery")
+        snapshot = apply_transition(snapshot, delivered)
+        snapshot["actor_role"] = "leader"
+        completed = delivery_policy.final_gate_transition(snapshot, "converge")
+        snapshot = apply_transition(snapshot, completed)
+        self.assertEqual(snapshot["root"]["status"], "done")
+
+        for action in delivery_policy.FINAL_ACTIONS:
+            with self.subTest(action=action):
+                result = delivery_policy.final_gate_transition(snapshot, action)
+                self.assertTrue(result["allowed"])
+                self.assertEqual(result["outcome"], "already_done")
+                self.assertIsNone(result["status_write"])
+                self.assertFalse(result["merge_required"])
 
 
 if __name__ == "__main__":

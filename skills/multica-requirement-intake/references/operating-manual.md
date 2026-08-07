@@ -84,18 +84,22 @@ Agent 与你确认 Requirement Draft
   -> 集成负责人创建 Implementation 和任务
   -> 按批准的 workspace/PR 策略开发、测试、代码 Review Loop、合并任务分支
   -> 集成验证
+  -> Implementation done
   -> 顶层需求进入 in_review
   -> 你最终批准
-  -> 集成负责人通过 Requirement PR 或本地方式合并需求分支
-  -> 顶层需求 done
+  -> 集成负责人通过 Requirement PR、本地直推或纯本地方式交付到 Plan target branch
+  -> 集成负责人在顶层需求明确唤醒 Leader
+  -> Leader 将顶层需求 done
 ```
 
 关键门禁：
 
 - 未通过独立 Plan Review，不应请求你审批。
 - 没有 `APPROVE PLAN v<N>`，不得开始实现。
-- 没有代码审查和集成验证，Implementation 不得完成；关闭 PR 不会取消这些门禁。
-- 没有 `APPROVE REQUIREMENT v<N>`，不得合并到默认分支。
+- 没有代码审查和集成验证，Implementation 不得完成；完成后 Implementation 应为 `done`，不是 `in_review`。
+- 顶层需求尚未 `in_review` 并打开绑定当前 revision/head/policy 的最终门禁时，任何批准都无效。
+- `APPROVE REQUIREMENT v<N>` 只能评论在顶层需求；评论在 Implementation 等子 Issue 上必须拒绝且不得写批准 metadata。
+- 没有顶层需求当前门禁接受的有效 `APPROVE REQUIREMENT v<N>`，不得合并到 Plan target branch。
 - 创建需求的 `CONFIRM REQUIREMENT v<N>` 不能替代 `APPROVE PLAN v<N>` 或 `APPROVE REQUIREMENT v<N>`。
 - 每次人工审批或决策完成后，Agent 应继续跟踪原需求，而不是把审批当作任务终点。
 
@@ -154,8 +158,9 @@ DECISION: 采用方案 B，保持旧接口兼容一个版本，并记录废弃�
 
 - Plan 与 Implementation 均已完成；
 - 集成验证通过；
+- `final_approval_gate_state=open`，且 gate revision、reviewed head、policy digest 与当前需求一致；
 - 需求验收条件逐项有结果；
-- 交付策略摘要、需求 head、可选 Requirement PR/CI、测试和剩余风险清楚；
+- 交付策略摘要、Plan target branch、default/target baseline、需求 head、可选 Requirement PR/CI、测试和剩余风险清楚；
 - 当前实现仍绑定已批准的 Plan 版本。
 
 确认后评论：
@@ -164,7 +169,7 @@ DECISION: 采用方案 B，保持旧接口兼容一个版本，并记录废弃�
 APPROVE REQUIREMENT v2
 ```
 
-同时提及集成负责人。小队会自动把已审查需求 head 绑定到该批准；你不需要填写 SHA。随后才可通过 PR 或本地方式合并到默认分支。
+这条评论必须发布在顶层需求，并同时提及集成负责人。小队会自动把已审查需求 head 绑定到该批准；你不需要填写 SHA。随后才可通过 PR、本地直推或纯本地方式交付到 Plan target branch。集成负责人会在顶层需求明确唤醒 Leader，由 Leader 完成 `done`；批准本身不是终点。
 
 ## 6. 状态的实际意义
 
@@ -178,7 +183,7 @@ APPROVE REQUIREMENT v2
 | `cancelled` | 任务被取消或替代 | 查看替代任务链接；它不会自动满足依赖 |
 | `done` | 负责人核验后手动完成 | 确认交付结果即可 |
 
-父 issue 不会因为所有子 issue 完成而自动变成 `done`。对应负责人必须核验后手动完成。
+父 issue 不会因为所有子 issue 完成而自动变成 `done`。平台 Stage 评论只是唤醒提示，不能覆盖工作流对象语义：Plan/Implementation 内部工作闭合后为 `done`，顶层 Requirement 等待最终批准时为 `in_review`，交付后由 Leader 设为 `done`。已 `done` 的顶层需求不得因重复 Stage 或批准自动回退。
 
 ## 7. 持续跟踪与查看当前进展
 

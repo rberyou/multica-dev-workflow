@@ -6,7 +6,7 @@
 
 读取仓库真实默认分支，创建 req/<REQ-ID>-<slug> 需求分支。branch_only 不创建 worktree并为当前仓库建立排他 lease；lightweight 创建一个需求 worktree并建立需求级排他 lease；isolated 创建需求 worktree，后续为每个任务创建独立 worktree。
 
-requirement_pr_enabled=true 时验证远程认证，push 需求分支并创建 Draft Requirement PR。false 时不创建 Requirement PR；若 task_pr_enabled=true，仍需先 push 需求分支作为 Task PR 的远程 base。若最终需要更新远程默认分支，Plan 和项目策略必须显式允许直接推送，否则 blocked。没有 remote 时不得执行任何 push、PR 或远程 CI 操作。
+requirement_pr_enabled=true 时验证远程认证，push 需求分支并创建 base 为 Plan target_branch 的 Draft Requirement PR。false 时不创建 Requirement PR；若 task_pr_enabled=true，仍需先 push 需求分支作为 Task PR 的远程 base。若最终需要直接更新远程 target_branch，Plan 和项目策略必须显式允许 direct target push，否则 blocked。没有 remote 时不得执行任何 push、PR 或远程 CI 操作。
 
 根据已批准任务 DAG 创建任务子 issue。每个开发任务 workflow_stage=development_task，stage 等于 DAG 拓扑层；第一可执行 stage 为 todo，后续为 backlog，最后 stage 必须包含 workflow_stage=integration_validation 的集成验证。写入 owner/reviewer/integrator、plan_revision、delivery_policy_digest、workspace_mode、task_pr_enabled、dependency_contract、dependencies_satisfied、base/target/head branch 和 base_commit_sha。
 
@@ -20,12 +20,14 @@ task_pr_enabled=true 时验证真实 PR 状态、pr_head_sha、base、mergeable 
 
 任务集成后记录 task_pr_enabled、可选 PR、base_commit_sha、reviewed_commit_sha、merge_method、merged_commit_sha、需求分支、Plan 版本、策略摘要和测试结果。Task PR 关闭但 Requirement PR 开启时，只 push 更新后的需求分支，不 push 任务分支；Task PR 开启时从远程重新读取合并后的需求 head。确认 Review、SHA、策略、测试和 blocker 后手动将代码任务设为 done；代码 Review APPROVED 本身不代表任务完成。
 
-全部有效任务完成后启动最后 stage 的集成验证。先同步并记录真实默认分支 default_base_sha。最终验证必须审查当前需求 reviewed_commit_sha；Requirement PR 启用时验证其真实 head/CI，禁用时使用本地 Git diff 和测试。只有集成验证 done，Implementation 才能手动完成。
+全部有效任务完成后启动最后 stage 的集成验证。同时记录真实 default_branch/default_base_sha 与 Plan 指定 target_branch/target_base_sha；两者可以不同。最终验证必须审查当前需求 reviewed_commit_sha；Requirement PR 启用时验证其真实 head/CI，禁用时使用本地 Git diff 和测试。只有集成验证 done，Implementation 才能手动设为 done；不得设为 in_review。完成 Implementation 后在顶层 Requirement 发布集成就绪评论并 mention Leader，由 Leader 打开最终批准门禁。
 
 发现 Plan 问题或交付策略变化时暂停受影响任务、重新打开 Plan、递增版本并创建替代任务。Implementation 已开始时必须显式重建受影响分支、worktree 和 lease。已完成任务受影响时创建 Revert Task，使用 git revert 或补偿提交。禁止 reset、force push、改写历史或原地改变模式。
 
-收到有效 APPROVE REQUIREMENT vN 后，从已通过集成 Review 的证据把当前需求 SHA 写入 approved_requirement_head_sha。重新检查需求 head 同时等于 reviewed_commit_sha 和 approved_requirement_head_sha，默认分支仍等于 default_base_sha，Plan 版本、策略摘要和 blocker 均有效。
+只处理发布在顶层 Requirement 且明确 mention 你的 `APPROVE REQUIREMENT vN`。先使用 Delivery Policy Skill `final-gate --action approve` 验证 root in_review、Implementation done、当前 gate open、作者、版本、reviewed head 和 policy digest；拒绝门禁前或子 Issue 批准且不得写任何 approval metadata。通过时只应用返回的 approval metadata，不修改顶层 Requirement 状态。
 
-requirement_pr_enabled=true 时通过已审查的 Requirement PR 以 merge commit 合并并记录 PR 与 merged_commit_sha。false 时按 Plan 方法本地合并需求分支到真实默认分支，记录 merge_method 和 merged_commit_sha；存在 remote 时只在项目显式允许且认证/保护规则验证通过后 push 默认分支，没有 remote 时保持纯本地交付。默认分支或需求 head 变化会使集成 Review 和最终人工批准失效。
+批准接受后重新检查需求 head 同时等于 reviewed_commit_sha 和 approved_requirement_head_sha，default/target baseline、Plan 版本、策略摘要和 blocker 均有效。requirement_pr_enabled=true 时通过已审查的 Requirement PR 以 merge commit 合并到 target_branch 并记录 PR 与 merged_commit_sha。false 时按 Plan 方法本地合并需求分支到 target_branch，记录 merge_method 和 merged_commit_sha；存在 remote 时只在项目显式允许且认证/保护规则验证通过后 push target_branch，没有 remote 时保持纯本地交付。任一 baseline、需求 head 或策略变化都会使集成 Review、门禁和最终批准失效。
 
-合并后在顶层 requirement 写入 review_issue_id、plan_revision、delivery_policy_digest、reviewed_commit_sha、approved_requirement_head_sha、merge_method、merged_commit_sha 和可选 PR 字段。若该需求用于修复工作流 Incident，在 Incident 上保留 fix_requirement_id，并在部署验证完成后使用 Incident Skill 的直接命令 `close`；不得创建其他维护专用对象。
+合并/推送后使用 `final-gate --action delivery` 验证 Requirement PR、direct-push 或 local-only 证据以及非默认 target branch，随后在顶层 Requirement 写入 review/approval/merge/delivery metadata 和可选 PR 字段，但不改状态。在顶层 Requirement 发布交付完成评论，明确 mention Leader 或 Squad；检查服务响应 `trigger_outcomes` 至少一个目标为 queued/coalesced/deferred，再用 `final-gate --action handoff` 记录。未确认时有限重试，否则 blocked、waiting_on=leader_wake_delivery。
+
+相同当前批准的重复评论不得覆盖 approval metadata、不得重复合并。若 validator 返回 `resume_delivery=true`，从 canonical Git/PR/remote 证据恢复尚未完成的同一次交付，已存在 merge commit 时不得再合并；若返回 `wake_leader=true`，重新发布交付 handoff 并确认 trigger outcome；root 已 done 时 no_action。若该需求用于修复工作流 Incident，在 Incident 上保留 fix_requirement_id，并在部署验证完成后使用 Incident Skill 的直接命令 `close`；不得创建其他维护专用对象。

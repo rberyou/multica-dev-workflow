@@ -1,6 +1,6 @@
 ---
 name: multica-delivery-policy
-description: Resolve and validate project delivery policy for protocol-v4 development Plans. Use when a managed development Agent must select workspace isolation, Task PR, Requirement PR, repository capability, or local delivery evidence for a Requirement.
+description: Resolve and validate project delivery policy plus protocol-v4 final approval and delivery convergence. Use when a managed development Agent must select workspace isolation, Task PR, Requirement PR, repository capability, final approval gates, or local/remote delivery evidence for a Requirement.
 metadata:
   managed_by: multica-dev-workflow
   workflow_id: development-delivery
@@ -45,4 +45,15 @@ python <this-skill>/scripts/delivery_policy.py guard-workspace \
 
 The command blocks dirty workspaces, detached HEAD, unfinished Git operations, unexpected branches, and unexpected commits. Never repair a failed guard with stash, reset, clean, force checkout, or by committing unknown changes.
 
-Read [policy-contract.md](references/policy-contract.md) for configuration, remote capability, selection, and workspace lease rules. Read [evidence-contract.md](references/evidence-contract.md) before Review, local merge, final approval, or delivery reporting.
+## Validate Final Approval and Delivery
+
+Before opening the final approval gate, accepting final approval, recording delivery, handing off to Leader, or completing the Requirement, normalize the current canonical evidence and run:
+
+```text
+python <this-skill>/scripts/delivery_policy.py final-gate \
+  --action <open|approve|delivery|handoff|converge> --snapshot <file>
+```
+
+Apply only the returned metadata and status writes. A rejected transition writes nothing. Repeated approval never requests another merge.
+
+Read [policy-contract.md](references/policy-contract.md) for configuration, remote capability, selection, and workspace lease rules. Read [evidence-contract.md](references/evidence-contract.md) before Review or merge evidence. Read [final-approval-contract.md](references/final-approval-contract.md) before opening or processing final approval, delivery handoff, recovery, or Requirement convergence.

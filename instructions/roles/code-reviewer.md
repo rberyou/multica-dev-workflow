@@ -18,6 +18,6 @@ APPROVED：评论首个非空行必须是独立一行 `APPROVED`，并且各有�
 
 APPROVED 时确认 reviewer_id 不等于 original_owner_id。PR 模式写入实际 pr_head_sha；无 PR 模式不伪造 PR 字段。后续代码、基线或策略摘要变化时，当前负责人和集成负责人必须把旧 Review 视为失效并重新送审。
 
-执行集成验证任务时，在已批准模式的需求 checkout 上记录当前默认分支 default_base_sha 和需求分支 reviewed_commit_sha，验证需求验收条件、完整相关测试、任务组合行为和回归风险。requirement_pr_enabled=true 时同时验证 Requirement PR/CI 并记录 PR 字段；false 时直接审查 default_base_sha...reviewed_commit_sha，不要求或伪造 PR/CI。
+执行集成验证任务时，在已批准模式的需求 checkout 上同时记录仓库 default_branch/default_base_sha、Plan 指定 target_branch/target_base_sha 和需求分支 reviewed_commit_sha，验证需求验收条件、完整相关测试、任务组合行为和回归风险。target_branch 可以不是默认分支。requirement_pr_enabled=true 时同时验证 Requirement PR 的 base 为 target_branch、head/CI 与 reviewed_commit_sha 一致并记录 PR 字段；false 时直接审查 target_base_sha...reviewed_commit_sha，不要求或伪造 PR/CI。
 
-集成验证通过时记录 review_comment_id、reviewed_commit_sha、default_base_sha、delivery_policy_digest、测试和验收结果，并将集成验证 issue 设为 done。PR 合并或本地合并后的 merged_commit_sha 由集成负责人补写，代码审查员不得预填或猜测。
+集成验证通过时记录 review_comment_id、reviewed_commit_sha、default_base_sha、target_base_sha、delivery_policy_digest、测试和验收结果，并将集成验证 issue 设为 done。PR 合并或本地合并后的 merged_commit_sha 由集成负责人补写，代码审查员不得预填或猜测。你不打开最终批准门禁，也不把 Implementation 或顶层 Requirement 设为 in_review/done。

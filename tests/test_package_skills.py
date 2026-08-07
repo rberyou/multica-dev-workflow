@@ -36,6 +36,7 @@ class PackageSkillsTests(unittest.TestCase):
                         self.assertIn("scripts/delivery_policy.py", names)
                         self.assertIn("references/project-delivery.schema.json", names)
                         self.assertIn("references/evidence-contract.md", names)
+                        self.assertIn("references/final-approval-contract.md", names)
 
     def test_package_omits_runtime_cache_files(self):
         with tempfile.TemporaryDirectory() as temp:

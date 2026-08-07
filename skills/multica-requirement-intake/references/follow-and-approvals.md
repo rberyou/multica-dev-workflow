@@ -26,7 +26,7 @@ If the host cannot remain active or wake later, disclose that before ending, ret
 
 Before posting any approval or decision:
 
-1. Read the top-level Requirement, relevant child Issue, latest comments, metadata, Plan revision, review outcome, gate, and assignee.
+1. Read the top-level Requirement, relevant child Issue, latest comments, metadata, Plan revision, review outcome, gate, and assignee. For final approval, the comment target is always the top-level Requirement itself.
 2. Reject execution when `MULTICA_AGENT_ID` or `MULTICA_TASK_ID` indicates a daemon-managed Agent identity.
 3. Read the authenticated user ID, for example through `user profile get --output json`.
 4. Read the current Squad roster and require exactly one `member_type=member`, `role=人工审批人` entry.
@@ -56,15 +56,25 @@ Mention the current stage owner. Do not convert a request for explanation into a
 
 ## Final Approval
 
-Post only after explicit user authorization, completed Implementation, successful integration validation, current acceptance evidence, a valid final Requirement revision, and a reviewed Requirement head SHA:
+Post only after explicit user authorization and a canonical read proving all of the following:
+
+- the comment target is the top-level Requirement, not Plan, Implementation, integration validation, or another descendant;
+- the root is `in_review`, while Plan and Implementation are `done`;
+- integration validation and dependency contract are complete;
+- `final_approval_gate_state=open` and its revision, reviewed head, and policy digest match current root evidence;
+- acceptance, Requirement PR/local evidence, target/default baselines, and reviewed Requirement head are current.
+
+Then post on the top-level Requirement:
 
 ```text
 APPROVE REQUIREMENT v<N>
 ```
 
-Mention the integration owner. Do not approve when validation is incomplete or the implementation no longer matches the approved Plan.
+Mention the integration owner. Do not post the command on a child Issue. Do not approve when the gate is closed, validation is incomplete, or the implementation no longer matches the approved Plan.
 
-The human still posts only the command above. After validating the comment, the workflow records the already-reviewed head as `approved_requirement_head_sha`. Do not ask the human to look up or type a Git SHA. A changed Requirement head, default-branch baseline, Plan revision, or delivery-policy digest invalidates the approval.
+The human still posts only the command above. After validating the root comment, Integrator records the already-reviewed head as `approved_requirement_head_sha`; the human does not look up or type a Git SHA. A changed Requirement head, target/default baseline, Plan revision, or delivery-policy digest invalidates the approval. If the comment lands before the gate opens or on a child, report it as rejected and confirm that no approval metadata was written.
+
+Approval is not terminal. Continue following the same top-level Requirement through merge/push or pure local delivery, Integrator's explicit Leader/Squad handoff, and Leader's final `done` transition. A repeated current approval must not cause another merge; if delivery is complete and the root remains `in_review`, treat it as a recovery wake for Leader.
 
 ## Terminal Reporting
 

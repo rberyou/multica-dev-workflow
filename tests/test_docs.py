@@ -150,6 +150,7 @@ class DocumentationTests(unittest.TestCase):
         self.assertIn("(references/incident-contract.md)", incidents)
         self.assertIn("(references/policy-contract.md)", delivery)
         self.assertIn("(references/evidence-contract.md)", delivery)
+        self.assertIn("(references/final-approval-contract.md)", delivery)
         self.assertLess(len(incidents.splitlines()), 100)
         self.assertLess(len(delivery.splitlines()), 100)
         self.assertLess(len(console.splitlines()), 50)
@@ -163,6 +164,9 @@ class DocumentationTests(unittest.TestCase):
         evidence = (policy_root / "references/evidence-contract.md").read_text(
             encoding="utf-8"
         )
+        final = (
+            policy_root / "references/final-approval-contract.md"
+        ).read_text(encoding="utf-8")
         instructions = "\n".join(
             path.read_text(encoding="utf-8")
             for path in (ROOT / "instructions").rglob("*.md")
@@ -173,7 +177,35 @@ class DocumentationTests(unittest.TestCase):
         self.assertIn("policy_digest", policy + evidence + instructions)
         self.assertIn("approved_requirement_head_sha", evidence + instructions)
         self.assertIn("APPROVE REQUIREMENT vN", evidence + instructions)
-        self.assertIn("人工不手工填写 SHA", instructions)
+        self.assertIn("不得让人工手工猜测或输入 SHA", instructions)
+        self.assertIn("final_approval_gate_state", final + instructions)
+        self.assertIn("top-level Requirement", final + evidence)
+        self.assertIn("trigger_outcomes", final + instructions)
+        self.assertIn("queued", final + instructions)
+        self.assertIn("coalesced", final + instructions)
+        self.assertIn("deferred", final + instructions)
+        self.assertIn("local_only", final)
+        self.assertIn("direct_push", final)
+        self.assertIn("requirement_pr", final)
+        self.assertIn("only managed Agent that writes", final)
+        self.assertIn("非权威建议", instructions)
+
+    def test_requirement_intake_targets_only_open_root_final_gate(self):
+        skill_root = ROOT / "skills/multica-requirement-intake"
+        skill = (skill_root / "SKILL.md").read_text(encoding="utf-8")
+        follow = (skill_root / "references/follow-and-approvals.md").read_text(
+            encoding="utf-8"
+        )
+        manual = (skill_root / "references/operating-manual.md").read_text(
+            encoding="utf-8"
+        )
+        content = skill + follow + manual
+        self.assertIn("top-level Requirement", content)
+        self.assertIn("final_approval_gate_state=open", content)
+        self.assertIn("Implementation", content)
+        self.assertIn("must not create approval metadata", skill)
+        self.assertIn("评论在 Implementation 等子 Issue 上必须拒绝", manual)
+        self.assertIn("批准本身不是终点", manual)
 
     def test_ci_and_agent_guide_run_documentation_tests(self):
         self.assertIn(
