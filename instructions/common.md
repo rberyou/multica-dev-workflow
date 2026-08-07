@@ -26,7 +26,7 @@ Plan 批准后交付配置冻结。每次 Implementation 启动、任务开始�
 
 平台通用 Stage 评论只表示屏障事件，评论中的状态命令是非权威建议。任何 Agent 必须先按 workflow_object_type 映射状态：Plan 和 Implementation 在自身工作闭合后为 done；顶层 Requirement 只在等待最终批准时为 in_review，交付收敛后为 done。不得让通用 Stage 文案覆盖该语义，也不得把 done 的 Requirement 自动回退。
 
-顶层 Requirement 启动后的状态只由 Leader 自动写入。Integrator 只写批准、合并、推送和交付 handoff 证据。最终门禁使用 `final_approval_gate_state`、`final_approval_gate_revision`、`final_approval_gate_reviewed_commit_sha` 和 `final_approval_gate_policy_digest`；执行 open/approve/delivery/handoff/converge 前使用 Delivery Policy Skill 的 `final-gate` 校验并且只应用返回的写入。
+顶层 Requirement 启动后的状态只由 Leader 自动写入。Integrator 只写批准、合并、推送和交付 handoff 证据。最终门禁使用 `final_approval_gate_state`、`final_approval_gate_revision`、`final_approval_gate_reviewed_commit_sha` 和 `final_approval_gate_policy_digest`。平台每个 Issue 最多 50 个 metadata key；每次 final-gate snapshot 必须包含 fresh `metadata_keys` 清单，让 validator 在任何部分写入前计算 projected key 数。交付与 handoff 必须分别只保存 validator 返回的单个标量 `delivery_evidence_record`、`delivery_handoff_record`，不得展开为逐字段 metadata 或自行编码。执行 open/approve/delivery/handoff/converge 前使用 Delivery Policy Skill 的 `final-gate` 校验并且只应用返回的写入。
 
 非决策性问题由原作者修复，再由独立审查员重新审查。审查员不得审查自己修改的方案或代码。
 

@@ -14,6 +14,6 @@ Implementation 完成唤醒后忽略平台 Stage 评论中任何通用状态建�
 
 最终批准只能位于顶层 Requirement。门禁未打开、Requirement 非 in_review、Implementation 非 done、评论位于子 Issue、作者/版本不匹配时一律拒绝且不写 approval metadata。批准由 Integrator 使用 `final-gate --action approve` 记录；Leader 不记录批准、不执行合并。代码、default/target baseline、Plan 版本、reviewed head 或策略摘要变化后旧门禁与批准失效。
 
-收到 Integrator 在顶层 Requirement 发布的交付完成评论后，检查它明确 mention Leader 或 Squad，且 `trigger_outcomes` 已记录 queued/coalesced/deferred。使用 `final-gate --action converge` fresh 核验 dependency contract、批准 tuple、merge_method、merged_commit_sha、target branch、本地/远端或纯本地证据、可选 PR/CI、测试和策略；只在校验允许时把顶层 Requirement 设为 done。
+收到 Integrator 在顶层 Requirement 发布的交付完成评论后，检查它明确 mention Leader 或 Squad，且 `trigger_outcomes` 已记录 queued/coalesced/deferred。评论可能先于 Integrator 写入 `delivery_handoff_record` 唤醒 Leader；有限重读当前根 Issue，必须同时取得有效 `delivery_evidence_record` 与 `delivery_handoff_record`。使用 `final-gate --action converge` fresh 核验 dependency contract、批准 tuple、两个紧凑记录、merge_method、merged_commit_sha、target branch、本地/远端或纯本地证据、可选 PR/CI、测试和策略；只在校验允许时把顶层 Requirement 设为 done。
 
 顶层 Requirement 已为 done 时，Stage、重复批准或重复 handoff 均 no_action，不得回退到 in_review。若交付证据完整但 root 仍非 done，无论正常 handoff、恢复评论还是重复批准唤醒，都立即重新执行 converge；不得要求第二次人工批准。

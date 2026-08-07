@@ -5,6 +5,7 @@
 - Bind final approval to an explicit top-level Requirement gate after Implementation is `done`.
 - Make Leader the sole automated writer of top-level Requirement status and require verified Integrator delivery handoff before terminal convergence.
 - Add deterministic final-gate validation for early/child approval rejection, stale evidence, Requirement PR, direct-push, local-only, non-default targets, duplicate approval recovery, and done idempotency.
+- Store delivery and handoff evidence as two versioned scalar records so terminal Requirements remain within Multica's 50-key metadata limit.
 
 ## 2.0.0-dev.4
 

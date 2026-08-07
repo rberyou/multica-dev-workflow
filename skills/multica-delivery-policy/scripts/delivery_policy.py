@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import hashlib
 import json
 from pathlib import Path
@@ -19,6 +21,8 @@ PROVIDERS = ("auto", "github", "none")
 FINAL_ACTIONS = ("open", "approve", "delivery", "handoff", "converge")
 DELIVERY_MODES = ("requirement_pr", "direct_push", "local_only")
 HANDOFF_OUTCOMES = ("queued", "coalesced", "deferred")
+METADATA_RECORD_PREFIX = "v1."
+MAX_ISSUE_METADATA_KEYS = 50
 REMOTE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 FULL_SHA_RE = re.compile(r"^[0-9a-fA-F]{40,64}$")
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -45,6 +49,32 @@ class DeliveryPolicyError(RuntimeError):
 
 def canonical_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def encode_metadata_record(value: dict[str, Any]) -> str:
+    payload = base64.urlsafe_b64encode(canonical_json(value).encode("utf-8"))
+    return METADATA_RECORD_PREFIX + payload.decode("ascii").rstrip("=")
+
+
+def decode_metadata_record(value: Any, name: str = "metadata record") -> dict[str, Any]:
+    if not isinstance(value, str) or not value.startswith(METADATA_RECORD_PREFIX):
+        raise DeliveryPolicyError(f"{name} is not a versioned metadata record")
+    encoded = value[len(METADATA_RECORD_PREFIX) :]
+    if not encoded or re.fullmatch(r"[A-Za-z0-9_-]+", encoded) is None:
+        raise DeliveryPolicyError(f"{name} is invalid")
+    try:
+        padded = encoded + "=" * (-len(encoded) % 4)
+        decoded = base64.b64decode(
+            padded.encode("ascii"), altchars=b"-_", validate=True
+        ).decode("utf-8")
+        record = json.loads(decoded)
+    except (UnicodeError, ValueError, binascii.Error, json.JSONDecodeError) as exc:
+        raise DeliveryPolicyError(f"{name} is invalid") from exc
+    if not isinstance(record, dict) or record.get("schema_version") != 1:
+        raise DeliveryPolicyError(f"{name} has an unsupported schema")
+    if encode_metadata_record(record) != value:
+        raise DeliveryPolicyError(f"{name} is not canonical")
+    return record
 
 
 def digest(value: Any) -> str:
@@ -533,7 +563,31 @@ def _root_reasons(root: dict[str, Any]) -> list[str]:
         _is_sha(root.get("default_base_sha")),
         "default_base_sha is invalid",
     )
+    metadata_keys = root.get("metadata_keys")
+    _add(
+        reasons,
+        isinstance(metadata_keys, list)
+        and all(isinstance(key, str) and bool(key) for key in metadata_keys)
+        and len(metadata_keys) == len(set(metadata_keys)),
+        "root metadata key inventory is invalid",
+    )
     return reasons
+
+
+def _metadata_capacity_reasons(
+    root: dict[str, Any], update_keys: Any
+) -> list[str]:
+    metadata_keys = root.get("metadata_keys")
+    if not isinstance(metadata_keys, list):
+        return ["root metadata key inventory is invalid"]
+    projected = set(metadata_keys)
+    projected.update(str(key) for key in update_keys)
+    if len(projected) > MAX_ISSUE_METADATA_KEYS:
+        return [
+            "metadata updates exceed the platform 50-key limit "
+            f"({len(metadata_keys)} current, {len(projected)} projected)"
+        ]
+    return []
 
 
 def _gate_matches(root: dict[str, Any], state: str) -> bool:
@@ -728,6 +782,155 @@ def _delivery_reasons(
     return reasons
 
 
+def _delivery_record(delivery: dict[str, Any]) -> dict[str, Any]:
+    keys = [
+        "state",
+        "mode",
+        "plan_revision",
+        "delivery_policy_digest",
+        "reviewed_commit_sha",
+        "current_requirement_head_sha",
+        "target_branch",
+        "verified_target_base_sha",
+        "verified_default_base_sha",
+        "merge_method",
+        "merged_commit_sha",
+        "merge_parent_target_sha",
+        "merge_parent_requirement_sha",
+        "reviewed_tree_sha",
+        "merged_tree_sha",
+        "local_target_sha",
+    ]
+    if delivery.get("mode") == "requirement_pr":
+        keys.extend(
+            [
+                "pr_merged",
+                "pr_url",
+                "pr_number",
+                "required_checks_passed",
+                "pr_base_branch",
+                "pr_head_sha",
+                "pr_merge_commit_sha",
+                "remote_target_sha",
+            ]
+        )
+    elif delivery.get("mode") == "direct_push":
+        keys.extend(
+            [
+                "push_completed",
+                "remote_name",
+                "remote_verified",
+                "remote_target_sha",
+            ]
+        )
+    else:
+        keys.extend(["push_completed", "remote_target_sha"])
+    return {
+        "schema_version": 1,
+        **{key: delivery.get(key) for key in keys if key in delivery},
+    }
+
+
+def _recorded_delivery_reasons(
+    root: dict[str, Any], current_delivery: Any
+) -> list[str]:
+    reasons: list[str] = []
+    try:
+        recorded = decode_metadata_record(
+            root.get("delivery_evidence_record"), "delivery_evidence_record"
+        )
+    except DeliveryPolicyError as exc:
+        return [str(exc)]
+    reasons.extend(_delivery_reasons(root, recorded))
+    current_reasons = _delivery_reasons(root, current_delivery)
+    reasons.extend(current_reasons)
+    if not current_reasons and isinstance(current_delivery, dict):
+        _add(
+            reasons,
+            recorded == _delivery_record(current_delivery),
+            "recorded delivery evidence does not match current delivery evidence",
+        )
+    return reasons
+
+
+def _handoff_record(
+    root: dict[str, Any], handoff: dict[str, Any], role: str, outcome: str
+) -> dict[str, Any]:
+    delivery_record = str(root["delivery_evidence_record"])
+    return {
+        "schema_version": 1,
+        "issue_id": root["issue_id"],
+        "comment_id": handoff["comment_id"],
+        "target": role,
+        "trigger_outcome": outcome,
+        "plan_revision": root["plan_revision"],
+        "reviewed_commit_sha": root["reviewed_commit_sha"],
+        "delivery_policy_digest": root["delivery_policy_digest"],
+        "delivery_record_digest": hashlib.sha256(
+            delivery_record.encode("utf-8")
+        ).hexdigest(),
+    }
+
+
+def _recorded_handoff_reasons(root: dict[str, Any]) -> list[str]:
+    try:
+        handoff = decode_metadata_record(
+            root.get("delivery_handoff_record"), "delivery_handoff_record"
+        )
+    except DeliveryPolicyError as exc:
+        return [str(exc)]
+    reasons: list[str] = []
+    _add(
+        reasons,
+        handoff.get("issue_id") == root.get("issue_id"),
+        "recorded handoff does not target the Requirement",
+    )
+    _add(
+        reasons,
+        isinstance(handoff.get("comment_id"), str)
+        and bool(handoff.get("comment_id")),
+        "recorded handoff comment_id is missing",
+    )
+    _add(
+        reasons,
+        handoff.get("target") in {"leader", "squad"},
+        "recorded handoff target is invalid",
+    )
+    _add(
+        reasons,
+        handoff.get("trigger_outcome") in HANDOFF_OUTCOMES,
+        "recorded handoff trigger outcome is invalid",
+    )
+    _add(
+        reasons,
+        handoff.get("plan_revision") == root.get("plan_revision"),
+        "recorded handoff revision is stale",
+    )
+    _add(
+        reasons,
+        handoff.get("reviewed_commit_sha") == root.get("reviewed_commit_sha"),
+        "recorded handoff reviewed head is stale",
+    )
+    _add(
+        reasons,
+        handoff.get("delivery_policy_digest")
+        == root.get("delivery_policy_digest"),
+        "recorded handoff policy digest is stale",
+    )
+    delivery_record = root.get("delivery_evidence_record")
+    current_record_digest = (
+        hashlib.sha256(delivery_record.encode("utf-8")).hexdigest()
+        if isinstance(delivery_record, str)
+        else None
+    )
+    _add(
+        reasons,
+        handoff.get("delivery_record_digest") == current_record_digest,
+        "recorded handoff does not match current delivery evidence",
+    )
+    return reasons
+
+
 def _rejected(action: str, reasons: list[str], *, retry_required: bool = False) -> dict[str, Any]:
     return {
         "allowed": False,
@@ -797,6 +1000,9 @@ def final_gate_transition(snapshot: Any, action: str) -> dict[str, Any]:
                 "final_approval_gate_reviewed_commit_sha": root["reviewed_commit_sha"],
                 "final_approval_gate_policy_digest": root["delivery_policy_digest"],
             }
+        capacity_reasons = _metadata_capacity_reasons(root, updates)
+        if capacity_reasons:
+            return _rejected(action, capacity_reasons)
         return {
             "allowed": True,
             "action": action,
@@ -847,7 +1053,9 @@ def final_gate_transition(snapshot: Any, action: str) -> dict[str, Any]:
         if reasons:
             return _rejected(action, reasons)
         if _gate_matches(root, "accepted") and _approval_matches(root):
-            delivery_ready = not _delivery_reasons(root, data.get("delivery"))
+            delivery_ready = not _recorded_delivery_reasons(
+                root, data.get("delivery")
+            )
             return {
                 "allowed": True,
                 "action": action,
@@ -871,6 +1079,9 @@ def final_gate_transition(snapshot: Any, action: str) -> dict[str, Any]:
             "approved_delivery_policy_digest": root["delivery_policy_digest"],
             "final_approval_gate_state": "accepted",
         }
+        capacity_reasons = _metadata_capacity_reasons(root, updates)
+        if capacity_reasons:
+            return _rejected(action, capacity_reasons)
         return {
             "allowed": True,
             "action": action,
@@ -894,50 +1105,13 @@ def final_gate_transition(snapshot: Any, action: str) -> dict[str, Any]:
             return _rejected(action, reasons)
         delivery = data["delivery"]
         updates = {
-            "delivery_state": "complete",
-            "delivery_mode": delivery["mode"],
-            "delivery_revision": root["plan_revision"],
-            "delivered_requirement_head_sha": root["reviewed_commit_sha"],
-            "delivered_delivery_policy_digest": root["delivery_policy_digest"],
-            "delivery_default_branch": root["default_branch"],
-            "delivery_default_base_sha": root["default_base_sha"],
-            "delivery_target_branch": root["target_branch"],
-            "delivery_target_base_sha": root["target_base_sha"],
-            "delivery_merge_parent_target_sha": delivery["merge_parent_target_sha"],
-            "delivery_merge_parent_requirement_sha": delivery[
-                "merge_parent_requirement_sha"
-            ],
-            "delivery_reviewed_tree_sha": delivery["reviewed_tree_sha"],
-            "delivery_merged_tree_sha": delivery["merged_tree_sha"],
-            "delivery_local_target_sha": delivery["local_target_sha"],
-            "merge_method": delivery["merge_method"],
-            "merged_commit_sha": delivery["merged_commit_sha"],
+            "delivery_evidence_record": encode_metadata_record(
+                _delivery_record(delivery)
+            )
         }
-        if delivery["mode"] == "requirement_pr":
-            updates.update(
-                {
-                    "requirement_pr_url": delivery["pr_url"],
-                    "requirement_pr_number": delivery["pr_number"],
-                    "requirement_pr_base_branch": delivery["pr_base_branch"],
-                    "requirement_pr_head_sha": delivery["pr_head_sha"],
-                    "requirement_pr_checks_passed": delivery[
-                        "required_checks_passed"
-                    ],
-                    "requirement_pr_merge_commit_sha": delivery[
-                        "pr_merge_commit_sha"
-                    ],
-                    "delivery_remote_target_sha": delivery["remote_target_sha"],
-                }
-            )
-        elif delivery["mode"] == "direct_push":
-            updates.update(
-                {
-                    "delivery_remote_name": delivery["remote_name"],
-                    "delivery_remote_verified": delivery["remote_verified"],
-                    "delivery_push_completed": delivery["push_completed"],
-                    "delivery_remote_target_sha": delivery["remote_target_sha"],
-                }
-            )
+        capacity_reasons = _metadata_capacity_reasons(root, updates)
+        if capacity_reasons:
+            return _rejected(action, capacity_reasons)
         return {
             "allowed": True,
             "action": action,
@@ -960,24 +1134,7 @@ def final_gate_transition(snapshot: Any, action: str) -> dict[str, Any]:
         _add(reasons, root.get("status") == "in_review", "Requirement must remain in_review before Leader convergence")
         _add(reasons, _gate_matches(root, "accepted"), "final approval gate is not accepted")
         _add(reasons, _approval_matches(root), "current final approval evidence is invalid")
-        _add(reasons, root.get("delivery_state") == "complete", "delivery evidence is not recorded on the Requirement")
-        _add(
-            reasons,
-            root.get("delivery_revision") == root.get("plan_revision"),
-            "recorded delivery revision is stale",
-        )
-        _add(
-            reasons,
-            root.get("delivered_requirement_head_sha")
-            == root.get("reviewed_commit_sha"),
-            "recorded delivered head is stale",
-        )
-        _add(
-            reasons,
-            root.get("delivered_delivery_policy_digest")
-            == root.get("delivery_policy_digest"),
-            "recorded delivery policy digest is stale",
-        )
+        reasons.extend(_recorded_delivery_reasons(root, data.get("delivery")))
         _add(
             reasons,
             handoff.get("issue_id") == root.get("issue_id"),
@@ -1009,16 +1166,20 @@ def final_gate_transition(snapshot: Any, action: str) -> dict[str, Any]:
         )
         if reasons:
             return _rejected(action, reasons, retry_required=True)
+        updates = {
+            "delivery_handoff_record": encode_metadata_record(
+                _handoff_record(root, handoff, role, matched_outcome)
+            )
+        }
+        capacity_reasons = _metadata_capacity_reasons(root, updates)
+        if capacity_reasons:
+            return _rejected(action, capacity_reasons)
         return {
             "allowed": True,
             "action": action,
             "outcome": "leader_handoff_confirmed",
             "reasons": [],
-            "metadata_updates": {
-                "delivery_handoff_comment_id": handoff["comment_id"],
-                "delivery_handoff_target": role,
-                "delivery_handoff_trigger_outcome": matched_outcome,
-            },
+            "metadata_updates": updates,
             "status_write": None,
             "merge_required": False,
             "resume_delivery": False,
@@ -1030,24 +1191,9 @@ def final_gate_transition(snapshot: Any, action: str) -> dict[str, Any]:
     _add(reasons, root.get("status") == "in_review", "Requirement must be in_review before completion")
     _add(reasons, _gate_matches(root, "accepted"), "final approval gate is not accepted")
     _add(reasons, _approval_matches(root), "current final approval evidence is invalid")
-    _add(reasons, root.get("delivery_state") == "complete", "delivery_state is not complete")
-    _add(
-        reasons,
-        root.get("delivery_revision") == root.get("plan_revision"),
-        "recorded delivery revision is stale",
-    )
-    _add(
-        reasons,
-        root.get("delivered_requirement_head_sha") == root.get("reviewed_commit_sha"),
-        "recorded delivered head is stale",
-    )
-    _add(
-        reasons,
-        root.get("delivered_delivery_policy_digest")
-        == root.get("delivery_policy_digest"),
-        "recorded delivery policy digest is stale",
-    )
-    reasons.extend(_delivery_reasons(root, data.get("delivery")))
+    reasons.extend(_recorded_delivery_reasons(root, data.get("delivery")))
+    reasons.extend(_recorded_handoff_reasons(root))
+    reasons.extend(_metadata_capacity_reasons(root, ["final_approval_gate_state"]))
     if reasons:
         return _rejected(action, reasons)
     return {

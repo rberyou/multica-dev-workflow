@@ -39,9 +39,11 @@ Supported terminal modes are:
 
 Every mode records merge parents, reviewed and merged tree identity, merge method, merged commit, revision, reviewed head, policy digest, and target branch. Missing, inconsistent, or stale evidence blocks convergence.
 
+The platform limits each Issue to 50 metadata keys. Every normalized root snapshot includes the fresh `metadata_keys` inventory; each transition projects its returned keys and rejects before any write if the unique total would exceed 50. To preserve headroom for existing protocol, policy, Review, and approval fields, delivery writes exactly one scalar key: `delivery_evidence_record`. It is a versioned `v1.<base64url>` record returned by the validator and contains the complete normalized delivery object. Store the returned string exactly; do not expand it into per-field metadata or construct it manually.
+
 ## Delivery handoff and recovery
 
-After recording delivery, Integrator posts a delivery-complete comment on the top-level Requirement and explicitly mentions Leader or Squad. Inspect the mutation response and require a matching `trigger_outcomes` status of `queued`, `coalesced`, or `deferred`; otherwise retry the bounded handoff or block with `waiting_on=leader_wake_delivery`.
+After recording delivery, Integrator posts a delivery-complete comment on the top-level Requirement and explicitly mentions Leader or Squad. Inspect the mutation response and require a matching `trigger_outcomes` status of `queued`, `coalesced`, or `deferred`; otherwise retry the bounded handoff or block with `waiting_on=leader_wake_delivery`. A successful handoff writes exactly one scalar key, `delivery_handoff_record`, using the validator-returned versioned record. The record binds revision, reviewed head, policy digest, and the exact current delivery-record digest, so a later delivery rewrite invalidates an older handoff. Leader may be queued before this record is visible, so it must reread boundedly and must not converge until the current record is present and valid.
 
 Leader rereads canonical state and marks the Requirement `done` only when the accepted gate tuple and all delivery evidence remain current. A Requirement already `done` is terminal and must never be moved back automatically.
 
@@ -62,9 +64,9 @@ Exit `0` means the transition is allowed, exit `1` means the evidence was reject
 The normalized snapshot contains:
 
 - `actor_role`: `leader` for open/converge and `integrator` for approve/delivery/handoff;
-- `root`: root identity and status; Plan/Implementation/integration-validation status; independent integration Review, tests, acceptance, blocker, dependency, and policy results; approver; revision; policy digest; reviewed head; default/target branch and baseline; PR/remote/direct-push capabilities; current gate, approval, and recorded delivery metadata;
+- `root`: root identity and status; fresh `metadata_keys`; Plan/Implementation/integration-validation status; independent integration Review, tests, acceptance, blocker, dependency, and policy results; approver; revision; policy digest; reviewed head; default/target branch and baseline; PR/remote/direct-push capabilities; current gate and approval metadata plus optional `delivery_evidence_record` and `delivery_handoff_record` strings;
 - `event` for approve: root issue ID, member author type/ID, comment ID, parsed `APPROVE REQUIREMENT vN` command, and revision;
 - `delivery` for delivery/converge or duplicate recovery: state, mode, revision, digest, reviewed/current head, verified default/target baselines, merge parents, reviewed/merged tree, merge method/commit, local target SHA, and the mode-specific PR URL/number/checks/merge or remote/auth/push evidence;
-- `handoff` for handoff: root issue ID, comment ID, mentioned role, and normalized `trigger_outcomes` entries with recipient role and status.
+- `handoff` for handoff: root issue ID, comment ID, mentioned role, and normalized `trigger_outcomes` entries with recipient role and status. The current normalized `delivery` object is also required so the recorded delivery record can be compared before handoff.
 
 All Git identities are full SHAs. Digests are lowercase SHA-256 values. The snapshot is temporary evidence input and must not contain credentials, remote URLs, or machine-specific secrets.

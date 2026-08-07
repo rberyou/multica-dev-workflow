@@ -22,7 +22,7 @@ Task PR 与 Requirement PR 可独立启停。无 Task PR 时保留独立代码 R
 
 Review Loop 不反复更换 assignee，使用 durable metadata 和完整 mention 路由。代码、基线、交付策略摘要或 Plan 版本变化都会使旧 Approval 失效。
 
-父 Issue 不会自动完成。平台 Stage 评论只是唤醒事件，不能决定 workflow object 状态。Plan/Implementation 自身闭合后必须为 done；顶层 Requirement 等待最终审批时为 in_review，交付闭合后为 done。Leader 是顶层 Requirement 启动后的唯一自动状态写入者；Integrator 不得改写其状态。
+父 Issue 不会自动完成。平台 Stage 评论只是唤醒事件，不能决定 workflow object 状态。Plan/Implementation 自身闭合后必须为 done；顶层 Requirement 等待最终审批时为 in_review，交付闭合后为 done。Leader 是顶层 Requirement 启动后的唯一自动状态写入者；Integrator 不得改写其状态。终态交付与 handoff 证据分别压缩在 `delivery_evidence_record`、`delivery_handoff_record` 两个 validator 生成的标量中，禁止展开后耗尽每个 Issue 50 个 metadata key 的平台上限。
 
 遇到决策性问题必须 blocked 并等待人工决定；非决策性问题由原作者修复并重新审查。
 

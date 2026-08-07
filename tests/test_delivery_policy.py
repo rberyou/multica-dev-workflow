@@ -63,6 +63,27 @@ def final_gate_snapshot(
         "direct_target_push": mode == "direct_push",
         "direct_default_push": mode == "direct_push",
         "final_approval_gate_state": "closed",
+        "metadata_keys": [
+            "managed_by",
+            "workflow_instance_id",
+            "workflow_object_type",
+            "root_requirement_id",
+            "workflow_version",
+            "protocol_revision",
+            "top_protocol_revision",
+            "workflow_stage",
+            "human_approver_id",
+            "plan_revision",
+            "delivery_policy_digest",
+            "reviewed_commit_sha",
+            "target_branch",
+            "target_base_sha",
+            "default_branch",
+            "default_base_sha",
+            "requirement_pr_enabled",
+            "remote_configured",
+            "final_approval_gate_state",
+        ],
     }
     event = {
         "issue_id": "R-1",
@@ -125,6 +146,9 @@ def final_gate_snapshot(
 def apply_transition(snapshot: dict, result: dict) -> dict:
     updated = copy.deepcopy(snapshot)
     updated["root"].update(result["metadata_updates"])
+    metadata_keys = set(updated["root"].get("metadata_keys", []))
+    metadata_keys.update(result["metadata_updates"])
+    updated["root"]["metadata_keys"] = sorted(metadata_keys)
     if result["status_write"]:
         updated["root"]["status"] = result["status_write"]
     return updated
@@ -138,6 +162,21 @@ def open_and_approve(snapshot: dict) -> dict:
     approved = delivery_policy.final_gate_transition(snapshot, "approve")
     assert approved["allowed"]
     return apply_transition(snapshot, approved)
+
+
+def apply_handoff(snapshot: dict, outcome: str = "queued") -> dict:
+    snapshot["actor_role"] = "integrator"
+    snapshot["handoff"] = {
+        "issue_id": "R-1",
+        "comment_id": f"delivery-{outcome}",
+        "mentioned_role": "leader",
+        "trigger_outcomes": [
+            {"recipient_role": "leader", "status": outcome}
+        ],
+    }
+    handoff = delivery_policy.final_gate_transition(snapshot, "handoff")
+    assert handoff["allowed"]
+    return apply_transition(snapshot, handoff)
 
 
 def run_git(repo: Path, *args: str) -> str:
@@ -475,17 +514,19 @@ class DeliveryPolicyTests(unittest.TestCase):
                 self.assertTrue(delivered["allowed"])
                 self.assertTrue(delivered["wake_leader"])
                 self.assertIsNone(delivered["status_write"])
+                record = delivery_policy.decode_metadata_record(
+                    delivered["metadata_updates"]["delivery_evidence_record"]
+                )
                 self.assertEqual(
-                    delivered["metadata_updates"]["delivery_target_branch"],
+                    record["target_branch"],
                     "release/v2",
                 )
                 self.assertEqual(
-                    delivered["metadata_updates"][
-                        "delivery_merge_parent_requirement_sha"
-                    ],
+                    record["merge_parent_requirement_sha"],
                     REVIEWED_SHA,
                 )
                 snapshot = apply_transition(snapshot, delivered)
+                snapshot = apply_handoff(snapshot)
                 snapshot["actor_role"] = "leader"
                 converged = delivery_policy.final_gate_transition(
                     snapshot, "converge"
@@ -509,8 +550,11 @@ class DeliveryPolicyTests(unittest.TestCase):
                 }
                 handoff = delivery_policy.final_gate_transition(snapshot, "handoff")
                 self.assertTrue(handoff["allowed"])
+                record = delivery_policy.decode_metadata_record(
+                    handoff["metadata_updates"]["delivery_handoff_record"]
+                )
                 self.assertEqual(
-                    handoff["metadata_updates"]["delivery_handoff_trigger_outcome"],
+                    record["trigger_outcome"],
                     outcome,
                 )
 
@@ -611,6 +655,7 @@ class DeliveryPolicyTests(unittest.TestCase):
         snapshot = open_and_approve(final_gate_snapshot())
         delivered = delivery_policy.final_gate_transition(snapshot, "delivery")
         snapshot = apply_transition(snapshot, delivered)
+        snapshot = apply_handoff(snapshot)
         snapshot["actor_role"] = "leader"
         completed = delivery_policy.final_gate_transition(snapshot, "converge")
         snapshot = apply_transition(snapshot, completed)
@@ -623,6 +668,115 @@ class DeliveryPolicyTests(unittest.TestCase):
                 self.assertEqual(result["outcome"], "already_done")
                 self.assertIsNone(result["status_write"])
                 self.assertFalse(result["merge_required"])
+
+    def test_compact_terminal_records_preserve_metadata_capacity(self):
+        metadata = {f"existing_{index}": index for index in range(38)}
+        snapshot = final_gate_snapshot()
+        snapshot["root"]["metadata_keys"] = list(metadata)
+        opened = delivery_policy.final_gate_transition(snapshot, "open")
+        metadata.update(opened["metadata_updates"])
+        snapshot = apply_transition(snapshot, opened)
+        snapshot["actor_role"] = "integrator"
+        approved = delivery_policy.final_gate_transition(snapshot, "approve")
+        metadata.update(approved["metadata_updates"])
+        snapshot = apply_transition(snapshot, approved)
+        delivered = delivery_policy.final_gate_transition(snapshot, "delivery")
+        metadata.update(delivered["metadata_updates"])
+        snapshot = apply_transition(snapshot, delivered)
+        snapshot["handoff"] = {
+            "issue_id": "R-1",
+            "comment_id": "capacity-handoff",
+            "mentioned_role": "leader",
+            "trigger_outcomes": [
+                {"recipient_role": "leader", "status": "queued"}
+            ],
+        }
+        handoff = delivery_policy.final_gate_transition(snapshot, "handoff")
+        metadata.update(handoff["metadata_updates"])
+        snapshot = apply_transition(snapshot, handoff)
+
+        self.assertLessEqual(len(metadata), 50)
+        self.assertLessEqual(len(snapshot["root"]["metadata_keys"]), 50)
+        self.assertIsInstance(metadata["delivery_evidence_record"], str)
+        self.assertIsInstance(metadata["delivery_handoff_record"], str)
+        self.assertRegex(
+            metadata["delivery_evidence_record"], r"^v1\.[A-Za-z0-9_-]+$"
+        )
+        self.assertRegex(
+            metadata["delivery_handoff_record"], r"^v1\.[A-Za-z0-9_-]+$"
+        )
+        self.assertEqual(
+            delivery_policy.decode_metadata_record(
+                metadata["delivery_evidence_record"]
+            )["merged_commit_sha"],
+            MERGED_SHA,
+        )
+        self.assertEqual(
+            delivery_policy.decode_metadata_record(
+                metadata["delivery_handoff_record"]
+            )["plan_revision"],
+            2,
+        )
+
+    def test_metadata_capacity_is_rejected_before_partial_writes(self):
+        snapshot = final_gate_snapshot()
+        snapshot["root"]["metadata_keys"] = [
+            f"existing_{index}" for index in range(48)
+        ]
+        result = delivery_policy.final_gate_transition(snapshot, "open")
+        self.assertFalse(result["allowed"])
+        self.assertEqual(result["metadata_updates"], {})
+        self.assertIn(
+            "metadata updates exceed the platform 50-key limit (48 current, 52 projected)",
+            result["reasons"],
+        )
+
+    def test_convergence_requires_current_compact_delivery_and_handoff(self):
+        snapshot = open_and_approve(final_gate_snapshot())
+        delivered = delivery_policy.final_gate_transition(snapshot, "delivery")
+        snapshot = apply_transition(snapshot, delivered)
+        snapshot["actor_role"] = "leader"
+        missing_handoff = delivery_policy.final_gate_transition(
+            snapshot, "converge"
+        )
+        self.assertFalse(missing_handoff["allowed"])
+        self.assertIn(
+            "delivery_handoff_record is not a versioned metadata record",
+            missing_handoff["reasons"],
+        )
+
+        snapshot = apply_handoff(snapshot)
+        snapshot["actor_role"] = "leader"
+        snapshot["delivery"]["merged_commit_sha"] = "7" * 40
+        snapshot["delivery"]["local_target_sha"] = "7" * 40
+        snapshot["delivery"]["remote_target_sha"] = "7" * 40
+        drifted = delivery_policy.final_gate_transition(snapshot, "converge")
+        self.assertFalse(drifted["allowed"])
+        self.assertIn(
+            "recorded delivery evidence does not match current delivery evidence",
+            drifted["reasons"],
+        )
+
+        snapshot["actor_role"] = "integrator"
+        refreshed_delivery = delivery_policy.final_gate_transition(
+            snapshot, "delivery"
+        )
+        self.assertTrue(refreshed_delivery["allowed"])
+        snapshot = apply_transition(snapshot, refreshed_delivery)
+        snapshot["actor_role"] = "leader"
+        stale_handoff = delivery_policy.final_gate_transition(
+            snapshot, "converge"
+        )
+        self.assertFalse(stale_handoff["allowed"])
+        self.assertIn(
+            "recorded handoff does not match current delivery evidence",
+            stale_handoff["reasons"],
+        )
+
+        snapshot["root"]["delivery_evidence_record"] = "v1.not+base64"
+        corrupted = delivery_policy.final_gate_transition(snapshot, "converge")
+        self.assertFalse(corrupted["allowed"])
+        self.assertIn("delivery_evidence_record is invalid", corrupted["reasons"])
 
 
 if __name__ == "__main__":
