@@ -4,7 +4,7 @@ description: Resolve and validate project delivery policy plus protocol-v4 final
 metadata:
   managed_by: multica-dev-workflow
   workflow_id: development-delivery
-  version: 2.0.0-dev.4
+  version: 2.0.0-dev.5
 ---
 
 # Multica Delivery Policy
