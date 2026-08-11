@@ -224,6 +224,15 @@ def legacy_policy_snapshot(snapshot: dict) -> dict:
     return legacy
 
 
+def dev5_policy_snapshot(snapshot: dict) -> dict:
+    legacy = legacy_policy_snapshot(snapshot)
+    legacy["capabilities"]["direct_target_push"] = legacy["capabilities"][
+        "direct_default_push"
+    ]
+    legacy["policy_digest"] = delivery_policy.legacy_policy_digest(legacy)
+    return legacy
+
+
 def refresh_snapshot_record(snapshot: dict) -> None:
     snapshot["snapshot_record_digest"] = delivery_policy.snapshot_record_digest(
         snapshot
@@ -672,6 +681,161 @@ class DeliveryPolicyTests(unittest.TestCase):
             "pinned_equivalent",
         )
 
+    def test_resolver_version_compatibility_and_drift_matrix(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = create_repo(Path(temp), "https://github.com/example/project.git")
+            policy = {
+                "schema_version": 1,
+                "workflow_id": "development-delivery",
+                "requirement_pr": {"constraint": "forbidden", "default": False},
+                "remote": {"allow_direct_default_push": True},
+            }
+            (repo / "multica.delivery.json").write_text(
+                json.dumps(policy), encoding="utf-8"
+            )
+            current = delivery_policy.resolve_policy(repo)
+            dev4 = legacy_policy_snapshot(current)
+            dev5 = dev5_policy_snapshot(current)
+
+            compatibility_cases = [
+                ("dev.4 stable", dev4, copy.deepcopy(dev4), "exact_match"),
+                ("dev.5 stable", dev5, copy.deepcopy(dev5), "exact_match"),
+                ("current stable", current, copy.deepcopy(current), "exact_match"),
+                ("dev.4 upgrade", dev4, current, "recovery_required"),
+                ("dev.5 upgrade", dev5, current, "recovery_required"),
+                ("dev.4 rollback", current, dev4, "recovery_required"),
+                ("dev.5 rollback", current, dev5, "recovery_required"),
+            ]
+            for name, frozen, resolved, expected_outcome in compatibility_cases:
+                with self.subTest(case=name):
+                    result = delivery_policy.verify_resolved_snapshots(
+                        frozen, resolved
+                    )
+                    self.assertEqual(
+                        result["verification_outcome"], expected_outcome
+                    )
+                    self.assertTrue(result["semantically_equivalent"])
+                    self.assertFalse(result["requires_plan_revision"])
+                    self.assertEqual(
+                        result["policy_digest_to_propagate"],
+                        frozen["policy_digest"],
+                    )
+                    if expected_outcome == "exact_match":
+                        self.assertTrue(result["valid"])
+                        self.assertFalse(result["recovery_required"])
+                        continue
+                    self.assertFalse(result["valid"])
+                    self.assertTrue(result["recovery_required"])
+                    accepted = delivery_policy.verify_resolved_snapshots(
+                        frozen,
+                        resolved,
+                        result["policy_digest_recovery_record"],
+                    )
+                    self.assertTrue(accepted["valid"])
+                    self.assertEqual(
+                        accepted["verification_outcome"], "pinned_equivalent"
+                    )
+                    self.assertEqual(
+                        accepted["policy_digest_to_propagate"],
+                        frozen["policy_digest"],
+                    )
+
+            dev5_upgrade = delivery_policy.verify_resolved_snapshots(dev5, current)
+            self.assertEqual(
+                dev5_upgrade["superseded_policy_digests"][0]["policy_digest"],
+                dev4["policy_digest"],
+            )
+
+            drift_cases = []
+            selected = delivery_policy.resolve_policy(repo, workspace_mode="isolated")
+            drift_cases.append(("selection", selected))
+            for name, section, key, value in (
+                (
+                    "project policy",
+                    "project_policy",
+                    "remote",
+                    {
+                        "allow_direct_default_push": True,
+                        "provider": "github",
+                    },
+                ),
+                ("remote name", "capabilities", "remote_name", "upstream"),
+                (
+                    "remote fingerprint",
+                    "capabilities",
+                    "remote_fingerprint",
+                    "a" * 64,
+                ),
+                ("remote provider", "capabilities", "remote_provider", "none"),
+                (
+                    "semantic capability",
+                    "capabilities",
+                    "pull_request_capable",
+                    False,
+                ),
+            ):
+                changed = copy.deepcopy(current)
+                changed[section][key] = value
+                changed["policy_digest"] = delivery_policy.snapshot_digest(changed)
+                refresh_snapshot_record(changed)
+                drift_cases.append((name, changed))
+            for name, changed in drift_cases:
+                with self.subTest(case=f"{name} drift"):
+                    result = delivery_policy.verify_resolved_snapshots(
+                        current, changed
+                    )
+                    self.assertFalse(result["valid"])
+                    self.assertFalse(result["recovery_required"])
+                    self.assertTrue(result["requires_plan_revision"])
+                    self.assertEqual(
+                        result["verification_outcome"], "semantic_drift"
+                    )
+
+            invalid_cases = []
+            tampered_snapshot = copy.deepcopy(current)
+            tampered_snapshot["resolver_provenance"]["package_version"] = "tampered"
+            invalid_cases.append(
+                (
+                    "snapshot record tamper",
+                    tampered_snapshot,
+                    "snapshot_record_digest",
+                )
+            )
+            unsupported_snapshot = copy.deepcopy(current)
+            unsupported_snapshot["schema_version"] = 99
+            invalid_cases.append(
+                (
+                    "unsupported snapshot schema",
+                    unsupported_snapshot,
+                    "protocol identity",
+                )
+            )
+            unsupported_digest = copy.deepcopy(current)
+            unsupported_digest["policy_digest_schema_version"] = 99
+            invalid_cases.append(
+                ("unsupported digest schema", unsupported_digest, "digest schema")
+            )
+            for name, invalid, message in invalid_cases:
+                with self.subTest(case=name):
+                    with self.assertRaisesRegex(
+                        delivery_policy.DeliveryPolicyError, message
+                    ):
+                        delivery_policy.verify_resolved_snapshots(current, invalid)
+
+            proposed = delivery_policy.verify_resolved_snapshots(dev4, current)
+            recovery = delivery_policy.decode_metadata_record(
+                proposed["policy_digest_recovery_record"]
+            )
+            recovery["pinned_policy_digest"] = "0" * 64
+            with self.assertRaisesRegex(
+                delivery_policy.DeliveryPolicyError, "was modified"
+            ):
+                delivery_policy.verify_resolved_snapshots(
+                    dev4,
+                    current,
+                    delivery_policy.encode_metadata_record(recovery),
+                )
+
     def test_guard_workspace_blocks_unknown_changes(self):
         with tempfile.TemporaryDirectory() as temp:
             repo = create_repo(Path(temp))
@@ -932,67 +1096,68 @@ class DeliveryPolicyTests(unittest.TestCase):
                 self.assertIsNone(result["status_write"])
                 self.assertFalse(result["merge_required"])
 
-    def test_compact_terminal_records_preserve_metadata_capacity(self):
-        metadata = {f"existing_{index}": index for index in range(38)}
-        snapshot = final_gate_snapshot()
-        snapshot["root"]["metadata_keys"] = list(metadata)
-        opened = delivery_policy.final_gate_transition(snapshot, "open")
-        metadata.update(opened["metadata_updates"])
-        snapshot = apply_transition(snapshot, opened)
-        snapshot["actor_role"] = "integrator"
-        approved = delivery_policy.final_gate_transition(snapshot, "approve")
-        metadata.update(approved["metadata_updates"])
-        snapshot = apply_transition(snapshot, approved)
-        delivered = delivery_policy.final_gate_transition(snapshot, "delivery")
-        metadata.update(delivered["metadata_updates"])
-        snapshot = apply_transition(snapshot, delivered)
-        snapshot["handoff"] = {
-            "issue_id": "R-1",
-            "comment_id": "capacity-handoff",
-            "mentioned_role": "leader",
-            "trigger_outcomes": [
-                {"recipient_role": "leader", "status": "queued"}
-            ],
-        }
-        handoff = delivery_policy.final_gate_transition(snapshot, "handoff")
-        metadata.update(handoff["metadata_updates"])
-        snapshot = apply_transition(snapshot, handoff)
+    def test_metadata_capacity_matrix_is_compact_and_atomic(self):
+        for existing_keys, should_open in ((38, True), (48, False)):
+            with self.subTest(existing_keys=existing_keys):
+                metadata = {
+                    f"existing_{index}": index for index in range(existing_keys)
+                }
+                snapshot = final_gate_snapshot()
+                snapshot["root"]["metadata_keys"] = list(metadata)
+                opened = delivery_policy.final_gate_transition(snapshot, "open")
+                self.assertEqual(opened["allowed"], should_open)
+                if not should_open:
+                    self.assertEqual(opened["metadata_updates"], {})
+                    self.assertIn(
+                        "metadata updates exceed the platform 50-key limit "
+                        "(48 current, 52 projected)",
+                        opened["reasons"],
+                    )
+                    continue
 
-        self.assertLessEqual(len(metadata), 50)
-        self.assertLessEqual(len(snapshot["root"]["metadata_keys"]), 50)
-        self.assertIsInstance(metadata["delivery_evidence_record"], str)
-        self.assertIsInstance(metadata["delivery_handoff_record"], str)
-        self.assertRegex(
-            metadata["delivery_evidence_record"], r"^v1\.[A-Za-z0-9_-]+$"
-        )
-        self.assertRegex(
-            metadata["delivery_handoff_record"], r"^v1\.[A-Za-z0-9_-]+$"
-        )
-        self.assertEqual(
-            delivery_policy.decode_metadata_record(
-                metadata["delivery_evidence_record"]
-            )["merged_commit_sha"],
-            MERGED_SHA,
-        )
-        self.assertEqual(
-            delivery_policy.decode_metadata_record(
-                metadata["delivery_handoff_record"]
-            )["plan_revision"],
-            2,
-        )
+                metadata.update(opened["metadata_updates"])
+                snapshot = apply_transition(snapshot, opened)
+                snapshot["actor_role"] = "integrator"
+                approved = delivery_policy.final_gate_transition(snapshot, "approve")
+                metadata.update(approved["metadata_updates"])
+                snapshot = apply_transition(snapshot, approved)
+                delivered = delivery_policy.final_gate_transition(
+                    snapshot, "delivery"
+                )
+                metadata.update(delivered["metadata_updates"])
+                snapshot = apply_transition(snapshot, delivered)
+                snapshot["handoff"] = {
+                    "issue_id": "R-1",
+                    "comment_id": "capacity-handoff",
+                    "mentioned_role": "leader",
+                    "trigger_outcomes": [
+                        {"recipient_role": "leader", "status": "queued"}
+                    ],
+                }
+                handoff = delivery_policy.final_gate_transition(snapshot, "handoff")
+                metadata.update(handoff["metadata_updates"])
+                snapshot = apply_transition(snapshot, handoff)
 
-    def test_metadata_capacity_is_rejected_before_partial_writes(self):
-        snapshot = final_gate_snapshot()
-        snapshot["root"]["metadata_keys"] = [
-            f"existing_{index}" for index in range(48)
-        ]
-        result = delivery_policy.final_gate_transition(snapshot, "open")
-        self.assertFalse(result["allowed"])
-        self.assertEqual(result["metadata_updates"], {})
-        self.assertIn(
-            "metadata updates exceed the platform 50-key limit (48 current, 52 projected)",
-            result["reasons"],
-        )
+                self.assertLessEqual(len(metadata), 50)
+                self.assertLessEqual(len(snapshot["root"]["metadata_keys"]), 50)
+                self.assertRegex(
+                    metadata["delivery_evidence_record"], r"^v1\.[A-Za-z0-9_-]+$"
+                )
+                self.assertRegex(
+                    metadata["delivery_handoff_record"], r"^v1\.[A-Za-z0-9_-]+$"
+                )
+                self.assertEqual(
+                    delivery_policy.decode_metadata_record(
+                        metadata["delivery_evidence_record"]
+                    )["merged_commit_sha"],
+                    MERGED_SHA,
+                )
+                self.assertEqual(
+                    delivery_policy.decode_metadata_record(
+                        metadata["delivery_handoff_record"]
+                    )["plan_revision"],
+                    2,
+                )
 
     def test_convergence_requires_current_compact_delivery_and_handoff(self):
         snapshot = open_and_approve(final_gate_snapshot())
