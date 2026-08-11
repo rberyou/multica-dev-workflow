@@ -148,6 +148,7 @@ class DocumentationTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("(references/incident-contract.md)", incidents)
+        self.assertIn("(references/integration-review-contract.md)", incidents)
         self.assertIn("(references/policy-contract.md)", delivery)
         self.assertIn("(references/evidence-contract.md)", delivery)
         self.assertIn("(references/final-approval-contract.md)", delivery)
@@ -200,6 +201,50 @@ class DocumentationTests(unittest.TestCase):
         self.assertIn("requirement_pr", final)
         self.assertIn("only managed Agent that writes", final)
         self.assertIn("非权威建议", instructions)
+
+    def test_integration_recovery_docs_match_validator_contract(self):
+        incident_root = ROOT / "skills/multica-workflow-incidents"
+        integration = (
+            incident_root / "references/integration-review-contract.md"
+        ).read_text(encoding="utf-8")
+        incident = (incident_root / "references/incident-contract.md").read_text(
+            encoding="utf-8"
+        )
+        policy_root = ROOT / "skills/multica-delivery-policy"
+        policy = (policy_root / "references/policy-contract.md").read_text(
+            encoding="utf-8"
+        )
+        final = (policy_root / "references/final-approval-contract.md").read_text(
+            encoding="utf-8"
+        )
+        instructions = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (ROOT / "instructions").rglob("*.md")
+        )
+        docs = "\n".join(
+            path.read_text(encoding="utf-8") for path in (ROOT / "docs").glob("*.md")
+        )
+        content = integration + incident + policy + final + instructions + docs
+        for command in ["integration-review", "incident-transition", "lease-transition"]:
+            self.assertIn(command, content)
+        for term in [
+            "previous_attempts",
+            "queued",
+            "coalesced",
+            "deferred",
+            "review epoch",
+            "successor blocker",
+            "lease namespace",
+            "complete inventory",
+            "50-key",
+            "zero-write",
+        ]:
+            self.assertIn(term, content)
+        self.assertIn("assignee/original_owner_id", instructions)
+        self.assertIn("精确 mention", instructions)
+        self.assertIn("旧、迟到、重复", instructions)
+        self.assertIn("status last", integration + policy + docs)
+        self.assertIn("completed record", integration + policy + docs)
 
     def test_requirement_intake_targets_only_open_root_final_gate(self):
         skill_root = ROOT / "skills/multica-requirement-intake"

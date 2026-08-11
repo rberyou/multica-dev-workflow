@@ -25,6 +25,10 @@ Integration validation records:
 - the delivery-policy digest, Plan revision, acceptance results, tests, reviewer, and Review comment;
 - Requirement PR/CI evidence only when enabled.
 
+The integration-validation assignee and original owner are the current roster's unique Integrator; the independent reviewer is the unique Code Reviewer. Review handoff must mention that Reviewer by exact Agent ID and confirm a `queued`, `coalesced`, or `deferred` `trigger_outcomes` entry for the same trigger run. The compact `integration_review_role_record` binds the current Workspace/Squad/roster, Plan/policy/SHA/dependency/lease tuple, handoff comment, trigger run, and review epoch. A legacy correction additionally binds `integration_review_recovery_record`.
+
+An `APPROVED` comment is valid only when its author is the current Reviewer and it is linked to the current handoff, trigger run, and review epoch after any recovery. Old, late, duplicate replacement, unrelated, or pre-recovery comments do not satisfy integration Review.
+
 After integration validation, Integrator completes the Implementation as `done`. Leader then moves only the top-level Requirement to `in_review` and opens the revision/head/policy-bound final approval gate. The existing human command remains `APPROVE REQUIREMENT vN`, but it is valid only on that top-level Requirement while the gate is open. When accepting that comment, Integrator records `approval_comment_id`, `approval_revision`, `approved_requirement_head_sha`, and the approved policy digest from the already-reviewed integration evidence. The human does not manually type a SHA. A child or early approval writes no approval metadata.
 
 Before merge, the Integrator requires the current Requirement head to equal both `reviewed_commit_sha` and `approved_requirement_head_sha`. If the recorded default or target baseline changed, synchronize the Requirement branch and repeat integration tests, Code Review, gate opening, and human approval.

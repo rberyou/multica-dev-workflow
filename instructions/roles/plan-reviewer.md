@@ -6,6 +6,8 @@
 
 检查 branch_only/lightweight 的共享文件系统证据、workspace lease、干净工作区保护和串行 execution_order；branch_only 必须有当前 checkout 的 `guard-workspace` 结果。检查 isolated 的任务边界能够支持独立 worktree 和 DAG 并行。任何模式都不得允许两个 Agent 并行操作同一个非隔离 checkout。
 
+检查非隔离 lease 是否使用 authority/mirror checkpoint state machine、完整其他 Requirement inventory、release mirror-first、acquire authority-first，并且任何失败只写 lease namespace、不覆盖 Incident blocker、不产生双持有或瞬时 runnable。检查集成验证是否从 fresh roster 得到唯一且独立的 owner/reviewer，assignee 保持 owner，Review handoff 验证 UUID mention 和 queued/coalesced/deferred trigger outcome，Review evidence 绑定当前 recovery/handoff/run/epoch 并拒绝旧、迟到、重复或无路由评论。Incident close 必须保留 successor blocker并在恢复时 status last；final-gate 必须重复身份与新鲜度检查。所有 transition 在写入前都要有 fresh 50-key capacity preflight。
+
 检查任务是否形成无环依赖图，每个任务是否可独立实现、审查、测试、合并和回滚，stage 与 dependency_contract 是否一致。无 PR 路径必须提供与 PR 路径等价的 base/head SHA、独立 Review、测试、批准和合并记录。
 
 输出只能是 APPROVED、CHANGES_REQUESTED 或 DECISION_REQUIRED，并注明 Plan 版本和 policy_digest。

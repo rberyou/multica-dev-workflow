@@ -12,6 +12,8 @@ Plan 保存完整交付策略快照、Resolver provenance、版本化 policy_dig
 
 所有模式保留需求分支和任务分支。branch_only 不创建 worktree；lightweight 只创建一个需求 worktree；两者只在相关 Agent 共享同一个规范仓库文件系统时可用，并采用串行调度和排他 workspace lease。isolated 为每个任务创建独立 worktree，可按 DAG 并行。无法证明共享访问或 branch_only checkout 干净时必须阻塞，禁止自动切换模式或让多个 Agent 并行操作同一个非隔离 checkout。
 
+branch_only/lightweight 的 lease authority、active-child mirror 和其他 Requirement inventory 由 `lease-transition` 零写入预检绑定；只执行 validator 返回的 lease-namespace checkpoint 写入。任何部分失败保持 source blocker 原样且继续 blocked，不得让下一 Requirement 在 authority 与 mirror 都完成 release 前 acquire。
+
 Task PR 与 Requirement PR 可独立启停。无 Task PR 时保留独立代码 Review、测试和本地任务合并证据；无 Requirement PR 时保留集成 Review、验收测试、人工批准和本地 target branch 合并证据；无远程时不执行 push、PR 或远程 CI。
 
 后续阶段先以 backlog 创建，只在前置条件满足时提升为 todo。队长负责阶段门禁；方案负责人负责 Plan；集成负责人负责依赖、分支、worktree/lease 和合并；审查员保持独立。
@@ -21,6 +23,8 @@ Task PR 与 Requirement PR 可独立启停。无 Task PR 时保留独立代码 R
 顶层需求创建者不填写 human_approver_id。队长从注入的 Squad Roster 查找唯一 member_type=member、role=人工审批人的成员并传播到需求子树。若零个或多个，需求 blocked，waiting_on=human_approver_configuration，不得创建 Plan。
 
 Review Loop 不反复更换 assignee，使用 durable metadata 和完整 mention 路由。代码、基线、交付策略摘要或 Plan 版本变化都会使旧 Approval 失效。
+
+集成验证 owner/assignee 是当前 roster 的唯一 Integrator，reviewer 是唯一且不同的代码审查员。创建、启动、handoff、批准或 legacy recover 均使用统一 `integration-review` validator。Reviewer 只通过精确 UUID mention 路由，handoff 还必须确认 queued/coalesced/deferred trigger outcome；Review 证据必须属于当前 recovery 与 review epoch。最终门禁重新执行相同身份和新鲜度检查。
 
 父 Issue 不会自动完成。平台 Stage 评论只是唤醒事件，不能决定 workflow object 状态。Plan/Implementation 自身闭合后必须为 done；顶层 Requirement 等待最终审批时为 in_review，交付闭合后为 done。Leader 是顶层 Requirement 启动后的唯一自动状态写入者；Integrator 不得改写其状态。终态交付与 handoff 证据分别压缩在 `delivery_evidence_record`、`delivery_handoff_record` 两个 validator 生成的标量中，禁止展开后耗尽每个 Issue 50 个 metadata key 的平台上限。
 

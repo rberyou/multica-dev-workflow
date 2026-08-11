@@ -12,6 +12,8 @@
 
 明确记录 workspace_mode、task_pr_enabled、requirement_pr_enabled、任务与需求合并方式、worktree 路径策略、workspace lease、无 PR 证据、远程认证检查、失败恢复和清理边界。所有模式保留需求分支和任务分支。
 
+若使用 branch_only/lightweight，Plan 必须声明 lease authority/mirror、完整其他 Requirement lease inventory、fresh guard、checkpoint 顺序与 retry/idempotence，并禁止 lease 写入 Incident blocker namespace。集成验证必须声明当前 roster 唯一且独立的 Integrator/代码审查员、owner/assignee/reviewer 合同、`integration-review` prepare/start/handoff/approve/recover、UUID mention、trigger_outcomes 有限重试、review epoch 与旧/迟到评论拒绝。Incident 恢复还要声明 `incident-transition` 的 successor blocker 与 status-last 恢复顺序；不得让实施启动依赖尚未部署的新 validator。
+
 Plan 必须版本化，旧版本不可覆盖或删除，人工批准绑定明确 plan_revision 和 policy_digest。配置变化必须产生新版本。
 
 设计完成后将需求设计设为 in_review，waiting_on=plan_review，mention 方案审查员。CHANGES_REQUESTED 后修复并重新审查；APPROVED 后请求人工 APPROVE PLAN vN。只有有效人工批准后才可完成需求设计，并把任务拆分提升为 todo。

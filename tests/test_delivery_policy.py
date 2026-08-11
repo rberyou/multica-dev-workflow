@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 POLICY_PATH = (
     ROOT / "skills/multica-delivery-policy/scripts/delivery_policy.py"
 )
+INCIDENTS_PATH = ROOT / "skills/multica-workflow-incidents/scripts/incidents.py"
 SCHEMA_PATH = (
     ROOT
     / "skills/multica-delivery-policy/references/project-delivery.schema.json"
@@ -22,6 +23,13 @@ SPEC = importlib.util.spec_from_file_location("delivery_policy", POLICY_PATH)
 delivery_policy = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader
 SPEC.loader.exec_module(delivery_policy)
+INCIDENTS_SPEC = importlib.util.spec_from_file_location(
+    "workflow_incidents_for_delivery_test", INCIDENTS_PATH
+)
+workflow_incidents = importlib.util.module_from_spec(INCIDENTS_SPEC)
+assert INCIDENTS_SPEC.loader
+sys.modules[INCIDENTS_SPEC.name] = workflow_incidents
+INCIDENTS_SPEC.loader.exec_module(workflow_incidents)
 
 
 REVIEWED_SHA = "1" * 40
@@ -30,6 +38,31 @@ DEFAULT_BASE_SHA = "3" * 40
 MERGED_SHA = "4" * 40
 TREE_SHA = "5" * 40
 POLICY_DIGEST = "6" * 64
+INTEGRATION_DEPENDENCY_DIGEST = "7" * 64
+INTEGRATION_LEASE_DIGEST = "8" * 64
+INTEGRATION_ROSTER = [
+    {
+        "agent_id": "integrator-1",
+        "member_type": "agent",
+        "role_key": "integrator",
+        "active": True,
+        "archived": False,
+    },
+    {
+        "agent_id": "reviewer-1",
+        "member_type": "agent",
+        "role_key": "code_reviewer",
+        "active": True,
+        "archived": False,
+    },
+]
+INTEGRATION_ROSTER_DIGEST = delivery_policy.digest(
+    {
+        "workspace_id": "workspace-1",
+        "squad_id": "squad-1",
+        "roster": INTEGRATION_ROSTER,
+    }
+)
 
 
 def final_gate_snapshot(
@@ -37,15 +70,65 @@ def final_gate_snapshot(
 ) -> dict:
     requirement_pr_enabled = mode == "requirement_pr"
     remote_configured = mode != "local_only"
+    integration_record = {
+        "schema_version": 1,
+        "record_type": "integration_review_role",
+        "state": "approved",
+        "workspace_id": "workspace-1",
+        "squad_id": "squad-1",
+        "roster_digest": INTEGRATION_ROSTER_DIGEST,
+        "issue_id": "IV-1",
+        "owner_id": "integrator-1",
+        "reviewer_id": "reviewer-1",
+        "plan_revision": 2,
+        "delivery_policy_digest": POLICY_DIGEST,
+        "base_commit_sha": TARGET_BASE_SHA,
+        "reviewed_commit_sha": REVIEWED_SHA,
+        "dependency_digest": INTEGRATION_DEPENDENCY_DIGEST,
+        "lease_digest": INTEGRATION_LEASE_DIGEST,
+        "handoff_comment_id": "review-handoff-1",
+        "handoff_created_at": "2026-08-11T10:00:00Z",
+        "trigger_run_id": "review-run-1",
+        "trigger_outcome": "queued",
+        "review_comment_id": "review-comment-1",
+        "review_author_id": "reviewer-1",
+        "review_created_at": "2026-08-11T10:01:00Z",
+    }
+    integration_record["review_binding_digest"] = (
+        delivery_policy._integration_review_binding_digest(integration_record)
+    )
+    integration_record["review_epoch_id"] = delivery_policy._integration_review_epoch_id(
+        integration_record
+    )
+    integration_role_record = delivery_policy.encode_metadata_record(integration_record)
     root = {
         "issue_id": "R-1",
         "root_requirement_id": "R-1",
         "workflow_object_type": "requirement",
         "status": "in_progress",
+        "workflow_instance_id": "workspace-1",
         "plan_status": "done",
         "implementation_status": "done",
         "integration_validation_status": "done",
         "integration_review_status": "approved",
+        "integration_squad_id": "squad-1",
+        "integration_roster_complete": True,
+        "integration_roster": copy.deepcopy(INTEGRATION_ROSTER),
+        "integration_roster_digest": INTEGRATION_ROSTER_DIGEST,
+        "integration_validation_issue_id": "IV-1",
+        "integration_validation_assignee_id": "integrator-1",
+        "integration_original_owner_id": "integrator-1",
+        "integration_reviewer_id": "reviewer-1",
+        "integration_base_commit_sha": TARGET_BASE_SHA,
+        "integration_dependency_digest": INTEGRATION_DEPENDENCY_DIGEST,
+        "integration_lease_digest": INTEGRATION_LEASE_DIGEST,
+        "integration_review_role_record": integration_role_record,
+        "integration_review_recovery_record": "",
+        "integration_review_comment_id": "review-comment-1",
+        "integration_review_comment_author_id": "reviewer-1",
+        "integration_review_epoch_id": integration_record["review_epoch_id"],
+        "integration_review_handoff_comment_id": "review-handoff-1",
+        "integration_review_trigger_run_id": "review-run-1",
         "tests_passed": True,
         "acceptance_complete": True,
         "policy_valid": True,
@@ -180,6 +263,102 @@ def apply_handoff(snapshot: dict, outcome: str = "queued") -> dict:
     return apply_transition(snapshot, handoff)
 
 
+def lease_snapshot(direction: str = "release") -> dict:
+    if direction == "release":
+        current = {
+            "workspace_lease_state": "held",
+            "workspace_lease_owner_issue_id": "IV-1",
+            "workspace_lease_owner_agent_id": "integrator-1",
+        }
+        desired = {
+            "workspace_lease_state": "released",
+            "workspace_lease_owner_issue_id": "",
+            "workspace_lease_owner_agent_id": "",
+        }
+    else:
+        current = {
+            "workspace_lease_state": "released",
+            "workspace_lease_owner_issue_id": "",
+            "workspace_lease_owner_agent_id": "",
+        }
+        desired = {
+            "workspace_lease_state": "held",
+            "workspace_lease_owner_issue_id": "IV-1",
+            "workspace_lease_owner_agent_id": "integrator-1",
+        }
+    blocker = {
+        "status": "blocked",
+        "waiting_on": "workflow_fix",
+        "blocked_reason": "workflow Incident INC-1",
+        "workflow_blocked_by_incident_id": "INC-1",
+        "workflow_blocked_previous_status": "in_progress",
+    }
+    snapshot = {
+        "context": {
+            "workspace_id": "workspace-1",
+            "squad_id": "squad-1",
+            "roster_digest": "a" * 64,
+            "lease_inventory_complete": direction == "acquire",
+        },
+        "plan": {
+            "plan_revision": 2,
+            "delivery_policy_digest": POLICY_DIGEST,
+        },
+        "guard": {
+            "valid": True,
+            "clean": True,
+            "branch": "req/R-1",
+            "expected_branch": "req/R-1",
+            "head": REVIEWED_SHA,
+            "expected_head": REVIEWED_SHA,
+            "unfinished_operations": [],
+        },
+        "authority": {
+            "issue_id": "IMP-1",
+            "metadata_keys": [f"authority_{index}" for index in range(42)],
+            "workspace_lease_scope": "requirement",
+            "workspace_lease_transition_record": "",
+            **current,
+        },
+        "mirror": {
+            "issue_id": "IV-1",
+            "metadata_keys": [f"mirror_{index}" for index in range(42)],
+            "workspace_lease_scope": "requirement",
+            "workspace_lease_transition_record": "",
+            **current,
+            **blocker,
+        },
+        "desired": desired,
+    }
+    if direction == "acquire":
+        snapshot["other_lease"] = {
+            "requirement_id": "R-OTHER",
+            "authority": {
+                "issue_id": "IMP-OTHER",
+                "workspace_lease_state": "released",
+                "workspace_lease_owner_issue_id": "",
+                "workspace_lease_owner_agent_id": "",
+            },
+            "mirror": {
+                "issue_id": "TASK-OTHER",
+                "workspace_lease_state": "released",
+                "workspace_lease_owner_issue_id": "",
+                "workspace_lease_owner_agent_id": "",
+            },
+        }
+    return snapshot
+
+
+def apply_lease_write(snapshot: dict, write: dict) -> dict:
+    updated = copy.deepcopy(snapshot)
+    endpoint = updated[write["endpoint"]]
+    endpoint[write["key"]] = write["value"]
+    endpoint["metadata_keys"] = sorted(
+        set(endpoint["metadata_keys"]) | {write["key"]}
+    )
+    return updated
+
+
 def run_git(repo: Path, *args: str) -> str:
     completed = subprocess.run(
         ["git", "-C", str(repo), *args],
@@ -231,6 +410,24 @@ def refresh_snapshot_record(snapshot: dict) -> None:
 
 
 class DeliveryPolicyTests(unittest.TestCase):
+    def test_original_cli_and_metadata_record_encoding_remain_compatible(self):
+        command_choices = next(
+            action.choices
+            for action in delivery_policy.parser()._actions
+            if isinstance(getattr(action, "choices", None), dict)
+        )
+        self.assertTrue(
+            {"resolve", "verify", "guard-workspace", "final-gate"}.issubset(
+                command_choices
+            )
+        )
+        self.assertEqual(
+            delivery_policy.encode_metadata_record(
+                {"schema_version": 1, "record_type": "test", "a": "value"}
+            ),
+            "v1.eyJhIjoidmFsdWUiLCJyZWNvcmRfdHlwZSI6InRlc3QiLCJzY2hlbWFfdmVyc2lvbiI6MX0",
+        )
+
     def test_schema_accepts_documented_project_policy(self):
         schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
         document = {
@@ -1040,6 +1237,546 @@ class DeliveryPolicyTests(unittest.TestCase):
         corrupted = delivery_policy.final_gate_transition(snapshot, "converge")
         self.assertFalse(corrupted["allowed"])
         self.assertIn("delivery_evidence_record is invalid", corrupted["reasons"])
+
+    def test_final_gate_reuses_integration_identity_on_every_action(self):
+        snapshots = {}
+        snapshots["open"] = final_gate_snapshot()
+        opened = apply_transition(
+            final_gate_snapshot(),
+            delivery_policy.final_gate_transition(final_gate_snapshot(), "open"),
+        )
+        opened["actor_role"] = "integrator"
+        snapshots["approve"] = opened
+        approved = open_and_approve(final_gate_snapshot())
+        snapshots["delivery"] = approved
+        delivered = apply_transition(
+            approved,
+            delivery_policy.final_gate_transition(approved, "delivery"),
+        )
+        delivered["handoff"] = {
+            "issue_id": "R-1",
+            "comment_id": "handoff-identity",
+            "mentioned_role": "leader",
+            "trigger_outcomes": [
+                {"recipient_role": "leader", "status": "queued"}
+            ],
+        }
+        snapshots["handoff"] = delivered
+        converging = apply_handoff(copy.deepcopy(delivered))
+        converging["actor_role"] = "leader"
+        snapshots["converge"] = converging
+        for action, snapshot in snapshots.items():
+            with self.subTest(action=action):
+                candidate = copy.deepcopy(snapshot)
+                candidate["root"]["integration_original_owner_id"] = "reviewer-1"
+                result = delivery_policy.final_gate_transition(candidate, action)
+                self.assertFalse(result["allowed"])
+                self.assertIn(
+                    "integration owner and reviewer must be independent",
+                    result["reasons"],
+                )
+                self.assertEqual(result["metadata_updates"], {})
+                self.assertIsNone(result["status_write"])
+
+    def test_final_gate_accepts_the_incident_skill_review_record_contract(self):
+        integration = {
+            "context": {
+                "workspace_id": "workspace-1",
+                "squad_id": "squad-1",
+                "roster_complete": True,
+                "roster": copy.deepcopy(INTEGRATION_ROSTER),
+            },
+            "issue": {
+                "issue_id": "IV-1",
+                "status": "in_progress",
+                "workflow_id": "development-delivery",
+                "protocol_revision": "v4",
+                "workflow_object_type": "integration_validation",
+                "workflow_instance_id": "workspace-1",
+                "assignee_id": "integrator-1",
+                "original_owner_id": "integrator-1",
+                "reviewer_id": "reviewer-1",
+                "plan_revision": 2,
+                "delivery_policy_digest": POLICY_DIGEST,
+                "base_commit_sha": TARGET_BASE_SHA,
+                "reviewed_commit_sha": REVIEWED_SHA,
+                "metadata_keys": [f"key_{index}" for index in range(42)],
+                "workflow_blocked_by_incident_id": "",
+            },
+            "dependency": {"satisfied": True, "contract": "done:T-1"},
+            "lease": {
+                "scope": "requirement",
+                "state": "held",
+                "owner_issue_id": "IV-1",
+                "owner_agent_id": "integrator-1",
+            },
+            "used_review_comment_ids": [],
+            "used_review_comment_ids_complete": True,
+        }
+
+        def apply_review(result):
+            integration["issue"].update(result["metadata_updates"])
+            integration["issue"]["metadata_keys"] = sorted(
+                set(integration["issue"]["metadata_keys"])
+                | set(result["metadata_updates"])
+            )
+
+        apply_review(workflow_incidents.integration_review_transition(integration, "prepare"))
+        apply_review(workflow_incidents.integration_review_transition(integration, "start"))
+        integration["handoff"] = {
+            "issue_id": "IV-1",
+            "author_type": "agent",
+            "author_id": "integrator-1",
+            "mentioned_agent_id": "reviewer-1",
+            "comment_id": "handoff-1",
+            "created_at": "2026-08-11T10:00:00Z",
+            "trigger_run_id": "run-1",
+            "attempt": 1,
+            "max_attempts": 3,
+            "previous_attempts_complete": True,
+            "previous_attempts": [],
+            "trigger_outcomes": [
+                {"recipient_id": "reviewer-1", "status": "queued", "run_id": "run-1"}
+            ],
+        }
+        apply_review(workflow_incidents.integration_review_transition(integration, "handoff"))
+        role = workflow_incidents.decode_metadata_record(
+            integration["issue"]["integration_review_role_record"],
+            "role",
+            "integration_review_role",
+        )
+        integration["review"] = {
+            "issue_id": "IV-1",
+            "author_type": "agent",
+            "author_id": "reviewer-1",
+            "comment_id": "review-1",
+            "created_at": "2026-08-11T10:01:00Z",
+            "verdict": "APPROVED",
+            "review_epoch_id": role["review_epoch_id"],
+            "trigger_comment_id": "handoff-1",
+            "source_run_id": "run-1",
+        }
+        apply_review(workflow_incidents.integration_review_transition(integration, "approve"))
+        role_value = integration["issue"]["integration_review_role_record"]
+        role = delivery_policy.decode_metadata_record(role_value)
+
+        snapshot = final_gate_snapshot()
+        root = snapshot["root"]
+        root.update(
+            {
+                "integration_review_role_record": role_value,
+                "integration_roster_digest": role["roster_digest"],
+                "integration_dependency_digest": role["dependency_digest"],
+                "integration_lease_digest": role["lease_digest"],
+                "integration_review_comment_id": role["review_comment_id"],
+                "integration_review_comment_author_id": role["review_author_id"],
+                "integration_review_epoch_id": role["review_epoch_id"],
+                "integration_review_handoff_comment_id": role["handoff_comment_id"],
+                "integration_review_trigger_run_id": role["trigger_run_id"],
+            }
+        )
+        accepted = delivery_policy.final_gate_transition(snapshot, "open")
+        self.assertTrue(accepted["allowed"], accepted["reasons"])
+
+    def test_final_gate_rejects_duplicate_archived_or_colliding_current_roles(self):
+        cases = {}
+        duplicate = final_gate_snapshot()
+        duplicate["root"]["integration_roster"].append(
+            {
+                "agent_id": "reviewer-2",
+                "member_type": "agent",
+                "role_key": "code_reviewer",
+                "active": True,
+                "archived": False,
+            }
+        )
+        cases["duplicate"] = duplicate
+        archived = final_gate_snapshot()
+        archived["root"]["integration_roster"][1]["archived"] = True
+        cases["archived"] = archived
+        incomplete = final_gate_snapshot()
+        incomplete["root"]["integration_roster_complete"] = False
+        cases["incomplete"] = incomplete
+        collision = final_gate_snapshot()
+        collision["root"]["integration_roster"][1]["agent_id"] = "integrator-1"
+        cases["collision"] = collision
+        for name, snapshot in cases.items():
+            with self.subTest(name=name):
+                result = delivery_policy.final_gate_transition(snapshot, "open")
+                self.assertFalse(result["allowed"])
+                self.assertEqual(result["metadata_updates"], {})
+                self.assertIsNone(result["status_write"])
+
+    def test_final_gate_recomputes_review_epoch_and_timestamp_freshness(self):
+        snapshot = final_gate_snapshot()
+        role = delivery_policy.decode_metadata_record(
+            snapshot["root"]["integration_review_role_record"]
+        )
+        role["review_epoch_id"] = "forged-epoch"
+        snapshot["root"]["integration_review_role_record"] = (
+            delivery_policy.encode_metadata_record(role)
+        )
+        forged = delivery_policy.final_gate_transition(snapshot, "open")
+        self.assertFalse(forged["allowed"])
+        self.assertIn("integration Review epoch digest is invalid", forged["reasons"])
+
+        snapshot = final_gate_snapshot()
+        role = delivery_policy.decode_metadata_record(
+            snapshot["root"]["integration_review_role_record"]
+        )
+        role["review_created_at"] = role["handoff_created_at"]
+        snapshot["root"]["integration_review_role_record"] = (
+            delivery_policy.encode_metadata_record(role)
+        )
+        stale = delivery_policy.final_gate_transition(snapshot, "open")
+        self.assertFalse(stale["allowed"])
+        self.assertIn(
+            "integration Review comment predates or coincides with its handoff",
+            stale["reasons"],
+        )
+
+        for record_key, root_key in (
+            ("review_comment_id", "integration_review_comment_id"),
+            ("handoff_comment_id", "integration_review_handoff_comment_id"),
+            ("trigger_run_id", "integration_review_trigger_run_id"),
+        ):
+            with self.subTest(missing=record_key):
+                candidate = final_gate_snapshot()
+                candidate_role = delivery_policy.decode_metadata_record(
+                    candidate["root"]["integration_review_role_record"]
+                )
+                candidate_role[record_key] = ""
+                candidate_role["review_epoch_id"] = (
+                    delivery_policy._integration_review_epoch_id(candidate_role)
+                )
+                candidate["root"]["integration_review_role_record"] = (
+                    delivery_policy.encode_metadata_record(candidate_role)
+                )
+                candidate["root"][root_key] = ""
+                candidate["root"]["integration_review_epoch_id"] = candidate_role[
+                    "review_epoch_id"
+                ]
+                result = delivery_policy.final_gate_transition(candidate, "open")
+                self.assertFalse(result["allowed"])
+                self.assertIn("ID is missing", " ".join(result["reasons"]))
+
+    def test_final_gate_rejects_stale_integration_review_bindings(self):
+        cases = {
+            "roster": ("integration_roster_digest", "a" * 64),
+            "assignee": ("integration_validation_assignee_id", "reviewer-1"),
+            "owner": ("integration_original_owner_id", "integrator-2"),
+            "reviewer": ("integration_reviewer_id", "reviewer-2"),
+            "base": ("integration_base_commit_sha", "b" * 40),
+            "dependency": ("integration_dependency_digest", "c" * 64),
+            "lease": ("integration_lease_digest", "d" * 64),
+            "comment": ("integration_review_comment_id", "old-comment"),
+            "author": ("integration_review_comment_author_id", "integrator-1"),
+            "epoch": ("integration_review_epoch_id", "old-epoch"),
+            "handoff": ("integration_review_handoff_comment_id", "old-handoff"),
+            "run": ("integration_review_trigger_run_id", "old-run"),
+        }
+        for name, (key, value) in cases.items():
+            with self.subTest(name=name):
+                snapshot = final_gate_snapshot()
+                snapshot["root"][key] = value
+                result = delivery_policy.final_gate_transition(snapshot, "open")
+                self.assertFalse(result["allowed"])
+                self.assertEqual(result["metadata_updates"], {})
+
+    def test_final_gate_binds_current_recovery_record(self):
+        snapshot = final_gate_snapshot()
+        root = snapshot["root"]
+        role = delivery_policy.decode_metadata_record(
+            root["integration_review_role_record"]
+        )
+        recovery = {
+            "schema_version": 1,
+            "record_type": "integration_review_recovery",
+            **{
+                key: role[key]
+                for key in (
+                    "workspace_id",
+                    "squad_id",
+                    "roster_digest",
+                    "issue_id",
+                    "owner_id",
+                    "reviewer_id",
+                    "plan_revision",
+                    "delivery_policy_digest",
+                    "base_commit_sha",
+                    "reviewed_commit_sha",
+                    "dependency_digest",
+                    "lease_digest",
+                )
+            },
+            "incident_id": "INC-1",
+            "recovery_id": "recovery-1",
+            "from_assignee_id": "reviewer-1",
+            "from_original_owner_id": "reviewer-1",
+            "from_reviewer_id": "reviewer-1",
+            "lease_transition_digest": "7" * 64,
+            "blocker_digest": "8" * 64,
+        }
+        recovery_value = delivery_policy.encode_metadata_record(recovery)
+        role["recovery_record_digest"] = delivery_policy.hashlib.sha256(
+            recovery_value.encode("utf-8")
+        ).hexdigest()
+        role["review_binding_digest"] = delivery_policy._integration_review_binding_digest(
+            role
+        )
+        role["review_epoch_id"] = delivery_policy._integration_review_epoch_id(role)
+        root["integration_review_recovery_record"] = recovery_value
+        root["integration_review_role_record"] = delivery_policy.encode_metadata_record(role)
+        root["integration_review_epoch_id"] = role["review_epoch_id"]
+        self.assertTrue(delivery_policy.final_gate_transition(snapshot, "open")["allowed"])
+        root["integration_review_recovery_record"] = delivery_policy.encode_metadata_record(
+            {**recovery, "recovery_id": "recovery-2"}
+        )
+        stale = delivery_policy.final_gate_transition(snapshot, "open")
+        self.assertFalse(stale["allowed"])
+        self.assertIn("integration recovery record is stale", stale["reasons"])
+
+        for key, value in (
+            ("incident_id", ""),
+            ("from_assignee_id", ""),
+            ("lease_transition_digest", "invalid"),
+            ("blocker_digest", "invalid"),
+        ):
+            with self.subTest(key=key):
+                candidate = final_gate_snapshot()
+                candidate_root = candidate["root"]
+                candidate_role = delivery_policy.decode_metadata_record(
+                    candidate_root["integration_review_role_record"]
+                )
+                invalid_recovery = {**recovery, key: value}
+                invalid_value = delivery_policy.encode_metadata_record(invalid_recovery)
+                candidate_role["recovery_record_digest"] = (
+                    delivery_policy.hashlib.sha256(
+                        invalid_value.encode("utf-8")
+                    ).hexdigest()
+                )
+                candidate_role["review_binding_digest"] = (
+                    delivery_policy._integration_review_binding_digest(candidate_role)
+                )
+                candidate_role["review_epoch_id"] = (
+                    delivery_policy._integration_review_epoch_id(candidate_role)
+                )
+                candidate_root["integration_review_recovery_record"] = invalid_value
+                candidate_root["integration_review_role_record"] = (
+                    delivery_policy.encode_metadata_record(candidate_role)
+                )
+                candidate_root["integration_review_epoch_id"] = candidate_role[
+                    "review_epoch_id"
+                ]
+                result = delivery_policy.final_gate_transition(candidate, "open")
+                self.assertFalse(result["allowed"])
+                self.assertEqual(result["metadata_updates"], {})
+
+    def test_lease_release_and_acquire_resume_at_every_write_prefix(self):
+        for direction in ("release", "acquire"):
+            with self.subTest(direction=direction):
+                snapshot = lease_snapshot(direction)
+                initial_blocker = {
+                    key: snapshot["mirror"][key]
+                    for key in delivery_policy.LEASE_BLOCKER_FIELDS
+                }
+                first = delivery_policy.lease_transition_preflight(snapshot)
+                self.assertTrue(first["allowed"])
+                full_writes = first["writes"]
+                for cut in range(len(full_writes) + 1):
+                    candidate = copy.deepcopy(snapshot)
+                    for write in full_writes[:cut]:
+                        candidate = apply_lease_write(candidate, write)
+                        self.assertEqual(
+                            {
+                                key: candidate["mirror"][key]
+                                for key in delivery_policy.LEASE_BLOCKER_FIELDS
+                            },
+                            initial_blocker,
+                        )
+                        authority_held = (
+                            candidate["authority"]["workspace_lease_state"] == "held"
+                        )
+                        mirror_held = (
+                            candidate["mirror"]["workspace_lease_state"] == "held"
+                        )
+                        if direction == "acquire" and mirror_held:
+                            self.assertTrue(authority_held)
+                        if direction == "release" and not authority_held:
+                            self.assertFalse(mirror_held)
+                    resumed = delivery_policy.lease_transition_preflight(candidate)
+                    self.assertTrue(resumed["allowed"])
+                    self.assertEqual(resumed["progress"], cut)
+                    self.assertEqual(resumed["blocker_writes"], [])
+                    self.assertEqual(resumed["status_writes"], [])
+                    if direction == "release":
+                        self.assertEqual(
+                            resumed["next_requirement_acquire_allowed"],
+                            resumed["complete"],
+                        )
+                    else:
+                        self.assertFalse(resumed["next_requirement_acquire_allowed"])
+
+    def test_lease_acquire_rejects_double_owner_guard_drift_and_capacity(self):
+        incomplete_inventory = lease_snapshot("acquire")
+        incomplete_inventory["context"]["lease_inventory_complete"] = False
+        with self.assertRaisesRegex(
+            delivery_policy.DeliveryPolicyError, "complete other Requirement"
+        ):
+            delivery_policy.lease_transition_preflight(incomplete_inventory)
+
+        double = lease_snapshot("acquire")
+        double["other_lease"]["authority"]["workspace_lease_state"] = "held"
+        with self.assertRaisesRegex(
+            delivery_policy.DeliveryPolicyError, "double ownership"
+        ):
+            delivery_policy.lease_transition_preflight(double)
+
+        aliased = lease_snapshot("acquire")
+        aliased["other_lease"]["authority"]["issue_id"] = "IMP-1"
+        with self.assertRaisesRegex(
+            delivery_policy.DeliveryPolicyError, "includes the current endpoints"
+        ):
+            delivery_policy.lease_transition_preflight(aliased)
+
+        guard = lease_snapshot("release")
+        guard["guard"]["head"] = "f" * 40
+        rejected = delivery_policy.lease_transition_preflight(guard)
+        self.assertFalse(rejected["allowed"])
+        self.assertIn("workspace guard head drifted", rejected["reasons"])
+
+        capacity = lease_snapshot("release")
+        capacity["mirror"]["metadata_keys"] = [f"key_{index}" for index in range(50)]
+        before = copy.deepcopy(capacity)
+        rejected = delivery_policy.lease_transition_preflight(capacity)
+        self.assertFalse(rejected["allowed"])
+        self.assertEqual(rejected["writes"], [])
+        self.assertEqual(capacity, before)
+
+    def test_lease_retry_rejects_blocker_roster_policy_and_record_drift(self):
+        base = lease_snapshot("release")
+        first = delivery_policy.lease_transition_preflight(base)
+        partial = apply_lease_write(base, first["writes"][0])
+        cases = []
+        blocker = copy.deepcopy(partial)
+        blocker["mirror"]["waiting_on"] = "workspace_lease_recovery"
+        cases.append(("blocker", blocker, "Incident blocker"))
+        roster = copy.deepcopy(partial)
+        roster["context"]["roster_digest"] = "b" * 64
+        cases.append(("roster", roster, "roster binding drifted"))
+        policy = copy.deepcopy(partial)
+        policy["plan"]["delivery_policy_digest"] = "c" * 64
+        cases.append(("policy", policy, "policy digest drifted"))
+        record = copy.deepcopy(partial)
+        record["mirror"]["workspace_lease_transition_record"] = "v1.not+base64"
+        cases.append(("record", record, "invalid"))
+        acquire = lease_snapshot("acquire")
+        acquire_first = delivery_policy.lease_transition_preflight(acquire)
+        acquire_partial = apply_lease_write(acquire, acquire_first["writes"][0])
+        acquire_partial["other_lease"]["authority"]["workspace_lease_state"] = "held"
+        cases.append(("other lease", acquire_partial, "inventory drifted"))
+        for name, snapshot, message in cases:
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(
+                    delivery_policy.DeliveryPolicyError, message
+                ):
+                    delivery_policy.lease_transition_preflight(snapshot)
+
+        tampered = lease_snapshot("release")
+        first = delivery_policy.lease_transition_preflight(tampered)
+        tampered = apply_lease_write(tampered, first["writes"][0])
+        record = delivery_policy.decode_metadata_record(
+            tampered["authority"]["workspace_lease_transition_record"]
+        )
+        record["direction"] = "acquire"
+        tampered["authority"]["workspace_lease_transition_record"] = (
+            delivery_policy.encode_metadata_record(record)
+        )
+        with self.assertRaisesRegex(
+            delivery_policy.DeliveryPolicyError, "acquire tuple is invalid"
+        ):
+            delivery_policy.lease_transition_preflight(tampered)
+
+    def test_completed_lease_records_allow_idempotence_and_the_next_transition(self):
+        release = lease_snapshot("release")
+        result = delivery_policy.lease_transition_preflight(release)
+        completed = copy.deepcopy(release)
+        for write in result["writes"]:
+            completed = apply_lease_write(completed, write)
+        again = delivery_policy.lease_transition_preflight(completed)
+        self.assertTrue(again["complete"])
+        self.assertEqual(again["writes"], [])
+
+        completed["desired"] = {
+            "workspace_lease_state": "held",
+            "workspace_lease_owner_issue_id": "IV-1",
+            "workspace_lease_owner_agent_id": "integrator-1",
+        }
+        completed["context"]["lease_inventory_complete"] = True
+        completed["other_lease"] = {
+            "requirement_id": "R-OTHER",
+            "authority": {
+                "issue_id": "IMP-OTHER",
+                "workspace_lease_state": "released",
+                "workspace_lease_owner_issue_id": "",
+                "workspace_lease_owner_agent_id": "",
+            },
+            "mirror": {
+                "issue_id": "TASK-OTHER",
+                "workspace_lease_state": "released",
+                "workspace_lease_owner_issue_id": "",
+                "workspace_lease_owner_agent_id": "",
+            },
+        }
+        acquired = delivery_policy.lease_transition_preflight(completed)
+        self.assertTrue(acquired["allowed"])
+        self.assertEqual(acquired["direction"], "acquire")
+        self.assertFalse(acquired["complete"])
+
+    def test_lease_capacity_rejects_duplicate_or_empty_inventory_keys(self):
+        for metadata_keys in (["same", "same"], [""]):
+            with self.subTest(metadata_keys=metadata_keys):
+                snapshot = lease_snapshot("release")
+                snapshot["authority"]["metadata_keys"] = metadata_keys
+                rejected = delivery_policy.lease_transition_preflight(snapshot)
+                self.assertFalse(rejected["allowed"])
+                self.assertEqual(rejected["writes"], [])
+
+    def test_lease_preflight_cli_is_deterministic_and_zero_write(self):
+        snapshot = lease_snapshot("release")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "lease.json"
+            original = json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
+            path.write_text(original, encoding="utf-8")
+            first = subprocess.run(
+                [
+                    sys.executable,
+                    str(POLICY_PATH),
+                    "lease-transition",
+                    "--snapshot",
+                    str(path),
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+            second = subprocess.run(
+                [
+                    sys.executable,
+                    str(POLICY_PATH),
+                    "lease-transition",
+                    "--snapshot",
+                    str(path),
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertEqual(first.stdout, second.stdout)
+            self.assertEqual(path.read_text(encoding="utf-8"), original)
 
 
 if __name__ == "__main__":

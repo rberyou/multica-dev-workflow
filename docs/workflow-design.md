@@ -31,6 +31,10 @@ Protocol v4 assigns parent status by workflow object. Plan and Implementation be
 
 Requirement delivery targets the Plan-defined branch, which may be non-default. Terminal verification preserves independent default and target baselines and covers Requirement PR, direct-push, and no-remote local-only evidence. Complete delivery and handoff evidence are stored in two versioned scalar records rather than expanded fields, keeping real Requirements below the platform's 50-key metadata limit. Duplicate approvals never repeat a merge; when delivery is complete but the root remains non-terminal, they recover the Leader handoff.
 
+Integration validation uses a separate deterministic protocol transition. The current Workspace/Squad roster must contain exactly one active Integrator and one active Code Reviewer, with distinct identities. The Integrator remains assignee and original owner; the Reviewer is routed by an exact Agent UUID mention and never takes assignment. Handoff requires a declared-complete bounded retry history and exactly one queued, coalesced, or deferred outcome for the current Reviewer/run. A compact role record binds roster, Plan revision, policy digest, immutable Git SHAs, dependency, lease, handoff comment, trigger run, and a recomputable Review epoch. `APPROVED` evidence must be newer than and explicitly linked to that epoch. Recovery creates an additional compact record and forces a new start, handoff, and independent Review; pre-recovery, late, duplicate replacement, and unrouted comments are rejected. A checkpointed Review-blocker record makes block/restore retryable without regressing an approved epoch. Final approval revalidates the same roster and evidence instead of trusting a copied status flag.
+
+Non-isolated workspace leases use an authority/mirror checkpoint state machine. Release changes the active-child mirror before the Implementation authority; acquire changes the authority before the mirror. The validator binds a fresh Git guard and a complete inventory of other Requirement leases, writes only the lease namespace, and records progress after every data write on both endpoints. Incident blocker fields are a separate namespace. Incident close independently requires the same completed acquire record and desired tuple on both live endpoints. An Incident transition keeps status blocked while installing a successor blocker and writes a restored active status last. Pending records reserve their namespace; completed records provide idempotent evidence without preventing the next legal transition.
+
 ## Event-Driven Incident Boundary
 
 The active Agent already observes the commands, state transitions, Review results, and failures involved in its task. It should repair local mistakes immediately. Durable recording is only useful when the issue outlives that execution context.
@@ -39,6 +43,8 @@ The Incident Skill therefore combines:
 
 - written instructions for judgment and escalation;
 - a deterministic Python command for binding, redaction, deduplication, state changes, source blocking/restoration, and evidence persistence.
+
+The same Skill exposes portable integration-Review and Incident-blocker preflights because they share recovery ownership and must be available in product repositories that do not contain this repository's host scripts. Delivery Policy retains lease, Git-policy, and final-gate validation. The boundary deliberately duplicates only compact record decoding across independently packaged Skills; it does not centralize Git delivery or final approval mutations in the Incident command.
 
 The Python command is called by an ordinary Agent or human host at the moment an Issue is created, a durable workflow problem is found, a fix Requirement is linked, or a deployed fix is checked. It is never called by a timer.
 

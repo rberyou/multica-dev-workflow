@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+from datetime import datetime
 import hashlib
 import json
 from pathlib import Path
@@ -25,6 +26,7 @@ PROVIDERS = ("auto", "github", "none")
 FINAL_ACTIONS = ("open", "approve", "delivery", "handoff", "converge")
 DELIVERY_MODES = ("requirement_pr", "direct_push", "local_only")
 HANDOFF_OUTCOMES = ("queued", "coalesced", "deferred")
+LEASE_STATES = ("held", "released")
 METADATA_RECORD_PREFIX = "v1."
 MAX_ISSUE_METADATA_KEYS = 50
 REMOTE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -975,6 +977,104 @@ def _add(reasons: list[str], condition: bool, message: str) -> None:
         reasons.append(message)
 
 
+def _parse_timestamp(value: Any, name: str) -> datetime:
+    if not isinstance(value, str) or not value:
+        raise DeliveryPolicyError(f"{name} is missing")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise DeliveryPolicyError(f"{name} is invalid") from exc
+    if parsed.tzinfo is None:
+        raise DeliveryPolicyError(f"{name} must include a timezone")
+    return parsed
+
+
+def _integration_review_binding_digest(record: dict[str, Any]) -> str:
+    keys = (
+        "schema_version",
+        "record_type",
+        "workspace_id",
+        "squad_id",
+        "roster_digest",
+        "issue_id",
+        "owner_id",
+        "reviewer_id",
+        "plan_revision",
+        "delivery_policy_digest",
+        "base_commit_sha",
+        "reviewed_commit_sha",
+        "dependency_digest",
+        "lease_digest",
+        "recovery_record_digest",
+    )
+    return digest({key: record.get(key) for key in keys})
+
+
+def _integration_review_epoch_id(record: dict[str, Any]) -> str:
+    return digest(
+        {
+            "review_binding_digest": record.get("review_binding_digest"),
+            "handoff_comment_id": record.get("handoff_comment_id"),
+            "trigger_run_id": record.get("trigger_run_id"),
+            "trigger_outcome": record.get("trigger_outcome"),
+            "handoff_created_at": record.get("handoff_created_at"),
+        }
+    )
+
+
+def _active_integration_roster(
+    root: dict[str, Any]
+) -> tuple[str, str, str, list[str]]:
+    reasons: list[str] = []
+    roster = root.get("integration_roster")
+    if not isinstance(roster, list):
+        raise DeliveryPolicyError("integration roster must be a list")
+    if root.get("integration_roster_complete") is not True:
+        raise DeliveryPolicyError("integration roster must be declared complete")
+    normalized = []
+    integrators = []
+    reviewers = []
+    for item in roster:
+        if not isinstance(item, dict):
+            raise DeliveryPolicyError("integration roster contains an invalid member")
+        member = {
+            "agent_id": item.get("agent_id"),
+            "member_type": item.get("member_type"),
+            "role_key": item.get("role_key"),
+            "active": item.get("active") is True,
+            "archived": item.get("archived") is True,
+        }
+        if not isinstance(member["agent_id"], str) or not member["agent_id"]:
+            raise DeliveryPolicyError("integration roster member agent_id is missing")
+        normalized.append(member)
+        if member["member_type"] == "agent" and member["active"] and not member["archived"]:
+            if member["role_key"] == "integrator":
+                integrators.append(member["agent_id"])
+            if member["role_key"] == "code_reviewer":
+                reviewers.append(member["agent_id"])
+    if len(integrators) != 1:
+        reasons.append(
+            f"expected one active Integrator in the current roster, found {len(integrators)}"
+        )
+    if len(reviewers) != 1:
+        reasons.append(
+            f"expected one active Code Reviewer in the current roster, found {len(reviewers)}"
+        )
+    owner_id = integrators[0] if len(integrators) == 1 else ""
+    reviewer_id = reviewers[0] if len(reviewers) == 1 else ""
+    if owner_id and reviewer_id and owner_id == reviewer_id:
+        reasons.append("integration owner and reviewer must be independent")
+    normalized.sort(key=canonical_json)
+    roster_digest = digest(
+        {
+            "workspace_id": root.get("workflow_instance_id"),
+            "squad_id": root.get("integration_squad_id"),
+            "roster": normalized,
+        }
+    )
+    return owner_id, reviewer_id, roster_digest, reasons
+
+
 def _root_reasons(root: dict[str, Any]) -> list[str]:
     reasons: list[str] = []
     issue_id = root.get("issue_id")
@@ -1065,6 +1165,266 @@ def _root_reasons(root: dict[str, Any]) -> list[str]:
         and len(metadata_keys) == len(set(metadata_keys)),
         "root metadata key inventory is invalid",
     )
+    reasons.extend(_integration_review_reasons(root))
+    return reasons
+
+
+def _integration_review_reasons(root: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    try:
+        roster_owner_id, roster_reviewer_id, roster_digest, roster_reasons = (
+            _active_integration_roster(root)
+        )
+    except DeliveryPolicyError as exc:
+        return [str(exc)]
+    reasons.extend(roster_reasons)
+    try:
+        record = decode_metadata_record(
+            root.get("integration_review_role_record"),
+            "integration_review_role_record",
+        )
+    except DeliveryPolicyError as exc:
+        return [str(exc)]
+    _add(
+        reasons,
+        record.get("record_type") == "integration_review_role",
+        "integration review role record type is invalid",
+    )
+    _add(
+        reasons,
+        record.get("state") == "approved",
+        "integration review role record is not approved",
+    )
+    _add(
+        reasons,
+        record.get("workspace_id") == root.get("workflow_instance_id"),
+        "integration review workspace binding drifted",
+    )
+    _add(
+        reasons,
+        record.get("squad_id") == root.get("integration_squad_id"),
+        "integration review Squad binding drifted",
+    )
+    _add(
+        reasons,
+        root.get("integration_roster_digest") == roster_digest
+        and record.get("roster_digest") == roster_digest,
+        "integration review roster drifted",
+    )
+    owner_id = root.get("integration_original_owner_id")
+    reviewer_id = root.get("integration_reviewer_id")
+    _add(
+        reasons,
+        isinstance(owner_id, str) and bool(owner_id),
+        "integration original owner is missing",
+    )
+    _add(
+        reasons,
+        isinstance(reviewer_id, str) and bool(reviewer_id),
+        "integration reviewer is missing",
+    )
+    _add(reasons, owner_id != reviewer_id, "integration owner and reviewer must be independent")
+    _add(
+        reasons,
+        owner_id == roster_owner_id,
+        "integration original owner is not the current unique Integrator",
+    )
+    _add(
+        reasons,
+        reviewer_id == roster_reviewer_id,
+        "integration reviewer is not the current unique Code Reviewer",
+    )
+    _add(
+        reasons,
+        root.get("integration_validation_assignee_id") == owner_id,
+        "integration validation assignee no longer matches the original owner",
+    )
+    _add(reasons, record.get("owner_id") == owner_id, "recorded integration owner is stale")
+    _add(
+        reasons,
+        record.get("reviewer_id") == reviewer_id,
+        "recorded integration reviewer is stale",
+    )
+    _add(
+        reasons,
+        record.get("issue_id") == root.get("integration_validation_issue_id"),
+        "integration review record targets a different validation Issue",
+    )
+    _add(
+        reasons,
+        record.get("plan_revision") == root.get("plan_revision"),
+        "integration review Plan revision is stale",
+    )
+    _add(
+        reasons,
+        record.get("delivery_policy_digest") == root.get("delivery_policy_digest"),
+        "integration review policy digest is stale",
+    )
+    _add(
+        reasons,
+        record.get("base_commit_sha") == root.get("integration_base_commit_sha"),
+        "integration review base commit is stale",
+    )
+    _add(
+        reasons,
+        record.get("reviewed_commit_sha") == root.get("reviewed_commit_sha"),
+        "integration review head is stale",
+    )
+    _add(
+        reasons,
+        record.get("dependency_digest") == root.get("integration_dependency_digest"),
+        "integration review dependency evidence is stale",
+    )
+    _add(
+        reasons,
+        _is_digest(record.get("dependency_digest")),
+        "integration review dependency digest is invalid",
+    )
+    _add(
+        reasons,
+        record.get("lease_digest") == root.get("integration_lease_digest"),
+        "integration review lease evidence is stale",
+    )
+    _add(
+        reasons,
+        _is_digest(record.get("lease_digest")),
+        "integration review lease digest is invalid",
+    )
+    for key, label in (
+        ("review_comment_id", "Review comment"),
+        ("handoff_comment_id", "Review handoff comment"),
+        ("trigger_run_id", "Review trigger run"),
+    ):
+        _add(
+            reasons,
+            isinstance(record.get(key), str) and bool(record.get(key)),
+            f"integration {label} ID is missing",
+        )
+    _add(
+        reasons,
+        record.get("review_comment_id") == root.get("integration_review_comment_id"),
+        "integration Review comment is not current",
+    )
+    _add(
+        reasons,
+        record.get("review_author_id") == reviewer_id
+        and root.get("integration_review_comment_author_id") == reviewer_id,
+        "integration Review author is not the current Code Reviewer",
+    )
+    _add(
+        reasons,
+        record.get("review_epoch_id") == root.get("integration_review_epoch_id"),
+        "integration Review epoch is stale",
+    )
+    _add(
+        reasons,
+        record.get("handoff_comment_id")
+        == root.get("integration_review_handoff_comment_id"),
+        "integration Review is not bound to the current handoff comment",
+    )
+    _add(
+        reasons,
+        record.get("trigger_run_id") == root.get("integration_review_trigger_run_id"),
+        "integration Review is not bound to the current trigger run",
+    )
+    _add(
+        reasons,
+        record.get("trigger_outcome") in HANDOFF_OUTCOMES,
+        "integration Review handoff trigger was not confirmed",
+    )
+    _add(
+        reasons,
+        record.get("review_binding_digest")
+        == _integration_review_binding_digest(record),
+        "integration Review binding digest is invalid",
+    )
+    _add(
+        reasons,
+        record.get("review_epoch_id") == _integration_review_epoch_id(record),
+        "integration Review epoch digest is invalid",
+    )
+    try:
+        handoff_time = _parse_timestamp(
+            record.get("handoff_created_at"), "integration Review handoff_created_at"
+        )
+        review_time = _parse_timestamp(
+            record.get("review_created_at"), "integration Review review_created_at"
+        )
+        _add(
+            reasons,
+            review_time > handoff_time,
+            "integration Review comment predates or coincides with its handoff",
+        )
+    except DeliveryPolicyError as exc:
+        reasons.append(str(exc))
+    recovery_digest = record.get("recovery_record_digest")
+    recovery_value = root.get("integration_review_recovery_record")
+    if recovery_digest is None:
+        _add(
+            reasons,
+            recovery_value in {None, ""},
+            "unexpected integration recovery evidence is present",
+        )
+    else:
+        current_digest = (
+            hashlib.sha256(recovery_value.encode("utf-8")).hexdigest()
+            if isinstance(recovery_value, str)
+            else None
+        )
+        _add(
+            reasons,
+            recovery_digest == current_digest,
+            "integration recovery record is stale",
+        )
+        try:
+            recovery = decode_metadata_record(
+                recovery_value, "integration_review_recovery_record"
+            )
+        except DeliveryPolicyError as exc:
+            reasons.append(str(exc))
+        else:
+            _add(
+                reasons,
+                recovery.get("record_type") == "integration_review_recovery",
+                "integration recovery record type is invalid",
+            )
+            for key in (
+                "incident_id",
+                "recovery_id",
+                "from_assignee_id",
+                "from_original_owner_id",
+                "from_reviewer_id",
+            ):
+                _add(
+                    reasons,
+                    isinstance(recovery.get(key), str) and bool(recovery.get(key)),
+                    f"integration recovery {key} is missing",
+                )
+            for key in ("lease_transition_digest", "blocker_digest"):
+                _add(
+                    reasons,
+                    _is_digest(recovery.get(key)),
+                    f"integration recovery {key} is invalid",
+                )
+            for key in (
+                "workspace_id",
+                "squad_id",
+                "roster_digest",
+                "issue_id",
+                "owner_id",
+                "reviewer_id",
+                "plan_revision",
+                "delivery_policy_digest",
+                "base_commit_sha",
+                "reviewed_commit_sha",
+                "dependency_digest",
+                "lease_digest",
+            ):
+                _add(
+                    reasons,
+                    recovery.get(key) == record.get(key),
+                    f"integration recovery {key} binding is stale",
+                )
     return reasons
 
 
@@ -1072,7 +1432,11 @@ def _metadata_capacity_reasons(
     root: dict[str, Any], update_keys: Any
 ) -> list[str]:
     metadata_keys = root.get("metadata_keys")
-    if not isinstance(metadata_keys, list):
+    if (
+        not isinstance(metadata_keys, list)
+        or not all(isinstance(key, str) and bool(key) for key in metadata_keys)
+        or len(metadata_keys) != len(set(metadata_keys))
+    ):
         return ["root metadata key inventory is invalid"]
     projected = set(metadata_keys)
     projected.update(str(key) for key in update_keys)
@@ -1704,6 +2068,616 @@ def final_gate_transition(snapshot: Any, action: str) -> dict[str, Any]:
     }
 
 
+LEASE_ENDPOINT_FIELDS = (
+    "workspace_lease_state",
+    "workspace_lease_owner_issue_id",
+    "workspace_lease_owner_agent_id",
+    "workspace_lease_transition_record",
+)
+LEASE_BLOCKER_FIELDS = (
+    "status",
+    "waiting_on",
+    "blocked_reason",
+    "workflow_blocked_by_incident_id",
+    "workflow_blocked_previous_status",
+)
+
+
+def _lease_endpoint_projection(endpoint: dict[str, Any]) -> dict[str, Any]:
+    return {key: endpoint.get(key, "") for key in LEASE_ENDPOINT_FIELDS}
+
+
+def _lease_projection(
+    authority: dict[str, Any], mirror: dict[str, Any]
+) -> dict[str, Any]:
+    result = {}
+    for prefix, endpoint in (("authority", authority), ("mirror", mirror)):
+        for key, value in _lease_endpoint_projection(endpoint).items():
+            result[f"{prefix}.{key}"] = value
+    for key in LEASE_BLOCKER_FIELDS:
+        result[f"mirror.{key}"] = mirror.get(key, "")
+    return result
+
+
+def _lease_apply_write(
+    projection: dict[str, Any], write: dict[str, Any]
+) -> dict[str, Any]:
+    result = dict(projection)
+    result[f"{write['endpoint']}.{write['key']}"] = write.get("value", "")
+    return result
+
+
+def _lease_record_value(plan: dict[str, Any], completed: int) -> str:
+    return encode_metadata_record({**plan, "completed": completed})
+
+
+def _lease_data_writes(plan: dict[str, Any]) -> list[dict[str, Any]]:
+    desired = plan["desired"]
+    direction = plan["direction"]
+    if direction == "release":
+        endpoint_order = ("mirror", "authority")
+        field_order = (
+            "workspace_lease_owner_agent_id",
+            "workspace_lease_owner_issue_id",
+            "workspace_lease_state",
+        )
+    else:
+        endpoint_order = ("authority", "mirror")
+        field_order = (
+            "workspace_lease_owner_issue_id",
+            "workspace_lease_owner_agent_id",
+            "workspace_lease_state",
+        )
+    return [
+        {
+            "kind": "metadata",
+            "endpoint": endpoint,
+            "issue_id": plan[f"{endpoint}_issue_id"],
+            "key": key,
+            "value": desired[key],
+        }
+        for endpoint in endpoint_order
+        for key in field_order
+    ]
+
+
+def _lease_full_writes(plan: dict[str, Any]) -> list[dict[str, Any]]:
+    writes = [
+        {
+            "kind": "metadata",
+            "endpoint": "authority",
+            "issue_id": plan["authority_issue_id"],
+            "key": "workspace_lease_transition_record",
+            "value": _lease_record_value(plan, 0),
+        },
+        {
+            "kind": "metadata",
+            "endpoint": "mirror",
+            "issue_id": plan["mirror_issue_id"],
+            "key": "workspace_lease_transition_record",
+            "value": _lease_record_value(plan, 0),
+        },
+    ]
+    for completed, write in enumerate(_lease_data_writes(plan), start=1):
+        writes.append(write)
+        for endpoint in ("authority", "mirror"):
+            writes.append(
+                {
+                    "kind": "metadata",
+                    "endpoint": endpoint,
+                    "issue_id": plan[f"{endpoint}_issue_id"],
+                    "key": "workspace_lease_transition_record",
+                    "value": _lease_record_value(plan, completed),
+                }
+            )
+    return writes
+
+
+def _lease_plan_from_record(value: Any) -> tuple[dict[str, Any], int]:
+    record = decode_metadata_record(value, "workspace_lease_transition_record")
+    if record.get("record_type") != "workspace_lease_transition":
+        raise DeliveryPolicyError("workspace_lease_transition_record has the wrong record type")
+    completed = record.get("completed")
+    if not isinstance(completed, int) or isinstance(completed, bool) or completed < 0:
+        raise DeliveryPolicyError("workspace_lease_transition_record completed is invalid")
+    plan = {key: item for key, item in record.items() if key != "completed"}
+    _validate_lease_plan(plan)
+    if completed > len(_lease_data_writes(plan)):
+        raise DeliveryPolicyError("workspace_lease_transition_record completed is out of range")
+    return plan, completed
+
+
+def _validate_lease_plan(plan: dict[str, Any]) -> None:
+    if plan.get("schema_version") != 1 or plan.get("record_type") != "workspace_lease_transition":
+        raise DeliveryPolicyError("workspace lease transition record schema is invalid")
+    for key in (
+        "workspace_id",
+        "squad_id",
+        "roster_digest",
+        "authority_issue_id",
+        "mirror_issue_id",
+        "guard_digest",
+    ):
+        if not isinstance(plan.get(key), str) or not plan.get(key):
+            raise DeliveryPolicyError(f"workspace lease transition {key} is missing")
+    if not _is_digest(plan.get("roster_digest")):
+        raise DeliveryPolicyError("workspace lease transition roster_digest is invalid")
+    if not _is_digest(plan.get("delivery_policy_digest")):
+        raise DeliveryPolicyError("workspace lease transition policy digest is invalid")
+    if not _is_digest(plan.get("guard_digest")):
+        raise DeliveryPolicyError("workspace lease transition guard digest is invalid")
+    revision = plan.get("plan_revision")
+    if not isinstance(revision, int) or isinstance(revision, bool) or revision <= 0:
+        raise DeliveryPolicyError("workspace lease transition Plan revision is invalid")
+    if plan.get("direction") not in {"release", "acquire"}:
+        raise DeliveryPolicyError("workspace lease transition direction is invalid")
+    if plan.get("authority_issue_id") == plan.get("mirror_issue_id"):
+        raise DeliveryPolicyError("workspace lease authority and mirror must be different Issues")
+    initial_authority = _require_object(
+        plan.get("initial_authority"), "workspace lease initial authority"
+    )
+    initial_mirror = _require_object(
+        plan.get("initial_mirror"), "workspace lease initial mirror"
+    )
+    desired = _require_object(plan.get("desired"), "workspace lease desired tuple")
+    for endpoint in (initial_authority, initial_mirror, desired):
+        if endpoint.get("workspace_lease_state") not in LEASE_STATES:
+            raise DeliveryPolicyError("workspace lease state is invalid")
+    if initial_authority.get("workspace_lease_transition_record") not in {None, ""}:
+        raise DeliveryPolicyError("workspace lease initial authority record must be empty")
+    if initial_mirror.get("workspace_lease_transition_record") not in {None, ""}:
+        raise DeliveryPolicyError("workspace lease initial mirror record must be empty")
+    tuple_keys = (
+        "workspace_lease_state",
+        "workspace_lease_owner_issue_id",
+        "workspace_lease_owner_agent_id",
+    )
+    authority_tuple = {key: initial_authority.get(key, "") for key in tuple_keys}
+    mirror_tuple = {key: initial_mirror.get(key, "") for key in tuple_keys}
+    desired_tuple = {key: desired.get(key, "") for key in tuple_keys}
+    if authority_tuple != mirror_tuple:
+        raise DeliveryPolicyError("workspace lease initial authority and mirror differ")
+    if plan["direction"] == "release":
+        if (
+            authority_tuple["workspace_lease_state"] != "held"
+            or not authority_tuple["workspace_lease_owner_issue_id"]
+            or not authority_tuple["workspace_lease_owner_agent_id"]
+            or desired_tuple
+            != {
+                "workspace_lease_state": "released",
+                "workspace_lease_owner_issue_id": "",
+                "workspace_lease_owner_agent_id": "",
+            }
+        ):
+            raise DeliveryPolicyError("workspace lease release tuple is invalid")
+    else:
+        if (
+            authority_tuple
+            != {
+                "workspace_lease_state": "released",
+                "workspace_lease_owner_issue_id": "",
+                "workspace_lease_owner_agent_id": "",
+            }
+            or desired_tuple["workspace_lease_state"] != "held"
+            or not desired_tuple["workspace_lease_owner_issue_id"]
+            or not desired_tuple["workspace_lease_owner_agent_id"]
+        ):
+            raise DeliveryPolicyError("workspace lease acquire tuple is invalid")
+    blocker = _require_object(plan.get("mirror_blocker"), "workspace lease mirror blocker")
+    if digest(blocker) != plan.get("mirror_blocker_digest"):
+        raise DeliveryPolicyError("workspace lease mirror blocker digest is invalid")
+    other_leases = plan.get("other_leases")
+    if not isinstance(other_leases, list):
+        raise DeliveryPolicyError("workspace lease other lease inventory is invalid")
+    if digest(other_leases) != plan.get("other_leases_digest"):
+        raise DeliveryPolicyError("workspace lease other lease inventory digest is invalid")
+    if plan["direction"] == "release" and other_leases:
+        raise DeliveryPolicyError("workspace lease release record must not bind other leases")
+    if plan["direction"] == "acquire" and not _other_leases_released(other_leases):
+        raise DeliveryPolicyError("workspace lease acquire inventory is not fully released")
+
+
+def _released_endpoint(endpoint: Any) -> bool:
+    return (
+        isinstance(endpoint, dict)
+        and endpoint.get("workspace_lease_state") == "released"
+        and endpoint.get("workspace_lease_owner_issue_id") in {None, ""}
+        and endpoint.get("workspace_lease_owner_agent_id") in {None, ""}
+    )
+
+
+def _normalize_other_leases(data: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = data.get("other_leases")
+    if raw is None and data.get("other_lease") is not None:
+        raw = [data.get("other_lease")]
+    if raw is None:
+        raw = []
+    if not isinstance(raw, list):
+        raise DeliveryPolicyError("other Requirement lease inventory must be a list")
+    normalized = []
+    requirement_ids = set()
+    endpoint_ids = set()
+    for item in raw:
+        lease = _require_object(item, "other Requirement lease")
+        requirement_id = lease.get("requirement_id")
+        if not isinstance(requirement_id, str) or not requirement_id:
+            raise DeliveryPolicyError("other Requirement lease requirement_id is missing")
+        if requirement_id in requirement_ids:
+            raise DeliveryPolicyError("other Requirement lease inventory has duplicates")
+        requirement_ids.add(requirement_id)
+        normalized_item = {"requirement_id": requirement_id}
+        for endpoint_name in ("authority", "mirror"):
+            endpoint = _require_object(
+                lease.get(endpoint_name), f"other Requirement {endpoint_name} lease"
+            )
+            issue_id = endpoint.get("issue_id")
+            if not isinstance(issue_id, str) or not issue_id:
+                raise DeliveryPolicyError(
+                    f"other Requirement {endpoint_name} lease issue_id is missing"
+                )
+            if issue_id in endpoint_ids:
+                raise DeliveryPolicyError(
+                    "other Requirement lease inventory reuses an endpoint"
+                )
+            endpoint_ids.add(issue_id)
+            normalized_item[endpoint_name] = {
+                "issue_id": issue_id,
+                "workspace_lease_state": endpoint.get("workspace_lease_state"),
+                "workspace_lease_owner_issue_id": endpoint.get(
+                    "workspace_lease_owner_issue_id", ""
+                ),
+                "workspace_lease_owner_agent_id": endpoint.get(
+                    "workspace_lease_owner_agent_id", ""
+                ),
+            }
+        normalized.append(normalized_item)
+    normalized.sort(key=canonical_json)
+    return normalized
+
+
+def _other_leases_released(other_leases: list[dict[str, Any]]) -> bool:
+    return all(
+        _released_endpoint(item.get("authority"))
+        and _released_endpoint(item.get("mirror"))
+        for item in other_leases
+    )
+
+
+def lease_transition_preflight(snapshot: Any) -> dict[str, Any]:
+    data = _require_object(snapshot, "lease transition snapshot")
+    context = _require_object(data.get("context"), "lease transition context")
+    plan_binding = _require_object(data.get("plan"), "lease transition Plan binding")
+    guard = _require_object(data.get("guard"), "lease transition guard")
+    authority = _require_object(data.get("authority"), "lease authority")
+    mirror = _require_object(data.get("mirror"), "lease mirror")
+    reasons: list[str] = []
+    for key in ("workspace_id", "squad_id", "roster_digest"):
+        _add(
+            reasons,
+            isinstance(context.get(key), str) and bool(context.get(key)),
+            f"lease context {key} is missing",
+        )
+    _add(
+        reasons,
+        isinstance(plan_binding.get("plan_revision"), int)
+        and not isinstance(plan_binding.get("plan_revision"), bool)
+        and plan_binding.get("plan_revision") > 0,
+        "lease plan_revision must be a positive integer",
+    )
+    _add(
+        reasons,
+        _is_digest(plan_binding.get("delivery_policy_digest")),
+        "lease delivery_policy_digest is invalid",
+    )
+    _add(reasons, guard.get("valid") is True, "workspace guard is not valid")
+    _add(reasons, guard.get("clean") is True, "workspace guard is not clean")
+    _add(
+        reasons,
+        guard.get("branch") == guard.get("expected_branch")
+        and isinstance(guard.get("branch"), str)
+        and bool(guard.get("branch")),
+        "workspace guard branch drifted",
+    )
+    _add(
+        reasons,
+        guard.get("head") == guard.get("expected_head")
+        and _is_sha(guard.get("head")),
+        "workspace guard head drifted",
+    )
+    _add(
+        reasons,
+        guard.get("unfinished_operations") in (None, []),
+        "workspace has an unfinished Git operation",
+    )
+    for label, endpoint in (("authority", authority), ("mirror", mirror)):
+        _add(
+            reasons,
+            isinstance(endpoint.get("issue_id"), str) and bool(endpoint.get("issue_id")),
+            f"lease {label} issue_id is missing",
+        )
+        _add(
+            reasons,
+            endpoint.get("workspace_lease_scope") == "requirement",
+            f"lease {label} scope must be requirement",
+        )
+    if reasons:
+        return {
+            "allowed": False,
+            "outcome": "rejected",
+            "reasons": reasons,
+            "writes": [],
+            "complete": False,
+            "blocker_writes": [],
+            "status_writes": [],
+        }
+
+    authority_record = authority.get("workspace_lease_transition_record")
+    mirror_record = mirror.get("workspace_lease_transition_record")
+    records = [
+        value
+        for value in (authority_record, mirror_record)
+        if value not in {None, ""}
+    ]
+    superseded_complete_records = False
+    if records:
+        decoded_records = [_lease_plan_from_record(value) for value in records]
+        plan = decoded_records[0][0]
+        if any(item[0] != plan for item in decoded_records[1:]):
+            raise DeliveryPolicyError("authority and mirror lease transition records conflict")
+        all_terminal = (
+            len(records) == 2
+            and all(
+                completed == len(_lease_data_writes(decoded_plan))
+                for decoded_plan, completed in decoded_records
+            )
+        )
+        requested_desired = data.get("desired")
+        normalized_desired = None
+        if requested_desired is not None:
+            desired = _require_object(requested_desired, "desired lease tuple")
+            normalized_desired = {
+                "workspace_lease_state": desired.get("workspace_lease_state"),
+                "workspace_lease_owner_issue_id": desired.get(
+                    "workspace_lease_owner_issue_id", ""
+                ),
+                "workspace_lease_owner_agent_id": desired.get(
+                    "workspace_lease_owner_agent_id", ""
+                ),
+            }
+            if not all_terminal and normalized_desired != plan.get("desired"):
+                raise DeliveryPolicyError("desired lease tuple conflicts with the transition record")
+        current_authority_tuple = {
+            key: authority.get(key, "")
+            for key in (
+                "workspace_lease_state",
+                "workspace_lease_owner_issue_id",
+                "workspace_lease_owner_agent_id",
+            )
+        }
+        current_mirror_tuple = {
+            key: mirror.get(key, "")
+            for key in (
+                "workspace_lease_state",
+                "workspace_lease_owner_issue_id",
+                "workspace_lease_owner_agent_id",
+            )
+        }
+        if (
+            all_terminal
+            and current_authority_tuple == plan.get("desired")
+            and current_mirror_tuple == plan.get("desired")
+            and (
+                normalized_desired is None
+                or normalized_desired == plan.get("desired")
+            )
+        ):
+            return {
+                "allowed": True,
+                "outcome": "complete",
+                "reasons": [],
+                "record": authority_record,
+                "progress": len(_lease_full_writes(plan)),
+                "total_writes": len(_lease_full_writes(plan)),
+                "writes": [],
+                "complete": True,
+                "direction": plan["direction"],
+                "blocker_writes": [],
+                "status_writes": [],
+                "next_requirement_acquire_allowed": plan["direction"] == "release",
+            }
+        if all_terminal:
+            superseded_complete_records = True
+    if not records or superseded_complete_records:
+        desired = _require_object(data.get("desired"), "desired lease tuple")
+        initial_authority = _lease_endpoint_projection(authority)
+        initial_mirror = _lease_endpoint_projection(mirror)
+        initial_authority["workspace_lease_transition_record"] = ""
+        initial_mirror["workspace_lease_transition_record"] = ""
+        current_tuple = {
+            key: initial_authority[key]
+            for key in (
+                "workspace_lease_state",
+                "workspace_lease_owner_issue_id",
+                "workspace_lease_owner_agent_id",
+            )
+        }
+        mirror_tuple = {
+            key: initial_mirror[key]
+            for key in (
+                "workspace_lease_state",
+                "workspace_lease_owner_issue_id",
+                "workspace_lease_owner_agent_id",
+            )
+        }
+        if current_tuple != mirror_tuple:
+            raise DeliveryPolicyError("lease authority and mirror are inconsistent before transition")
+        desired_tuple = {
+            "workspace_lease_state": desired.get("workspace_lease_state"),
+            "workspace_lease_owner_issue_id": desired.get(
+                "workspace_lease_owner_issue_id", ""
+            ),
+            "workspace_lease_owner_agent_id": desired.get(
+                "workspace_lease_owner_agent_id", ""
+            ),
+        }
+        if current_tuple["workspace_lease_state"] == "held" and desired_tuple["workspace_lease_state"] == "released":
+            direction = "release"
+        elif current_tuple["workspace_lease_state"] == "released" and desired_tuple["workspace_lease_state"] == "held":
+            direction = "acquire"
+        else:
+            raise DeliveryPolicyError("lease transition must be held-to-released or released-to-held")
+        if direction == "release":
+            if (
+                desired_tuple["workspace_lease_owner_issue_id"] not in {None, ""}
+                or desired_tuple["workspace_lease_owner_agent_id"] not in {None, ""}
+            ):
+                raise DeliveryPolicyError("released lease tuple must clear both owner IDs")
+        else:
+            if (
+                not isinstance(desired_tuple["workspace_lease_owner_issue_id"], str)
+                or not desired_tuple["workspace_lease_owner_issue_id"]
+                or not isinstance(desired_tuple["workspace_lease_owner_agent_id"], str)
+                or not desired_tuple["workspace_lease_owner_agent_id"]
+            ):
+                raise DeliveryPolicyError("held lease tuple requires both owner IDs")
+            if context.get("lease_inventory_complete") is not True:
+                raise DeliveryPolicyError(
+                    "acquisition requires a complete other Requirement lease inventory"
+                )
+            other_leases = _normalize_other_leases(data)
+            if not _other_leases_released(other_leases):
+                raise DeliveryPolicyError(
+                    "another Requirement is not fully released; acquisition would create double ownership"
+                )
+        if direction == "release":
+            other_leases = []
+        blocker = {key: mirror.get(key, "") for key in LEASE_BLOCKER_FIELDS}
+        plan = {
+            "schema_version": 1,
+            "record_type": "workspace_lease_transition",
+            "workspace_id": context["workspace_id"],
+            "squad_id": context["squad_id"],
+            "roster_digest": context["roster_digest"],
+            "plan_revision": plan_binding["plan_revision"],
+            "delivery_policy_digest": plan_binding["delivery_policy_digest"],
+            "guard_digest": digest(guard),
+            "authority_issue_id": authority["issue_id"],
+            "mirror_issue_id": mirror["issue_id"],
+            "direction": direction,
+            "initial_authority": initial_authority,
+            "initial_mirror": initial_mirror,
+            "desired": desired_tuple,
+            "mirror_blocker": blocker,
+            "mirror_blocker_digest": digest(blocker),
+            "other_leases": other_leases,
+            "other_leases_digest": digest(other_leases),
+        }
+
+    _validate_lease_plan(plan)
+    if plan.get("workspace_id") != context.get("workspace_id"):
+        raise DeliveryPolicyError("lease transition workspace binding drifted")
+    if plan.get("squad_id") != context.get("squad_id"):
+        raise DeliveryPolicyError("lease transition Squad binding drifted")
+    if plan.get("roster_digest") != context.get("roster_digest"):
+        raise DeliveryPolicyError("lease transition roster binding drifted")
+    if plan.get("plan_revision") != plan_binding.get("plan_revision"):
+        raise DeliveryPolicyError("lease transition Plan revision drifted")
+    if plan.get("delivery_policy_digest") != plan_binding.get("delivery_policy_digest"):
+        raise DeliveryPolicyError("lease transition policy digest drifted")
+    if plan["direction"] == "acquire" and context.get("lease_inventory_complete") is not True:
+        raise DeliveryPolicyError(
+            "acquisition requires a complete other Requirement lease inventory"
+        )
+    if plan.get("guard_digest") != digest(guard):
+        raise DeliveryPolicyError("lease transition workspace guard drifted")
+    if plan.get("authority_issue_id") != authority.get("issue_id") or plan.get(
+        "mirror_issue_id"
+    ) != mirror.get("issue_id"):
+        raise DeliveryPolicyError("lease transition endpoint binding drifted")
+    current_blocker = {key: mirror.get(key, "") for key in LEASE_BLOCKER_FIELDS}
+    if digest(current_blocker) != plan.get("mirror_blocker_digest"):
+        raise DeliveryPolicyError("lease transition must not change the mirror Incident blocker")
+    current_other_leases = _normalize_other_leases(data) if plan["direction"] == "acquire" else []
+    if current_other_leases != plan.get("other_leases"):
+        raise DeliveryPolicyError("other Requirement lease inventory drifted")
+    if plan["direction"] == "acquire" and not _other_leases_released(
+        current_other_leases
+    ):
+        raise DeliveryPolicyError(
+            "another Requirement acquired during lease transition"
+        )
+    current_endpoint_ids = {authority.get("issue_id"), mirror.get("issue_id")}
+    if any(
+        endpoint.get("issue_id") in current_endpoint_ids
+        for item in current_other_leases
+        for endpoint in (item["authority"], item["mirror"])
+    ):
+        raise DeliveryPolicyError(
+            "other Requirement lease inventory includes the current endpoints"
+        )
+
+    update_keys = [*LEASE_ENDPOINT_FIELDS]
+    capacity_reasons = []
+    capacity_reasons.extend(
+        _metadata_capacity_reasons(authority, update_keys)
+    )
+    capacity_reasons.extend(
+        _metadata_capacity_reasons(mirror, update_keys)
+    )
+    if capacity_reasons:
+        return {
+            "allowed": False,
+            "outcome": "rejected",
+            "reasons": capacity_reasons,
+            "writes": [],
+            "complete": False,
+            "blocker_writes": [],
+            "status_writes": [],
+        }
+
+    full_writes = _lease_full_writes(plan)
+    expected = {}
+    for prefix, initial_key in (
+        ("authority", "initial_authority"),
+        ("mirror", "initial_mirror"),
+    ):
+        for key, value in plan[initial_key].items():
+            expected[f"{prefix}.{key}"] = value
+    for key, value in plan["mirror_blocker"].items():
+        expected[f"mirror.{key}"] = value
+    current = _lease_projection(authority, mirror)
+    if superseded_complete_records:
+        current["authority.workspace_lease_transition_record"] = ""
+        current["mirror.workspace_lease_transition_record"] = ""
+    matching_prefixes = []
+    if expected == current:
+        matching_prefixes.append(0)
+    for index, write in enumerate(full_writes, start=1):
+        expected = _lease_apply_write(expected, write)
+        if expected == current:
+            matching_prefixes.append(index)
+    if not matching_prefixes:
+        raise DeliveryPolicyError("lease transition state is not a valid retry prefix")
+    progress = max(matching_prefixes)
+    remaining = full_writes[progress:]
+    return {
+        "allowed": True,
+        "outcome": "complete" if not remaining else "resume_required",
+        "reasons": [],
+        "record": _lease_record_value(plan, len(_lease_data_writes(plan))),
+        "progress": progress,
+        "total_writes": len(full_writes),
+        "writes": remaining,
+        "complete": not remaining,
+        "direction": plan["direction"],
+        "blocker_writes": [],
+        "status_writes": [],
+        "next_requirement_acquire_allowed": (
+            plan["direction"] == "release" and not remaining
+        ),
+    }
+
+
 def git_operation_markers(root: Path) -> list[str]:
     markers = [
         "MERGE_HEAD",
@@ -1804,6 +2778,9 @@ def parser() -> argparse.ArgumentParser:
     final_gate = subparsers.add_parser("final-gate")
     final_gate.add_argument("--action", required=True, choices=FINAL_ACTIONS)
     final_gate.add_argument("--snapshot", required=True)
+
+    lease = subparsers.add_parser("lease-transition")
+    lease.add_argument("--snapshot", required=True)
     return result
 
 
@@ -1844,6 +2821,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "final-gate":
             snapshot = json.loads(Path(args.snapshot).read_text(encoding="utf-8"))
             result = final_gate_transition(snapshot, args.action)
+            print_json(result)
+            return 0 if result["allowed"] else 1
+        if args.command == "lease-transition":
+            snapshot = json.loads(Path(args.snapshot).read_text(encoding="utf-8"))
+            result = lease_transition_preflight(snapshot)
             print_json(result)
             return 0 if result["allowed"] else 1
     except (DeliveryPolicyError, OSError, json.JSONDecodeError) as exc:

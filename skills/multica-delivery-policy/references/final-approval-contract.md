@@ -21,6 +21,8 @@ Leader opens the gate on the top-level Requirement with these metadata fields:
 
 Opening requires Plan `done`, Implementation `done`, integration validation `done`, a satisfied dependency contract, current Review evidence, and an active root. The validator atomically returns the gate metadata and an `in_review` status write when needed. A changed revision, reviewed head, target/default baseline, or policy digest invalidates the tuple and requires fresh integration validation, Review, and a newly opened gate.
 
+Every `open`, `approve`, `delivery`, `handoff`, and `converge` action also receives a declared-complete current integration roster and decodes the current `integration_review_role_record` and optional recovery record. It recomputes the roster digest and requires exactly one active, non-archived Integrator and Code Reviewer, distinct owner and reviewer, assignee equal to owner, current Plan/policy/base/reviewed SHA, dependency and lease digests, Review author, recomputable review binding/epoch, handoff comment, trigger run, accepted trigger outcome, and a Review timestamp later than handoff. Identity or freshness failure rejects the action with no approval, delivery, handoff, status, or final-gate writes.
+
 ## Approval target and acceptance
 
 `APPROVE REQUIREMENT vN` is valid only when posted on the top-level Requirement by the configured human approver and the current gate tuple is open. An approval on Plan, Implementation, integration-validation, or another descendant is rejected. An approval before the gate opens is rejected. Rejected approval must not write any `approval_*`, `approved_requirement_head_sha`, or gate-state metadata.
@@ -64,7 +66,7 @@ Exit `0` means the transition is allowed, exit `1` means the evidence was reject
 The normalized snapshot contains:
 
 - `actor_role`: `leader` for open/converge and `integrator` for approve/delivery/handoff;
-- `root`: root identity and status; fresh `metadata_keys`; Plan/Implementation/integration-validation status; independent integration Review, tests, acceptance, blocker, dependency, and policy results; approver; revision; policy digest; reviewed head; default/target branch and baseline; PR/remote/direct-push capabilities; current gate and approval metadata plus optional `delivery_evidence_record` and `delivery_handoff_record` strings;
+- `root`: root identity and status; fresh `metadata_keys`; Plan/Implementation/integration-validation status; complete current integration roster and its derived role/evidence fields; independent integration Review, tests, acceptance, blocker, dependency, and policy results; approver; revision; policy digest; reviewed head; default/target branch and baseline; PR/remote/direct-push capabilities; current gate and approval metadata plus optional `delivery_evidence_record` and `delivery_handoff_record` strings;
 - `event` for approve: root issue ID, member author type/ID, comment ID, parsed `APPROVE REQUIREMENT vN` command, and revision;
 - `delivery` for delivery/converge or duplicate recovery: state, mode, revision, digest, reviewed/current head, verified default/target baselines, merge parents, reviewed/merged tree, merge method/commit, local target SHA, and the mode-specific PR URL/number/checks/merge or remote/auth/push evidence;
 - `handoff` for handoff: root issue ID, comment ID, mentioned role, and normalized `trigger_outcomes` entries with recipient role and status. The current normalized `delivery` object is also required so the recorded delivery record can be compared before handoff.

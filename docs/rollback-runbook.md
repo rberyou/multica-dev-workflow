@@ -12,3 +12,5 @@ A rollback is another workspace deployment from a selected clean checkout.
 Do not reset or rewrite workspace Incident history. Do not reuse a Plan generated from a different checkout or observed workspace state.
 
 If an Apply command fails after changing part of the workspace, retain its journal and generate a fresh Plan. The fresh Plan must describe only the remaining mutations; review and approve its new digest before retrying.
+
+After rollback, do not reuse integration Review or recovery evidence merely because Issue status is unchanged. Recompute the active roster, policy digest, base/reviewed SHA, dependency and lease bindings, publish a fresh UUID-routed Review handoff with a confirmed trigger outcome, and obtain a new Review epoch. Resume any partial lease or Incident transition only from its exact checkpoint; rollback never authorizes clearing an Incident blocker or rewriting a completed transition record by hand.

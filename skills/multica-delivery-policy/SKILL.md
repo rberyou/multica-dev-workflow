@@ -4,7 +4,7 @@ description: Resolve and validate project delivery policy plus protocol-v4 final
 metadata:
   managed_by: multica-dev-workflow
   workflow_id: development-delivery
-  version: 2.0.0-dev.6
+  version: 2.0.0-dev.7
 ---
 
 # Multica Delivery Policy
@@ -44,6 +44,14 @@ python <this-skill>/scripts/delivery_policy.py guard-workspace \
 ```
 
 The command blocks dirty workspaces, detached HEAD, unfinished Git operations, unexpected branches, and unexpected commits. Never repair a failed guard with stash, reset, clean, force checkout, or by committing unknown changes.
+
+For a requirement-scope lightweight or branch-only lease, normalize the authority, active-child mirror, declared-complete inventory of other Requirement leases, current roster/Plan, and fresh guard result, then run:
+
+```text
+python <this-skill>/scripts/delivery_policy.py lease-transition --snapshot <file>
+```
+
+This is a deterministic zero-write preflight. Apply only its ordered lease-namespace writes. It never returns Issue status or blocker writes.
 
 ## Validate Final Approval and Delivery
 

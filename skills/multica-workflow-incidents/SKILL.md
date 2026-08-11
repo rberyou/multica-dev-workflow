@@ -4,7 +4,7 @@ description: Bind development workflow Issues to protocol v4 and persist workflo
 metadata:
   managed_by: multica-dev-workflow
   workflow_id: development-delivery
-  version: 2.0.0-dev.6
+  version: 2.0.0-dev.7
 ---
 
 # Multica Workflow Incidents
@@ -63,3 +63,4 @@ A failed check keeps the Incident open. Never copy credentials, cookies, private
 When operating from the workflow repository, the equivalent host wrappers are `workflow.py bind-workflow-issue`, `report-incident`, `link-incident-fix`, and `close-incident`. Managed Agents should use this Skill's direct script commands shown above because product repositories do not contain `scripts/workflow.py`.
 
 Read [incident-contract.md](references/incident-contract.md) when validating exact metadata, deduplication, blocking, or closure behavior.
+Read [integration-review-contract.md](references/integration-review-contract.md) before preparing, starting, handing off, approving, or recovering integration Review, or before preparing/resuming an Incident blocker transition. The `integration-review` and `incident-transition` commands are deterministic zero-write preflights; they return writes but never apply them.

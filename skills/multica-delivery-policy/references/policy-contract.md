@@ -47,6 +47,14 @@ All modes keep a Requirement branch and one branch per development or Revert Tas
 
 The Integrator owns scheduling and maintains `workspace_lease_scope`, `workspace_lease_owner_issue_id`, `workspace_lease_owner_agent_id`, and `workspace_lease_state`. A non-isolated lease is handed from Developer to Code Reviewer to Integrator, never shared. Release it only after the current checkout is clean and at its recorded branch/head. Ambiguous or abandoned leases block until the Integrator validates the checkout and explicitly recovers the lease.
 
+`workspace_lease_state` is only `held` or `released`. The Implementation Issue is the requirement-scope authority and the active development or integration Issue is its mirror. Both tuples and their `workspace_lease_transition_record` must be treated as one state machine. Acquisition requires a declared-complete inventory of every other Requirement authority/mirror pair, all fully released.
+
+Run `lease-transition --snapshot <file>` after a fresh workspace guard. The zero-write validator binds Workspace, Squad, roster digest, Plan revision, policy digest, guard branch/head, both endpoint IDs, initial/desired tuples, and the mirror's current blocker. Release clears the mirror owners and marks it released before doing the same to the authority; acquire establishes the authority owner/state before the mirror. Every data write is followed by authority and mirror record checkpoints. A retry accepts only an exact prefix, replays the last idempotent write when necessary, and never returns status, `waiting_on`, `blocked_reason`, or Incident-owner writes.
+
+While an Incident owns the active-child blocker, lease transition may change only `workspace_lease_state`, its two owner IDs, and `workspace_lease_transition_record`. Any blocker drift rejects the retry. No next Requirement may acquire until both release endpoints and all checkpoints are complete.
+
+Acquire records bind the normalized other-Requirement inventory and recheck it on every retry; an inventory omission, newly held endpoint, or digest drift blocks before another lease write. A pair of completed endpoint records is idempotent terminal evidence. It may be overwritten only by the next valid held-to-released or released-to-held transition, so checkpoint retention never deadlocks later handoffs.
+
 For `branch_only`, the Planner and Plan Reviewer also run `guard-workspace` against the existing checkout before Plan approval and record its branch/head. The same guard is repeated before every later handoff. A dirty or unexpected checkout blocks; it is never repaired automatically.
 
 ## Plan Freeze

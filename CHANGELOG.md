@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 2.0.0-dev.7
+
+- Enforce one active Integrator and one independent Code Reviewer for integration validation while preserving the Integrator as assignee and original owner.
+- Add zero-write integration Review prepare/start/handoff/approve/recover validation with confirmed trigger outcomes, bounded retry history, recovery-bound Review epochs, and stale-comment rejection.
+- Add retryable Incident blocker and workspace lease state machines that preserve successor blockers, isolate lease writes, recover every partial-write prefix, and retain completed checkpoints without deadlocking later transitions.
+- Revalidate integration roster, role/recovery evidence, handoff/run identity, timestamps, dependency/lease bindings, and metadata capacity at every final approval action.
+
 ## 2.0.0-dev.6
 
 - Add auditable Delivery Policy Resolver provenance, a stable versioned semantic digest schema, and full snapshot integrity digests.
