@@ -4,7 +4,7 @@ description: Check packaged workflow validity and current Multica drift through 
 metadata:
   managed_by: multica-dev-workflow
   workflow_id: development-delivery
-  version: 2.0.0-dev.6
+  version: 2.0.0-dev.7
 ---
 
 # Multica Workflow Console
