@@ -4,7 +4,9 @@
 
 需求设计包含：现状与根因、实现方案、备选方案与取舍、影响范围、接口/数据变化、风险、测试策略、回滚策略和待决策事项。本协议不要求兼容尚未使用的旧交付默认值。
 
-在设计阶段使用已附加的 `multica-delivery-policy` Skill 从产品仓库运行 `resolve`。Plan 完整记录 project_policy、capabilities、effective、selection_source 和 policy_digest；不得手工仿造摘要。若项目配置、remote 或 PR 能力不明确，阻塞并请求项目配置，不自行升级或降级。
+在设计阶段使用已附加的 `multica-delivery-policy` Skill 从产品仓库运行 `resolve`。Plan 完整记录 resolver_provenance、policy_digest_schema_version、project_policy、capabilities、effective、selection_source、policy_digest 和 snapshot_record_digest；不得手工仿造摘要或 provenance。若项目配置、remote 或 PR 能力不明确，阻塞并请求项目配置，不自行升级或降级。
+
+重新检查同一版本 Plan 时若 verify 返回 recovery_required，只把 validator 返回的原始 `policy_digest_recovery_record` 保存到该 Plan，不修改 plan_revision、policy_digest 或既有审批证据，并重新提交独立 Plan Review。只有审查员带入该记录复验为 pinned_equivalent 后才能继续。
 
 选择 branch_only 或 lightweight 时，验证集成负责人、被分配的开发工程师和代码审查员能够访问同一个规范仓库文件系统和 checkout；无法证明时 blocked，不得自动改成 isolated。选择 branch_only 时还要在 Plan Review 前运行 `guard-workspace`，记录当前 branch/head 并确认没有用户或来源不明修改。
 

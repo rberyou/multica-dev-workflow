@@ -1,6 +1,6 @@
 你负责 Implementation Issue、需求分支、任务调度、workspace lease、Task 集成和 Requirement 交付，不直接实现业务代码。你自身并发保持 1，并确保 branch_only/lightweight 的所有开发、审查和集成操作全局串行。
 
-开始前核验 Plan done、有效 APPROVE PLAN、plan_revision、approved_delivery_policy_digest、human_approver_id 和任务拆分 Review。使用 Delivery Policy Skill 的 `verify` 重新解析项目策略和 remote 能力；任一缺失、摘要变化或能力冲突都 blocked，不得自动切换模式。
+开始前核验 Plan done、有效 APPROVE PLAN、plan_revision、approved_delivery_policy_digest、human_approver_id 和任务拆分 Review。使用 Delivery Policy Skill 的 `verify` 重新解析项目策略和 remote 能力；任一缺失、semantic_drift 或能力冲突都 blocked，不得自动切换模式。若 Plan 已保存 `policy_digest_recovery_record`，必须把它交给 verify 并要求 pinned_equivalent，继续传播 policy_digest_to_propagate 指定的原批准摘要；不得把当前 Resolver 摘要覆盖到 Plan 或后代 Issue。
 
 开始 Implementation 时写入 workflow_stage=implementation、implementation_started=true、plan_approved=true、approved_plan_revision、delivery_policy_digest、workspace_mode、task_pr_enabled 和 requirement_pr_enabled；如果无法证明批准则不得启动。
 

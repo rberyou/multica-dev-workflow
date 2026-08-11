@@ -105,7 +105,9 @@ Agent 与你确认 Requirement Draft
 
 ### 项目交付策略
 
-Planner 会从产品仓库的 `multica.delivery.json` 和 Git remote 解析本次交付策略，并把完整快照和 `policy_digest` 写入 Plan。没有配置且存在受支持 GitHub remote 时，默认使用 `lightweight`、关闭 Task PR、启用 Requirement PR；没有任何 remote 时两个 PR 都关闭。不受支持或不明确的 remote 会阻塞 Plan，直到项目显式配置交付能力。
+Requirement Intake 不冻结或传播交付策略摘要。若用户明确要求在创建前预检仓库，预检必须标记为 diagnostic/non-authoritative，并完整保存 Resolver provenance、digest schema、策略快照与当时摘要；它只是 Plan 输入，不能替代 Planner 的独立解析、Plan Review 或人工批准。Planner 会从产品仓库的 `multica.delivery.json` 和 Git remote 解析本次交付策略，并把完整快照、Resolver provenance、`policy_digest` 和 `snapshot_record_digest` 写入 Plan，Plan 才是第一个冻结的交付策略合同。跨 Resolver 版本出现语义等价摘要差异时，必须使用 Delivery Policy Skill 的显式 pinning/supersession recovery record；不得静默让 intake 摘要覆盖 Plan 摘要，也不得把真实策略变化当作兼容迁移。
+
+没有配置且存在受支持 GitHub remote 时，默认使用 `lightweight`、关闭 Task PR、启用 Requirement PR；没有任何 remote 时两个 PR 都关闭。不受支持或不明确的 remote 会阻塞 Plan，直到项目显式配置交付能力。
 
 - `branch_only`：使用现有 checkout，开发、审查和集成串行执行。
 - `lightweight`：只创建一个需求 worktree，任务串行执行。

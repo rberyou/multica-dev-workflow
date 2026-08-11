@@ -19,6 +19,7 @@ Use this Skill as the portable entry point between the user and a Multica develo
 - Create safely in `backlog`, verify content and canonical identity, bind and verify protocol-v4 metadata through `multica-workflow-incidents`, then move to `todo` only when the confirmed mode requires starting.
 - Assign the top-level Requirement to the resolved Squad, never directly to its leader or another Agent.
 - Keep the Requirement solution-neutral. Preserve user-supplied constraints and hypotheses as Plan inputs, not approved design.
+- Do not freeze or propagate a delivery-policy digest during Requirement intake. If a user explicitly requests a repository precheck, label it diagnostic and non-authoritative, preserve the complete Resolver snapshot and provenance, and leave the Planner's independently reviewed Plan snapshot as the first frozen policy contract.
 - Never set, cache, copy, guess, or request `human_approver_id`. The squad leader resolves the unique roster member whose role is `人工审批人`.
 - After starting a Requirement, keep following its complete Issue chain until terminal state or the user explicitly stops tracking.
 - Never infer approval. Validate the current gate, revision, independent review, authenticated human identity, and approver roster before posting an authorized approval or decision.

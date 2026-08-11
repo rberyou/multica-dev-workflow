@@ -31,7 +31,7 @@ Write the approved snapshot to a temporary UTF-8 JSON file and run:
 python <this-skill>/scripts/delivery_policy.py verify --repo <repo> --snapshot <file>
 ```
 
-Any project-policy, selected-remote, provider, capability, or effective-selection change makes the snapshot stale. Stop and return to Plan Review; do not upgrade or downgrade the mode.
+An exact match continues with the frozen digest. A compatible cross-version digest change first returns `recovery_required`; persist the returned scalar `policy_digest_recovery_record`, obtain independent recovery Review, and rerun with `--recovery-record <file>`. Never replace the approved digest. A real project-policy, selected-remote, provider, semantic-capability, or effective-selection change returns `requires_plan_revision=true`; stop and return to Plan Review.
 
 ## Guard a Checkout
 
@@ -59,3 +59,4 @@ Apply only the returned metadata and status writes. A rejected transition writes
 Every final-gate snapshot includes the root's fresh `metadata_keys` inventory so projected writes can be rejected before exceeding Multica's 50-key limit. Delivery and handoff return versioned scalar `delivery_evidence_record` and `delivery_handoff_record` values. Store each returned string exactly as one metadata key; never expand or manually encode the record.
 
 Read [policy-contract.md](references/policy-contract.md) for configuration, remote capability, selection, and workspace lease rules. Read [evidence-contract.md](references/evidence-contract.md) before Review or merge evidence. Read [final-approval-contract.md](references/final-approval-contract.md) before opening or processing final approval, delivery handoff, recovery, or Requirement convergence.
+Read [resolver-contract.md](references/resolver-contract.md) before validating Resolver provenance, digest schemas, cross-version pinning, migration, rollback, or supersession evidence.

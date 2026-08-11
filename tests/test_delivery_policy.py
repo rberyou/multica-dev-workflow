@@ -3,6 +3,7 @@ import importlib.util
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -202,6 +203,31 @@ def create_repo(parent: Path, remote: str | None = None) -> Path:
     if remote:
         run_git(repo, "remote", "add", "origin", remote)
     return repo
+
+
+def legacy_policy_snapshot(snapshot: dict) -> dict:
+    legacy = {
+        key: copy.deepcopy(snapshot[key])
+        for key in (
+            "workflow_id",
+            "policy_source",
+            "policy_file",
+            "project_policy",
+            "capabilities",
+            "effective",
+            "selection_source",
+        )
+    }
+    legacy["schema_version"] = 1
+    legacy["capabilities"].pop("direct_target_push", None)
+    legacy["policy_digest"] = delivery_policy.legacy_policy_digest(legacy)
+    return legacy
+
+
+def refresh_snapshot_record(snapshot: dict) -> None:
+    snapshot["snapshot_record_digest"] = delivery_policy.snapshot_record_digest(
+        snapshot
+    )
 
 
 class DeliveryPolicyTests(unittest.TestCase):
@@ -408,6 +434,243 @@ class DeliveryPolicyTests(unittest.TestCase):
                 "git@github.com:example/other.git",
             )
             self.assertFalse(delivery_policy.verify_snapshot(repo, snapshot)["valid"])
+
+    def test_versioned_policy_digest_is_stable_for_same_resolver_and_state(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = create_repo(Path(temp), "https://github.com/example/project.git")
+            first = delivery_policy.resolve_policy(repo)
+            second = delivery_policy.resolve_policy(repo)
+            verified = delivery_policy.verify_snapshot(repo, first)
+        self.assertEqual(first["schema_version"], 2)
+        self.assertEqual(first["policy_digest_schema_version"], 2)
+        self.assertEqual(first["policy_digest"], second["policy_digest"])
+        self.assertEqual(
+            first["resolver_provenance"], second["resolver_provenance"]
+        )
+        self.assertEqual(
+            first["snapshot_record_digest"], second["snapshot_record_digest"]
+        )
+        self.assertTrue(verified["valid"])
+        self.assertEqual(verified["verification_outcome"], "exact_match")
+
+    def test_direct_target_alias_upgrade_requires_audited_digest_supersession(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = create_repo(Path(temp), "https://github.com/example/project.git")
+            policy = {
+                "schema_version": 1,
+                "workflow_id": "development-delivery",
+                "requirement_pr": {"constraint": "forbidden", "default": False},
+                "remote": {"allow_direct_default_push": True},
+            }
+            (repo / "multica.delivery.json").write_text(
+                json.dumps(policy), encoding="utf-8"
+            )
+            current = delivery_policy.resolve_policy(repo)
+            frozen = legacy_policy_snapshot(current)
+            legacy_current_digest = delivery_policy.legacy_policy_digest(current)
+
+            proposed = delivery_policy.verify_snapshot(repo, frozen)
+            self.assertFalse(proposed["valid"])
+            self.assertTrue(proposed["semantically_equivalent"])
+            self.assertTrue(proposed["recovery_required"])
+            self.assertFalse(proposed["requires_plan_revision"])
+            self.assertEqual(
+                proposed["policy_digest_to_propagate"], frozen["policy_digest"]
+            )
+            self.assertNotEqual(frozen["policy_digest"], legacy_current_digest)
+            self.assertEqual(
+                proposed["superseded_policy_digests"][0]["policy_digest"],
+                legacy_current_digest,
+            )
+
+            accepted = delivery_policy.verify_snapshot(
+                repo,
+                frozen,
+                recovery_record=proposed["policy_digest_recovery_record"],
+            )
+        self.assertTrue(accepted["valid"])
+        self.assertEqual(accepted["verification_outcome"], "pinned_equivalent")
+        self.assertEqual(
+            accepted["policy_digest_to_propagate"], frozen["policy_digest"]
+        )
+        recovery = delivery_policy.decode_metadata_record(
+            accepted["policy_digest_recovery_record"]
+        )
+        self.assertEqual(recovery["pinned_policy_digest"], frozen["policy_digest"])
+        self.assertEqual(recovery["resolved_policy_digest"], current["policy_digest"])
+        self.assertEqual(
+            recovery["frozen_resolver_provenance"]["provenance_status"],
+            "legacy_undeclared",
+        )
+
+    def test_digest_schema_rollback_uses_the_same_explicit_pinning_contract(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = create_repo(Path(temp), "https://github.com/example/project.git")
+            current = delivery_policy.resolve_policy(repo)
+            rolled_back = legacy_policy_snapshot(current)
+        proposed = delivery_policy.verify_resolved_snapshots(current, rolled_back)
+        self.assertFalse(proposed["valid"])
+        self.assertTrue(proposed["recovery_required"])
+        accepted = delivery_policy.verify_resolved_snapshots(
+            current,
+            rolled_back,
+            proposed["policy_digest_recovery_record"],
+        )
+        self.assertTrue(accepted["valid"])
+        self.assertEqual(accepted["verification_outcome"], "pinned_equivalent")
+        self.assertEqual(
+            accepted["policy_digest_to_propagate"], current["policy_digest"]
+        )
+
+    def test_dev5_frozen_digest_preserves_the_pre_alias_digest_as_superseded(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = create_repo(Path(temp), "https://github.com/example/project.git")
+            policy = {
+                "schema_version": 1,
+                "workflow_id": "development-delivery",
+                "requirement_pr": {"constraint": "forbidden", "default": False},
+                "remote": {"allow_direct_default_push": True},
+            }
+            (repo / "multica.delivery.json").write_text(
+                json.dumps(policy), encoding="utf-8"
+            )
+            current = delivery_policy.resolve_policy(repo)
+            frozen = legacy_policy_snapshot(current)
+            frozen["capabilities"]["direct_target_push"] = frozen[
+                "capabilities"
+            ]["direct_default_push"]
+            frozen["policy_digest"] = delivery_policy.legacy_policy_digest(frozen)
+            predecessor = legacy_policy_snapshot(current)
+            proposed = delivery_policy.verify_snapshot(repo, frozen)
+        self.assertEqual(
+            proposed["superseded_policy_digests"][0]["policy_digest"],
+            predecessor["policy_digest"],
+        )
+        self.assertEqual(
+            proposed["policy_digest_to_propagate"], frozen["policy_digest"]
+        )
+
+    def test_nonsemantic_resolver_fields_do_not_drift_policy_digest(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = create_repo(Path(temp), "https://github.com/example/project.git")
+            frozen = delivery_policy.resolve_policy(repo)
+        annotated = copy.deepcopy(frozen)
+        annotated["capabilities"]["resolver_annotation"] = {
+            "diagnostic": "new output field"
+        }
+        annotated["resolver_provenance"]["build_annotation"] = "packaged"
+        refresh_snapshot_record(annotated)
+        verified = delivery_policy.verify_resolved_snapshots(frozen, annotated)
+        self.assertEqual(frozen["policy_digest"], annotated["policy_digest"])
+        self.assertTrue(verified["valid"])
+        self.assertEqual(verified["verification_outcome"], "exact_match")
+
+    def test_real_selection_and_project_policy_changes_require_new_plan(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = create_repo(Path(temp), "https://github.com/example/project.git")
+            frozen = delivery_policy.resolve_policy(repo)
+            changed_selection = delivery_policy.resolve_policy(
+                repo, workspace_mode="isolated"
+            )
+            selection_result = delivery_policy.verify_resolved_snapshots(
+                frozen, changed_selection
+            )
+            self.assertFalse(selection_result["valid"])
+            self.assertTrue(selection_result["requires_plan_revision"])
+            self.assertFalse(selection_result["semantically_equivalent"])
+
+            policy = {
+                "schema_version": 1,
+                "workflow_id": "development-delivery",
+                "task_pr": {"constraint": "required", "default": True},
+            }
+            (repo / "multica.delivery.json").write_text(
+                json.dumps(policy), encoding="utf-8"
+            )
+            policy_result = delivery_policy.verify_snapshot(repo, frozen)
+        self.assertFalse(policy_result["valid"])
+        self.assertTrue(policy_result["requires_plan_revision"])
+        self.assertEqual(policy_result["verification_outcome"], "semantic_drift")
+
+    def test_remote_change_cannot_use_digest_recovery(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = create_repo(Path(temp), "https://github.com/example/project.git")
+            frozen = delivery_policy.resolve_policy(repo)
+            run_git(
+                repo,
+                "remote",
+                "set-url",
+                "--push",
+                "origin",
+                "git@github.com:example/other.git",
+            )
+            result = delivery_policy.verify_snapshot(repo, frozen)
+        self.assertFalse(result["valid"])
+        self.assertFalse(result["recovery_required"])
+        self.assertTrue(result["requires_plan_revision"])
+        self.assertEqual(result["verification_outcome"], "semantic_drift")
+
+    def test_recovery_record_is_bound_to_the_frozen_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = create_repo(Path(temp), "https://github.com/example/project.git")
+            current = delivery_policy.resolve_policy(repo)
+            frozen = legacy_policy_snapshot(current)
+            proposed = delivery_policy.verify_snapshot(repo, frozen)
+            record = delivery_policy.decode_metadata_record(
+                proposed["policy_digest_recovery_record"]
+            )
+            record["pinned_policy_digest"] = "0" * 64
+            tampered = delivery_policy.encode_metadata_record(record)
+            with self.assertRaisesRegex(
+                delivery_policy.DeliveryPolicyError, "was modified"
+            ):
+                delivery_policy.verify_snapshot(
+                    repo, frozen, recovery_record=tampered
+                )
+
+    def test_verify_cli_requires_then_accepts_the_persisted_recovery_record(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = create_repo(root, "https://github.com/example/project.git")
+            current = delivery_policy.resolve_policy(repo)
+            frozen = legacy_policy_snapshot(current)
+            snapshot_file = root / "snapshot.json"
+            recovery_file = root / "recovery.json"
+            snapshot_file.write_text(json.dumps(frozen), encoding="utf-8")
+            command = [
+                sys.executable,
+                str(POLICY_PATH),
+                "verify",
+                "--repo",
+                str(repo),
+                "--snapshot",
+                str(snapshot_file),
+            ]
+            proposed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+            self.assertEqual(proposed.returncode, 1)
+            proposed_result = json.loads(proposed.stdout)
+            self.assertEqual(
+                proposed_result["verification_outcome"], "recovery_required"
+            )
+            recovery_file.write_text(proposed.stdout, encoding="utf-8")
+            accepted = subprocess.run(
+                [*command, "--recovery-record", str(recovery_file)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+        self.assertEqual(accepted.returncode, 0)
+        self.assertEqual(
+            json.loads(accepted.stdout)["verification_outcome"],
+            "pinned_equivalent",
+        )
 
     def test_guard_workspace_blocks_unknown_changes(self):
         with tempfile.TemporaryDirectory() as temp:

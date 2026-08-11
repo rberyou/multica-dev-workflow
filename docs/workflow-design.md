@@ -17,7 +17,7 @@ The desired state contains no scheduled automation. Plan Reviewer and Code Revie
 
 Protocol v4 keeps Git, independent Review, tests, Plan approval, final human approval, and merge traceability mandatory while allowing projects to change the cost of checkout isolation and PR transport.
 
-An application repository may commit `multica.delivery.json`. The portable Delivery Policy Skill validates that file, selects a deterministic remote without exposing its URL, resolves the effective Requirement configuration, and produces a policy digest. The versioned Plan stores the complete snapshot. A changed project policy, selected remote, provider, capability, or effective choice invalidates approval and requires a new Plan Review Loop; Agents never change modes automatically.
+An application repository may commit `multica.delivery.json`. The portable Delivery Policy Skill validates that file, selects a deterministic remote without exposing its URL, resolves the effective Requirement configuration, and produces a versioned semantic policy digest plus a full snapshot integrity digest and Resolver provenance. The versioned Plan stores the complete snapshot. A changed project policy, selected remote, provider, semantic capability, or effective choice invalidates approval and requires a new Plan Review Loop; Agents never change modes automatically. Compatible Resolver upgrades or rollbacks use an explicit digest-bound pinning/supersession record, preserve the original approved digest, and require independent recovery verification before the same Plan may resume.
 
 All modes retain Requirement and Task branches:
 

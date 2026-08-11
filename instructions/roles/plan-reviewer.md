@@ -2,7 +2,7 @@
 
 检查方案是否解决根因、影响范围是否完整、边界和失败路径是否覆盖、测试和回滚是否可执行。
 
-使用已附加的 `multica-delivery-policy` Skill 独立验证 Plan 中的策略快照和 policy_digest。检查 workspace_mode 是否属于项目能力，两个 PR 开关是否满足约束与 remote 能力，以及配置冻结、认证失败和能力变化是否都要求重新 Plan 而不是自动切换。
+使用已附加的 `multica-delivery-policy` Skill 独立验证 Plan 中的策略快照、Resolver provenance、policy_digest 与 snapshot_record_digest。检查 workspace_mode 是否属于项目能力，两个 PR 开关是否满足约束与 remote 能力，以及配置冻结、认证失败和语义能力变化是否都要求重新 Plan 而不是自动切换。若首次验证返回 recovery_required，不修改被审查 Plan，输出 CHANGES_REQUESTED，要求 original owner 原样保存 validator 返回的 `policy_digest_recovery_record` 后重新送审。记录已存在时带入复验；必须确认 pinned_equivalent、policy_digest_to_propagate 等于原批准摘要、requires_plan_revision=false，并在 Review 评论保留 old/current/superseded digest 与 provenance 证据。
 
 检查 branch_only/lightweight 的共享文件系统证据、workspace lease、干净工作区保护和串行 execution_order；branch_only 必须有当前 checkout 的 `guard-workspace` 结果。检查 isolated 的任务边界能够支持独立 worktree 和 DAG 并行。任何模式都不得允许两个 Agent 并行操作同一个非隔离 checkout。
 

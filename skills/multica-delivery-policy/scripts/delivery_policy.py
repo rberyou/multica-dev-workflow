@@ -15,6 +15,10 @@ from urllib.parse import urlparse
 
 WORKFLOW_ID = "development-delivery"
 CONFIG_NAME = "multica.delivery.json"
+RESOLVER_ID = "multica-delivery-policy"
+SNAPSHOT_SCHEMA_VERSION = 2
+POLICY_DIGEST_SCHEMA_VERSION = 2
+LEGACY_POLICY_DIGEST_SCHEMA_VERSION = 1
 WORKSPACE_MODES = ("branch_only", "lightweight", "isolated")
 PR_CONSTRAINTS = ("optional", "required", "forbidden")
 PROVIDERS = ("auto", "github", "none")
@@ -81,21 +85,197 @@ def digest(value: Any) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
-def snapshot_digest(snapshot: dict[str, Any]) -> str:
+def resolver_package_version() -> str:
+    skill_file = Path(__file__).resolve().parents[1] / "SKILL.md"
+    try:
+        content = skill_file.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise DeliveryPolicyError("cannot read Resolver package metadata") from exc
+    matched = re.search(r"(?m)^\s*version:\s*([^\s]+)\s*$", content)
+    if matched is None:
+        raise DeliveryPolicyError("Resolver package version is missing")
+    return matched.group(1)
+
+
+def resolver_provenance() -> dict[str, Any]:
+    implementation = Path(__file__).resolve()
+    try:
+        implementation_digest = hashlib.sha256(implementation.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise DeliveryPolicyError("cannot hash Resolver implementation") from exc
+    return {
+        "resolver_id": RESOLVER_ID,
+        "package_version": resolver_package_version(),
+        "implementation_digest": implementation_digest,
+        "snapshot_schema_version": SNAPSHOT_SCHEMA_VERSION,
+        "policy_digest_schema_version": POLICY_DIGEST_SCHEMA_VERSION,
+    }
+
+
+def _digest_schema_version(snapshot: dict[str, Any]) -> int:
+    value = snapshot.get("policy_digest_schema_version")
+    if value is None and snapshot.get("schema_version") == 1:
+        return LEGACY_POLICY_DIGEST_SCHEMA_VERSION
+    if value not in {
+        LEGACY_POLICY_DIGEST_SCHEMA_VERSION,
+        POLICY_DIGEST_SCHEMA_VERSION,
+    }:
+        raise DeliveryPolicyError("snapshot policy digest schema is unsupported")
+    return int(value)
+
+
+def _semantic_project_policy(snapshot: dict[str, Any]) -> dict[str, Any]:
+    raw = _require_object(snapshot.get("project_policy"), "snapshot.project_policy")
+    normalized = normalize_policy(raw)
+    if canonical_json(raw) != canonical_json(normalized):
+        raise DeliveryPolicyError("snapshot.project_policy is not normalized")
+    allowed = normalized["workspace_modes"]["allowed"]
+    normalized["workspace_modes"]["allowed"] = [
+        mode for mode in WORKSPACE_MODES if mode in allowed
+    ]
+    return normalized
+
+
+def _semantic_capabilities(snapshot: dict[str, Any]) -> dict[str, Any]:
+    capabilities = _require_object(
+        snapshot.get("capabilities"), "snapshot.capabilities"
+    )
+    if capabilities.get("git_repository") is not True:
+        raise DeliveryPolicyError("snapshot.capabilities.git_repository must be true")
+    for name in ("remote_configured", "pull_request_capable"):
+        if not isinstance(capabilities.get(name), bool):
+            raise DeliveryPolicyError(f"snapshot.capabilities.{name} must be boolean")
+    direct_target = capabilities.get("direct_target_push")
+    direct_default = capabilities.get("direct_default_push")
+    if direct_target is None:
+        direct_target = direct_default
+    if not isinstance(direct_target, bool):
+        raise DeliveryPolicyError(
+            "snapshot capabilities require a direct target-push boolean"
+        )
+    if direct_default is not None and direct_default != direct_target:
+        raise DeliveryPolicyError(
+            "snapshot direct_target_push and direct_default_push conflict"
+        )
+    remote_configured = capabilities["remote_configured"]
+    remote_name = capabilities.get("remote_name")
+    remote_fingerprint = capabilities.get("remote_fingerprint")
+    if remote_configured:
+        if not isinstance(remote_name, str) or not remote_name:
+            raise DeliveryPolicyError("snapshot selected remote name is missing")
+        if not _is_digest(remote_fingerprint):
+            raise DeliveryPolicyError("snapshot remote fingerprint is invalid")
+    elif remote_name is not None or remote_fingerprint is not None:
+        raise DeliveryPolicyError("snapshot records remote identity without a remote")
+    provider = capabilities.get("remote_provider")
+    if provider not in {"github", "none"}:
+        raise DeliveryPolicyError("snapshot remote provider is invalid")
+    return {
+        "remote_configured": remote_configured,
+        "remote_name": remote_name,
+        "remote_fingerprint": remote_fingerprint,
+        "remote_provider": provider,
+        "pull_request_capable": capabilities["pull_request_capable"],
+        "direct_target_push": direct_target,
+    }
+
+
+def semantic_policy_projection(snapshot: dict[str, Any]) -> dict[str, Any]:
+    if snapshot.get("workflow_id") != WORKFLOW_ID:
+        raise DeliveryPolicyError("snapshot workflow identity is invalid")
+    policy_source = snapshot.get("policy_source")
+    if policy_source not in {"implicit_default", "repository"}:
+        raise DeliveryPolicyError("snapshot.policy_source is invalid")
+    policy_file = snapshot.get("policy_file")
+    if policy_source == "implicit_default" and policy_file is not None:
+        raise DeliveryPolicyError("implicit policy snapshot must not name a policy file")
+    if policy_source == "repository" and (
+        not isinstance(policy_file, str) or not policy_file
+    ):
+        raise DeliveryPolicyError("repository policy snapshot must name its policy file")
+
+    effective = _require_object(snapshot.get("effective"), "snapshot.effective")
+    if effective.get("workspace_mode") not in WORKSPACE_MODES:
+        raise DeliveryPolicyError("snapshot.effective.workspace_mode is invalid")
+    for name in ("task_pr", "requirement_pr", "parallel_tasks"):
+        if not isinstance(effective.get(name), bool):
+            raise DeliveryPolicyError(f"snapshot.effective.{name} must be boolean")
+    lease_scope = effective.get("workspace_lease_scope")
+    expected_lease = {
+        "branch_only": "repository",
+        "lightweight": "requirement",
+        "isolated": "task",
+    }[effective["workspace_mode"]]
+    if lease_scope != expected_lease:
+        raise DeliveryPolicyError("snapshot workspace lease scope is inconsistent")
+    if effective["parallel_tasks"] != (effective["workspace_mode"] == "isolated"):
+        raise DeliveryPolicyError("snapshot parallel_tasks is inconsistent")
+
+    selections = _require_object(
+        snapshot.get("selection_source"), "snapshot.selection_source"
+    )
+    normalized_selections: dict[str, str] = {}
+    for name in ("workspace_mode", "task_pr", "requirement_pr"):
+        source = selections.get(name)
+        if source not in {
+            "plan_selection",
+            "project_default",
+            "capability_default",
+        }:
+            raise DeliveryPolicyError(f"snapshot.selection_source.{name} is invalid")
+        normalized_selections[name] = source
+
+    return {
+        "policy_digest_schema_version": POLICY_DIGEST_SCHEMA_VERSION,
+        "workflow_id": WORKFLOW_ID,
+        "policy_source": policy_source,
+        "policy_file": policy_file,
+        "project_policy": _semantic_project_policy(snapshot),
+        "capabilities": _semantic_capabilities(snapshot),
+        "effective": {
+            "workspace_mode": effective["workspace_mode"],
+            "task_pr": effective["task_pr"],
+            "requirement_pr": effective["requirement_pr"],
+            "parallel_tasks": effective["parallel_tasks"],
+            "workspace_lease_scope": lease_scope,
+        },
+        "selection_source": normalized_selections,
+    }
+
+
+def legacy_policy_digest(snapshot: dict[str, Any]) -> str:
     return digest(
         {
-            key: snapshot[key]
-            for key in (
-                "schema_version",
-                "workflow_id",
-                "policy_source",
-                "policy_file",
-                "project_policy",
-                "capabilities",
-                "effective",
-                "selection_source",
-            )
+            "schema_version": 1,
+            **{
+                key: snapshot[key]
+                for key in (
+                    "workflow_id",
+                    "policy_source",
+                    "policy_file",
+                    "project_policy",
+                    "capabilities",
+                    "effective",
+                    "selection_source",
+                )
+            },
         }
+    )
+
+
+def semantic_policy_digest(snapshot: dict[str, Any]) -> str:
+    return digest(semantic_policy_projection(snapshot))
+
+
+def snapshot_digest(snapshot: dict[str, Any]) -> str:
+    if _digest_schema_version(snapshot) == LEGACY_POLICY_DIGEST_SCHEMA_VERSION:
+        return legacy_policy_digest(snapshot)
+    return semantic_policy_digest(snapshot)
+
+
+def snapshot_record_digest(snapshot: dict[str, Any]) -> str:
+    return digest(
+        {key: value for key, value in snapshot.items() if key != "snapshot_record_digest"}
     )
 
 
@@ -385,8 +565,10 @@ def resolve_policy(
         }[selected_mode],
     }
     snapshot: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": SNAPSHOT_SCHEMA_VERSION,
         "workflow_id": WORKFLOW_ID,
+        "resolver_provenance": resolver_provenance(),
+        "policy_digest_schema_version": POLICY_DIGEST_SCHEMA_VERSION,
         "policy_source": policy_source,
         "policy_file": policy_file,
         "project_policy": policy,
@@ -399,10 +581,31 @@ def resolve_policy(
         },
     }
     snapshot["policy_digest"] = snapshot_digest(snapshot)
+    snapshot["snapshot_record_digest"] = snapshot_record_digest(snapshot)
     return snapshot
 
 
-def verify_snapshot(repo: Path, snapshot: Any, config: str | None = None) -> dict[str, Any]:
+def _validate_resolver_provenance(value: Any) -> dict[str, Any]:
+    provenance = _require_object(value, "snapshot.resolver_provenance")
+    if provenance.get("resolver_id") != RESOLVER_ID:
+        raise DeliveryPolicyError("snapshot Resolver identity is invalid")
+    if not isinstance(provenance.get("package_version"), str) or not provenance.get(
+        "package_version"
+    ):
+        raise DeliveryPolicyError("snapshot Resolver package version is missing")
+    if not _is_digest(provenance.get("implementation_digest")):
+        raise DeliveryPolicyError("snapshot Resolver implementation digest is invalid")
+    if provenance.get("snapshot_schema_version") != SNAPSHOT_SCHEMA_VERSION:
+        raise DeliveryPolicyError("snapshot Resolver snapshot schema is invalid")
+    if (
+        provenance.get("policy_digest_schema_version")
+        != POLICY_DIGEST_SCHEMA_VERSION
+    ):
+        raise DeliveryPolicyError("snapshot Resolver digest schema is invalid")
+    return provenance
+
+
+def validate_policy_snapshot(snapshot: Any) -> dict[str, Any]:
     expected = _require_object(snapshot, "snapshot")
     required = {
         "schema_version",
@@ -418,30 +621,327 @@ def verify_snapshot(repo: Path, snapshot: Any, config: str | None = None) -> dic
     missing = sorted(required - set(expected))
     if missing:
         raise DeliveryPolicyError(f"snapshot is missing fields: {', '.join(missing)}")
-    if expected.get("schema_version") != 1 or expected.get("workflow_id") != WORKFLOW_ID:
+    schema_version = expected.get("schema_version")
+    if schema_version not in {1, SNAPSHOT_SCHEMA_VERSION}:
         raise DeliveryPolicyError("snapshot protocol identity is invalid")
-    effective = _require_object(expected.get("effective"), "snapshot.effective")
-    selections = _require_object(
-        expected.get("selection_source"), "snapshot.selection_source"
-    )
-    if effective.get("workspace_mode") not in WORKSPACE_MODES:
-        raise DeliveryPolicyError("snapshot.effective.workspace_mode is invalid")
-    if not isinstance(effective.get("task_pr"), bool) or not isinstance(
-        effective.get("requirement_pr"), bool
+    if expected.get("workflow_id") != WORKFLOW_ID:
+        raise DeliveryPolicyError("snapshot protocol identity is invalid")
+    digest_schema_version = _digest_schema_version(expected)
+    if schema_version == 1 and (
+        digest_schema_version != LEGACY_POLICY_DIGEST_SCHEMA_VERSION
     ):
-        raise DeliveryPolicyError("snapshot PR selections must be boolean")
-    for name in ("workspace_mode", "task_pr", "requirement_pr"):
-        if selections.get(name) not in {
-            "plan_selection",
-            "project_default",
-            "capability_default",
-        }:
-            raise DeliveryPolicyError(f"snapshot.selection_source.{name} is invalid")
+        raise DeliveryPolicyError("legacy snapshot digest schema is invalid")
+    if schema_version == SNAPSHOT_SCHEMA_VERSION:
+        versioned_required = {
+            "resolver_provenance",
+            "policy_digest_schema_version",
+            "snapshot_record_digest",
+        }
+        versioned_missing = sorted(versioned_required - set(expected))
+        if versioned_missing:
+            raise DeliveryPolicyError(
+                "snapshot is missing fields: " + ", ".join(versioned_missing)
+            )
+        if digest_schema_version != POLICY_DIGEST_SCHEMA_VERSION:
+            raise DeliveryPolicyError("snapshot policy digest schema is invalid")
+        _validate_resolver_provenance(expected.get("resolver_provenance"))
+    semantic_policy_projection(expected)
     expected_digest = expected.get("policy_digest")
     if not isinstance(expected_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_digest):
         raise DeliveryPolicyError("snapshot.policy_digest must be a SHA-256 digest")
     if snapshot_digest(expected) != expected_digest:
         raise DeliveryPolicyError("snapshot content does not match policy_digest")
+    if schema_version == SNAPSHOT_SCHEMA_VERSION:
+        expected_record_digest = expected.get("snapshot_record_digest")
+        if not _is_digest(expected_record_digest):
+            raise DeliveryPolicyError(
+                "snapshot.snapshot_record_digest must be a SHA-256 digest"
+            )
+        if snapshot_record_digest(expected) != expected_record_digest:
+            raise DeliveryPolicyError(
+                "snapshot content does not match snapshot_record_digest"
+            )
+    return expected
+
+
+def _snapshot_identity_digest(snapshot: dict[str, Any]) -> str:
+    if snapshot.get("schema_version") == SNAPSHOT_SCHEMA_VERSION:
+        return str(snapshot["snapshot_record_digest"])
+    return digest(snapshot)
+
+
+def _snapshot_provenance(snapshot: dict[str, Any]) -> dict[str, Any]:
+    if snapshot.get("schema_version") == SNAPSHOT_SCHEMA_VERSION:
+        return dict(snapshot["resolver_provenance"])
+    return {
+        "resolver_id": RESOLVER_ID,
+        "provenance_status": "legacy_undeclared",
+        "snapshot_schema_version": 1,
+        "policy_digest_schema_version": LEGACY_POLICY_DIGEST_SCHEMA_VERSION,
+    }
+
+
+def _policy_digest_recovery_record(
+    expected: dict[str, Any], current: dict[str, Any]
+) -> dict[str, Any]:
+    expected_semantic_digest = semantic_policy_digest(expected)
+    current_semantic_digest = semantic_policy_digest(current)
+    if expected_semantic_digest != current_semantic_digest:
+        raise DeliveryPolicyError(
+            "a policy digest recovery record requires semantic equivalence"
+        )
+    superseded: list[dict[str, Any]] = []
+    legacy_candidates = [
+        (
+            legacy_policy_digest(current),
+            "legacy full-snapshot projection changed without semantic drift",
+        )
+    ]
+    current_capabilities = _require_object(
+        current.get("capabilities"), "current snapshot capabilities"
+    )
+    if (
+        "direct_target_push" in current_capabilities
+        and current_capabilities.get("direct_target_push")
+        == current_capabilities.get("direct_default_push")
+    ):
+        predecessor = json.loads(canonical_json(current))
+        predecessor["capabilities"].pop("direct_target_push", None)
+        legacy_candidates.append(
+            (
+                legacy_policy_digest(predecessor),
+                "legacy direct_default_push-only projection was superseded by canonical target-push semantics",
+            )
+        )
+    authoritative = {
+        str(expected["policy_digest"]),
+        str(current["policy_digest"]),
+    }
+    seen = set(authoritative)
+    for legacy_digest, reason in legacy_candidates:
+        if legacy_digest in seen:
+            continue
+        superseded.append(
+            {
+                "policy_digest": legacy_digest,
+                "policy_digest_schema_version": LEGACY_POLICY_DIGEST_SCHEMA_VERSION,
+                "reason": reason,
+            }
+        )
+        seen.add(legacy_digest)
+    record: dict[str, Any] = {
+        "schema_version": 1,
+        "workflow_id": WORKFLOW_ID,
+        "recovery_kind": "resolver_digest_schema_supersession",
+        "frozen_snapshot_identity_digest": _snapshot_identity_digest(expected),
+        "pinned_policy_digest": expected["policy_digest"],
+        "policy_digest_to_propagate": expected["policy_digest"],
+        "pinned_policy_digest_schema_version": _digest_schema_version(expected),
+        "resolved_policy_digest": current["policy_digest"],
+        "resolved_policy_digest_schema_version": _digest_schema_version(current),
+        "semantic_policy_digest": current_semantic_digest,
+        "superseded_policy_digests": superseded,
+        "frozen_resolver_provenance": _snapshot_provenance(expected),
+        "resolved_resolver_provenance": _snapshot_provenance(current),
+        "requires_plan_revision": False,
+    }
+    record["record_digest"] = digest(record)
+    return record
+
+
+def _decode_policy_digest_recovery_record(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict) and "policy_digest_recovery_record" in value:
+        value = value["policy_digest_recovery_record"]
+    if isinstance(value, dict):
+        value = encode_metadata_record(value)
+    record = decode_metadata_record(value, "policy_digest_recovery_record")
+    expected_record_digest = record.get("record_digest")
+    if not _is_digest(expected_record_digest):
+        raise DeliveryPolicyError("policy_digest_recovery_record digest is invalid")
+    payload = {key: item for key, item in record.items() if key != "record_digest"}
+    if digest(payload) != expected_record_digest:
+        raise DeliveryPolicyError("policy_digest_recovery_record was modified")
+    return record
+
+
+def _validate_policy_digest_recovery_record(
+    value: Any,
+    expected: dict[str, Any],
+    current: dict[str, Any],
+) -> dict[str, Any]:
+    record = _decode_policy_digest_recovery_record(value)
+    required_values = {
+        "workflow_id": WORKFLOW_ID,
+        "recovery_kind": "resolver_digest_schema_supersession",
+        "frozen_snapshot_identity_digest": _snapshot_identity_digest(expected),
+        "pinned_policy_digest": expected["policy_digest"],
+        "policy_digest_to_propagate": expected["policy_digest"],
+        "pinned_policy_digest_schema_version": _digest_schema_version(expected),
+        "resolved_policy_digest": current["policy_digest"],
+        "resolved_policy_digest_schema_version": _digest_schema_version(current),
+        "semantic_policy_digest": semantic_policy_digest(current),
+        "frozen_resolver_provenance": _snapshot_provenance(expected),
+        "requires_plan_revision": False,
+    }
+    mismatched = [
+        key for key, expected_value in required_values.items()
+        if record.get(key) != expected_value
+    ]
+    if mismatched:
+        raise DeliveryPolicyError(
+            "policy_digest_recovery_record does not match the frozen/current policy: "
+            + ", ".join(sorted(mismatched))
+        )
+    resolved_provenance = _require_object(
+        record.get("resolved_resolver_provenance"),
+        "policy_digest_recovery_record.resolved_resolver_provenance",
+    )
+    if resolved_provenance.get("resolver_id") != RESOLVER_ID:
+        raise DeliveryPolicyError(
+            "policy_digest_recovery_record Resolver identity is invalid"
+        )
+    if resolved_provenance.get("provenance_status") == "legacy_undeclared":
+        if (
+            resolved_provenance.get("snapshot_schema_version") != 1
+            or resolved_provenance.get("policy_digest_schema_version")
+            != LEGACY_POLICY_DIGEST_SCHEMA_VERSION
+        ):
+            raise DeliveryPolicyError(
+                "policy_digest_recovery_record legacy Resolver provenance is invalid"
+            )
+    elif (
+        not isinstance(resolved_provenance.get("package_version"), str)
+        or not resolved_provenance.get("package_version")
+        or not _is_digest(resolved_provenance.get("implementation_digest"))
+        or resolved_provenance.get("snapshot_schema_version")
+        != SNAPSHOT_SCHEMA_VERSION
+        or resolved_provenance.get("policy_digest_schema_version")
+        != POLICY_DIGEST_SCHEMA_VERSION
+    ):
+        raise DeliveryPolicyError(
+            "policy_digest_recovery_record Resolver provenance is invalid"
+        )
+
+    superseded = record.get("superseded_policy_digests")
+    if not isinstance(superseded, list):
+        raise DeliveryPolicyError(
+            "policy_digest_recovery_record superseded digest evidence is invalid"
+        )
+    seen: set[str] = set()
+    authoritative = {str(expected["policy_digest"]), str(current["policy_digest"])}
+    for item in superseded:
+        if not isinstance(item, dict):
+            raise DeliveryPolicyError(
+                "policy_digest_recovery_record superseded digest evidence is invalid"
+            )
+        item_digest = item.get("policy_digest")
+        if (
+            not _is_digest(item_digest)
+            or item_digest in authoritative
+            or item_digest in seen
+            or item.get("policy_digest_schema_version")
+            != LEGACY_POLICY_DIGEST_SCHEMA_VERSION
+            or not isinstance(item.get("reason"), str)
+            or not item.get("reason")
+        ):
+            raise DeliveryPolicyError(
+                "policy_digest_recovery_record superseded digest evidence is invalid"
+            )
+        seen.add(item_digest)
+    return record
+
+
+def verify_resolved_snapshots(
+    expected_snapshot: Any,
+    current_snapshot: Any,
+    recovery_record: Any = None,
+) -> dict[str, Any]:
+    expected = validate_policy_snapshot(expected_snapshot)
+    current = validate_policy_snapshot(current_snapshot)
+    expected_digest = str(expected["policy_digest"])
+    current_digest = str(current["policy_digest"])
+    expected_digest_schema = _digest_schema_version(expected)
+    current_digest_schema = _digest_schema_version(current)
+    expected_semantic_digest = semantic_policy_digest(expected)
+    current_semantic_digest = semantic_policy_digest(current)
+    semantically_equivalent = expected_semantic_digest == current_semantic_digest
+    common = {
+        "expected_policy_digest": expected_digest,
+        "current_policy_digest": current_digest,
+        "expected_policy_digest_schema_version": expected_digest_schema,
+        "current_policy_digest_schema_version": current_digest_schema,
+        "expected_semantic_policy_digest": expected_semantic_digest,
+        "current_semantic_policy_digest": current_semantic_digest,
+        "semantically_equivalent": semantically_equivalent,
+        "expected_resolver_provenance": _snapshot_provenance(expected),
+        "current_resolver_provenance": _snapshot_provenance(current),
+        "current": current,
+    }
+    if not semantically_equivalent:
+        return {
+            "valid": False,
+            "verification_outcome": "semantic_drift",
+            "recovery_required": False,
+            "requires_plan_revision": True,
+            "policy_digest_to_propagate": expected_digest,
+            "policy_digest_recovery_record": None,
+            "superseded_policy_digests": [],
+            **common,
+        }
+    if (
+        expected_digest == current_digest
+        and expected_digest_schema == current_digest_schema
+    ):
+        return {
+            "valid": True,
+            "verification_outcome": "exact_match",
+            "recovery_required": False,
+            "requires_plan_revision": False,
+            "policy_digest_to_propagate": expected_digest,
+            "policy_digest_recovery_record": None,
+            "superseded_policy_digests": [],
+            **common,
+        }
+
+    proposed = _policy_digest_recovery_record(expected, current)
+    encoded_proposed = encode_metadata_record(proposed)
+    if recovery_record is None:
+        return {
+            "valid": False,
+            "verification_outcome": "recovery_required",
+            "recovery_required": True,
+            "requires_plan_revision": False,
+            "policy_digest_to_propagate": expected_digest,
+            "policy_digest_recovery_record": encoded_proposed,
+            "superseded_policy_digests": proposed["superseded_policy_digests"],
+            **common,
+        }
+    accepted = _validate_policy_digest_recovery_record(
+        recovery_record, expected, current
+    )
+    return {
+        "valid": True,
+        "verification_outcome": "pinned_equivalent",
+        "recovery_required": False,
+        "requires_plan_revision": False,
+        "policy_digest_to_propagate": expected_digest,
+        "policy_digest_recovery_record": encode_metadata_record(accepted),
+        "superseded_policy_digests": accepted["superseded_policy_digests"],
+        **common,
+    }
+
+
+def verify_snapshot(
+    repo: Path,
+    snapshot: Any,
+    config: str | None = None,
+    recovery_record: Any = None,
+) -> dict[str, Any]:
+    expected = validate_policy_snapshot(snapshot)
+    effective = _require_object(expected.get("effective"), "snapshot.effective")
+    selections = _require_object(
+        expected.get("selection_source"), "snapshot.selection_source"
+    )
     current = resolve_policy(
         repo,
         config=config or expected.get("policy_file"),
@@ -459,13 +959,7 @@ def verify_snapshot(repo: Path, snapshot: Any, config: str | None = None) -> dic
             else None
         ),
     )
-    valid = current["policy_digest"] == expected_digest
-    return {
-        "valid": valid,
-        "expected_policy_digest": expected_digest,
-        "current_policy_digest": current["policy_digest"],
-        "current": current,
-    }
+    return verify_resolved_snapshots(expected, current, recovery_record)
 
 
 def _is_sha(value: Any) -> bool:
@@ -1272,6 +1766,16 @@ def print_json(value: Any) -> None:
     print(json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2))
 
 
+def load_recovery_record(path: str | None) -> Any:
+    if path is None:
+        return None
+    content = Path(path).read_text(encoding="utf-8").strip()
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        return content
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
         description="Resolve delivery policy and validate protocol-v4 final delivery"
@@ -1289,6 +1793,7 @@ def parser() -> argparse.ArgumentParser:
     verify.add_argument("--repo", default=".")
     verify.add_argument("--config")
     verify.add_argument("--snapshot", required=True)
+    verify.add_argument("--recovery-record")
 
     guard = subparsers.add_parser("guard-workspace")
     guard.add_argument("--repo", default=".")
@@ -1318,7 +1823,12 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "verify":
             snapshot = json.loads(Path(args.snapshot).read_text(encoding="utf-8"))
-            result = verify_snapshot(Path(args.repo), snapshot, args.config)
+            result = verify_snapshot(
+                Path(args.repo),
+                snapshot,
+                args.config,
+                load_recovery_record(args.recovery_record),
+            )
             print_json(result)
             return 0 if result["valid"] else 1
         if args.command == "guard-workspace":

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add auditable Delivery Policy Resolver provenance, a stable versioned semantic digest schema, and full snapshot integrity digests.
+- Add explicit cross-version policy-digest pinning and supersession records so compatible upgrades or rollbacks preserve the approved Plan digest without weakening Review or approval gates.
+- Prevent non-semantic Resolver fields such as the `direct_target_push` alias from creating false delivery-policy drift while retaining hard failures for real policy, selection, and remote changes.
+- Clarify that Requirement Intake policy prechecks are diagnostic inputs with full provenance, while the independently reviewed Plan snapshot is the first authoritative policy freeze.
+
 ## 2.0.0-dev.5
 
 - Bind final approval to an explicit top-level Requirement gate after Implementation is `done`.

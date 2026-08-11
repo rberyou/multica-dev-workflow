@@ -8,9 +8,9 @@ Review Loop 默认保持 original owner 为 assignee，不通过反复更换 ass
 
 创建工作流 Issue 后必须立即使用已附加的 `multica-workflow-incidents` Skill 执行直接命令 `bind-workflow-issue`，写入 managed_by、workflow_instance_id、workflow_object_type、root_requirement_id、created_by_role、workflow_version、protocol_revision 和 top_protocol_revision；随后写入 workflow_stage。不要假设当前产品仓库包含工作流仓库的 `scripts/workflow.py`。子 issue 的协议和 root_requirement_id 必须与父链一致。development_task 和 integration_validation 还必须维护 dependencies_satisfied。
 
-Plan 必须使用已附加的 `multica-delivery-policy` Skill 解析项目根目录的 `multica.delivery.json`、Git remote 和本次选择。完整策略快照及 policy_digest 写入 Plan；workspace_mode、task_pr_enabled、requirement_pr_enabled、delivery_policy_digest 和 plan_revision 传播到 Implementation、任务、Review、验证、批准和合并证据。没有项目配置时直接使用当前协议默认值，不迁移或推断旧项目行为。
+Plan 必须使用已附加的 `multica-delivery-policy` Skill 解析项目根目录的 `multica.delivery.json`、Git remote 和本次选择。完整策略快照、resolver_provenance、policy_digest_schema_version、policy_digest 和 snapshot_record_digest 写入 Plan；workspace_mode、task_pr_enabled、requirement_pr_enabled、delivery_policy_digest 和 plan_revision 传播到 Implementation、任务、Review、验证、批准和合并证据。没有项目配置时直接使用当前协议默认值，不迁移或推断旧项目行为。
 
-Plan 批准后交付配置冻结。每次 Implementation 启动、任务开始、Review、合并和最终批准前重新验证 policy_digest。任何项目策略、选定 remote、provider、能力或实际选择变化都必须重新打开 Plan、递增 plan_revision、重新独立 Review 并取得新的 APPROVE PLAN；不得由 Agent 自动升级、降级或原地切换模式。
+Plan 批准后交付配置冻结。每次 Implementation 启动、任务开始、Review、合并和最终批准前重新验证 policy_digest。真实项目策略、选定 remote、provider、语义能力或实际选择变化都必须重新打开 Plan、递增 plan_revision、重新独立 Review 并取得新的 APPROVE PLAN；不得由 Agent 自动升级、降级或原地切换模式。若 verify 仅证明跨 Resolver 版本语义等价并返回 recovery_required，由当前 Plan original owner 把 validator 返回的单键 `policy_digest_recovery_record` 原样保存到当前版本 Plan，再由独立审查员使用同一记录复验；只有 pinned_equivalent 才可继续，且所有后代仍传播原 approved policy_digest，不得覆盖摘要、跳过 Review 或取代人工批准。
 
 所有模式都保留需求分支和任务分支。branch_only 使用现有 checkout 串行工作；lightweight 使用一个需求 worktree 串行切换任务分支；isolated 使用需求 worktree和每任务独立 worktree，可按依赖 DAG 并行。branch_only 和 lightweight 在任一时刻只能由一个 Developer、Code Reviewer 或 Integrator 持有 workspace lease。
 
