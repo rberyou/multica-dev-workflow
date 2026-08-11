@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 2.0.0-dev.7
+
+- Expand the Delivery Policy compatibility matrix across stable/current snapshots, upgrades, rollbacks, supersession, tamper detection, unsupported schemas, semantic drift, and final-gate metadata capacity.
+
 ## 2.0.0-dev.6
 
 - Add auditable Delivery Policy Resolver provenance, a stable versioned semantic digest schema, and full snapshot integrity digests.
