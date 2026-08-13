@@ -672,6 +672,7 @@ def superseded_release_snapshot() -> dict:
             "superseded_implementation_id": "IMP-OLD",
             "target_issue_id": target_issue,
             "original_owner_id": owner,
+            "integrator_id": "integrator-1",
             "plan_revision": 4,
             "delivery_policy_digest": POLICY_DIGEST,
             "fixed_operation_manifest_identity": "v2.sha256:" + "2" * 64,
@@ -679,8 +680,28 @@ def superseded_release_snapshot() -> dict:
             "new_branch": new_branch,
             "expected_worktree_path": path,
         },
+        "superseded_implementation": {
+            "issue_id": "IMP-OLD",
+            "identifier": "T-111",
+            "parent_issue_id": "PLAN-1",
+            "root_requirement_id": "ROOT-1",
+            "workflow_object_type": "implementation",
+            "workflow_stage": "implementation",
+            "protocol_revision": "v4",
+            "status": "blocked",
+            "waiting_on": "plan_revision",
+            "blocked_reason": "superseded implementation",
+            "workflow_blocked_by_incident_id": "",
+            "workflow_blocked_previous_status": "",
+        },
         "target": {
             "issue_id": target_issue,
+            "identifier": "T-112",
+            "parent_issue_id": "IMP-OLD",
+            "root_requirement_id": "ROOT-1",
+            "workflow_object_type": "development_task",
+            "workflow_stage": "development_task",
+            "protocol_revision": "v4",
             "status": "blocked",
             "waiting_on": "plan_revision",
             "blocked_reason": "superseded",
@@ -712,9 +733,14 @@ def superseded_release_snapshot() -> dict:
             "branch": new_branch,
             "base_commit_sha": "2" * 40,
             "reviewed_commit_sha": "3" * 40,
-            "merged_commit_sha": "3" * 40,
+            "merged_commit_sha": "4" * 40,
             "review_comment_id": "review-1",
             "reviewer_id": "reviewer-1",
+            "review_base_commit_sha": "2" * 40,
+            "review_commit_sha": "3" * 40,
+            "reviewed_tree_sha": "5" * 40,
+            "merged_tree_sha": "5" * 40,
+            "merge_parent_shas": ["2" * 40, "3" * 40],
             "merge_method": "--no-ff",
             "review_status": "APPROVED",
         },
@@ -726,8 +752,23 @@ def superseded_authority(snapshot: dict) -> dict:
     source = snapshot["source"]
     target = snapshot["target"]
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         **context,
+        "code_reviewer_id": source["reviewer_id"],
+        "superseded_implementation_tuple": {
+            key: snapshot["superseded_implementation"][key]
+            for key in delivery_policy.SUPERSEDED_ISSUE_TUPLE_FIELDS
+        },
+        "target_task_tuple": {
+            key: target[key]
+            for key in delivery_policy.SUPERSEDED_ISSUE_TUPLE_FIELDS
+        },
+        "superseded_implementation_blocker_digest": delivery_policy.digest(
+            {
+                key: snapshot["superseded_implementation"].get(key, "")
+                for key in delivery_policy.LEASE_BLOCKER_FIELDS
+            }
+        ),
         "expected_pr_number": snapshot["pull_request"]["number"],
         "expected_pr_head_sha": snapshot["pull_request"]["head_sha"],
         "expected_blocker_digest": delivery_policy.digest(
@@ -737,7 +778,9 @@ def superseded_authority(snapshot: dict) -> dict:
             key: source[key]
             for key in (
                 "base_commit_sha", "reviewed_commit_sha", "merged_commit_sha",
-                "review_comment_id", "reviewer_id", "merge_method",
+                "review_comment_id", "reviewer_id", "review_base_commit_sha",
+                "reviewed_tree_sha", "merged_tree_sha", "merge_parent_shas",
+                "merge_method",
             )
         },
     }
@@ -2478,6 +2521,50 @@ class DeliveryPolicyTests(unittest.TestCase):
         rejected = delivery_policy.superseded_task_release(coordinated, authority)
         self.assertFalse(rejected["allowed"])
         self.assertEqual(rejected["writes"], [])
+
+    def test_superseded_task_release_accepts_real_no_ff_merge_evidence(self):
+        snapshot = superseded_release_snapshot()
+        self.assertNotEqual(
+            snapshot["source"]["reviewed_commit_sha"],
+            snapshot["source"]["merged_commit_sha"],
+        )
+        result = delivery_policy.superseded_task_release(
+            snapshot, superseded_authority(snapshot)
+        )
+        self.assertTrue(result["allowed"])
+        self.assertEqual(result["outcome"], "next_write")
+
+    def test_superseded_task_release_rejects_parent_tree_role_and_review_drift(self):
+        approved = superseded_release_snapshot()
+        authority = superseded_authority(approved)
+        cases = (
+            ("source", "merge_parent_shas", ["9" * 40, "3" * 40]),
+            ("source", "merged_tree_sha", "9" * 40),
+            ("source", "review_base_commit_sha", "9" * 40),
+            ("source", "review_commit_sha", "9" * 40),
+            ("source", "reviewer_id", approved["context"]["original_owner_id"]),
+            ("source", "reviewer_id", approved["context"]["integrator_id"]),
+            ("superseded_implementation", "identifier", "T-999"),
+            ("superseded_implementation", "parent_issue_id", "PLAN-OTHER"),
+            ("superseded_implementation", "root_requirement_id", "ROOT-OTHER"),
+            ("superseded_implementation", "workflow_object_type", "development_task"),
+            ("superseded_implementation", "workflow_stage", "development_task"),
+            ("superseded_implementation", "protocol_revision", "v3"),
+            ("superseded_implementation", "blocked_reason", "changed"),
+            ("target", "identifier", "T-999"),
+            ("target", "parent_issue_id", "IMP-OTHER"),
+            ("target", "root_requirement_id", "ROOT-OTHER"),
+            ("target", "workflow_object_type", "implementation"),
+            ("target", "workflow_stage", "implementation"),
+            ("target", "protocol_revision", "v3"),
+        )
+        for section, key, value in cases:
+            with self.subTest(section=section, key=key):
+                candidate = superseded_release_snapshot()
+                candidate[section][key] = value
+                result = delivery_policy.superseded_task_release(candidate, authority)
+                self.assertFalse(result["allowed"])
+                self.assertEqual(result["writes"], [])
 
         for section, key, value in (
             ("context", "original_owner_id", "wrong-owner"),

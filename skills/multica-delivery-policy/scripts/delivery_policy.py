@@ -3141,28 +3141,41 @@ def _superseded_release_record(plan: dict[str, Any], checkpoint: int) -> str:
 SUPERSEDED_AUTHORITY_FIELDS = {
     "schema_version", "workspace_id", "root_requirement_id", "plan_issue_id",
     "superseded_implementation_id", "target_issue_id", "original_owner_id",
+    "integrator_id", "code_reviewer_id", "superseded_implementation_tuple",
+    "target_task_tuple", "superseded_implementation_blocker_digest",
     "plan_revision", "delivery_policy_digest", "fixed_operation_manifest_identity",
     "old_branch", "new_branch", "expected_worktree_path", "expected_pr_number",
     "expected_pr_head_sha", "expected_blocker_digest", "base_commit_sha",
     "reviewed_commit_sha", "merged_commit_sha", "review_comment_id", "reviewer_id",
-    "merge_method",
+    "review_base_commit_sha", "reviewed_tree_sha", "merged_tree_sha",
+    "merge_parent_shas", "merge_method",
 }
+
+SUPERSEDED_ISSUE_TUPLE_FIELDS = (
+    "issue_id", "identifier", "parent_issue_id", "root_requirement_id",
+    "workflow_object_type", "workflow_stage", "protocol_revision",
+)
 
 
 def superseded_task_release(snapshot: Any, approved_authority: Any) -> dict[str, Any]:
     data = _require_object(snapshot, "superseded task release snapshot")
     context = _require_object(data.get("context"), "superseded release context")
+    implementation = _require_object(
+        data.get("superseded_implementation"),
+        "superseded release Implementation",
+    )
     target = _require_object(data.get("target"), "superseded release target")
     guard = _require_object(data.get("guard"), "superseded release guard")
     pr = _require_object(data.get("pull_request"), "superseded release pull request")
     source = _require_object(data.get("source"), "superseded release source")
     authority = _require_object(approved_authority, "approved superseded release authority")
-    if set(authority) != SUPERSEDED_AUTHORITY_FIELDS or authority.get("schema_version") != 1:
+    if set(authority) != SUPERSEDED_AUTHORITY_FIELDS or authority.get("schema_version") != 2:
         raise DeliveryPolicyError("approved superseded release authority fields are invalid")
     reasons: list[str] = []
     for key in (
         "workspace_id", "root_requirement_id", "plan_issue_id",
         "superseded_implementation_id", "target_issue_id", "original_owner_id",
+        "integrator_id",
         "old_branch", "new_branch", "expected_worktree_path",
     ):
         _add(reasons, isinstance(context.get(key), str) and bool(context.get(key)), f"{key} is missing")
@@ -3170,6 +3183,20 @@ def superseded_task_release(snapshot: Any, approved_authority: Any) -> dict[str,
     _add(reasons, _is_digest(context.get("delivery_policy_digest")), "superseded release policy digest is invalid")
     _add(reasons, isinstance(context.get("fixed_operation_manifest_identity"), str) and context["fixed_operation_manifest_identity"].startswith("v2.sha256:"), "superseded release manifest identity is invalid")
     _add(reasons, target.get("issue_id") == context.get("target_issue_id"), "superseded release target identity drifted")
+    implementation_tuple = {
+        key: implementation.get(key) for key in SUPERSEDED_ISSUE_TUPLE_FIELDS
+    }
+    target_tuple = {key: target.get(key) for key in SUPERSEDED_ISSUE_TUPLE_FIELDS}
+    _add(reasons, implementation_tuple == authority.get("superseded_implementation_tuple"), "approved superseded Implementation tuple drifted")
+    _add(reasons, target_tuple == authority.get("target_task_tuple"), "approved superseded target tuple drifted")
+    _add(reasons, implementation.get("issue_id") == context.get("superseded_implementation_id"), "superseded Implementation identity drifted")
+    _add(reasons, implementation.get("identifier") == "T-111" and target.get("identifier") == "T-112", "superseded release issue identifiers are invalid")
+    _add(reasons, implementation.get("parent_issue_id") == context.get("plan_issue_id"), "superseded Implementation parent is invalid")
+    _add(reasons, implementation.get("workflow_object_type") == "implementation" and implementation.get("workflow_stage") == "implementation", "superseded Implementation role is invalid")
+    _add(reasons, target.get("workflow_object_type") == "development_task" and target.get("workflow_stage") == "development_task", "superseded target role is invalid")
+    _add(reasons, implementation.get("protocol_revision") == "v4" and target.get("protocol_revision") == "v4", "superseded release protocol is invalid")
+    _add(reasons, target.get("parent_issue_id") == implementation.get("issue_id"), "superseded target parent is invalid")
+    _add(reasons, implementation.get("root_requirement_id") == context.get("root_requirement_id") and target.get("root_requirement_id") == context.get("root_requirement_id"), "superseded release root chain drifted")
     _add(reasons, target.get("workspace_lease_scope") == "task", "superseded release scope must be task")
     existing_record = target.get(SUPERSEDED_TASK_RELEASE_RECORD_KEY)
     if existing_record in {None, ""}:
@@ -3184,14 +3211,23 @@ def superseded_task_release(snapshot: Any, approved_authority: Any) -> dict[str,
     _add(reasons, guard.get("branch") == context.get("old_branch") and guard.get("head") == pr.get("head_sha"), "superseded worktree branch or head drifted")
     _add(reasons, guard.get("unfinished_operations") in (None, []), "superseded worktree has an unfinished operation")
     _add(reasons, source.get("branch") == context.get("new_branch"), "reviewed source branch drifted")
-    _add(reasons, _is_sha(source.get("reviewed_commit_sha")) and source.get("reviewed_commit_sha") == source.get("merged_commit_sha"), "reviewed merged source is invalid")
+    _add(reasons, _is_sha(source.get("reviewed_commit_sha")) and _is_sha(source.get("merged_commit_sha")) and source.get("reviewed_commit_sha") != source.get("merged_commit_sha"), "reviewed and merged source SHAs are invalid")
+    merge_parents = source.get("merge_parent_shas")
+    _add(reasons, isinstance(merge_parents, list) and len(merge_parents) == 2 and merge_parents == [source.get("base_commit_sha"), source.get("reviewed_commit_sha")], "reviewed merge parents are invalid")
+    _add(reasons, _is_sha(source.get("reviewed_tree_sha")) and source.get("reviewed_tree_sha") == source.get("merged_tree_sha"), "reviewed merge tree is invalid")
     _add(reasons, source.get("review_status") == "APPROVED", "reviewed source is not approved")
+    _add(reasons, source.get("review_base_commit_sha") == source.get("base_commit_sha"), "Review base SHA drifted")
+    _add(reasons, source.get("reviewed_commit_sha") == source.get("review_commit_sha"), "Review head SHA drifted")
     blocker = {key: target.get(key, "") for key in LEASE_BLOCKER_FIELDS}
+    implementation_blocker = {
+        key: implementation.get(key, "") for key in LEASE_BLOCKER_FIELDS
+    }
     context_binding = {
         key: context.get(key)
         for key in (
             "workspace_id", "root_requirement_id", "plan_issue_id",
             "superseded_implementation_id", "target_issue_id", "original_owner_id",
+            "integrator_id",
             "plan_revision", "delivery_policy_digest", "fixed_operation_manifest_identity",
             "old_branch", "new_branch", "expected_worktree_path",
         )
@@ -3201,9 +3237,11 @@ def superseded_task_release(snapshot: Any, approved_authority: Any) -> dict[str,
     _add(reasons, pr.get("number") == authority.get("expected_pr_number"), "approved superseded PR number drifted")
     _add(reasons, pr.get("head_sha") == authority.get("expected_pr_head_sha"), "approved superseded PR head drifted")
     _add(reasons, digest(blocker) == authority.get("expected_blocker_digest"), "approved superseded blocker bytes drifted")
+    _add(reasons, digest(implementation_blocker) == authority.get("superseded_implementation_blocker_digest"), "approved superseded Implementation blocker bytes drifted")
     for key in (
         "base_commit_sha", "reviewed_commit_sha", "merged_commit_sha",
-        "review_comment_id", "reviewer_id", "merge_method",
+        "review_comment_id", "reviewer_id", "review_base_commit_sha",
+        "reviewed_tree_sha", "merged_tree_sha", "merge_parent_shas", "merge_method",
     ):
         _add(reasons, source.get(key) == authority.get(key), f"approved source {key} drifted")
     _add(reasons, _is_sha(authority.get("base_commit_sha")), "approved source base SHA is invalid")
@@ -3211,6 +3249,9 @@ def superseded_task_release(snapshot: Any, approved_authority: Any) -> dict[str,
     _add(reasons, _is_sha(authority.get("merged_commit_sha")), "approved source merged SHA is invalid")
     _add(reasons, isinstance(authority.get("review_comment_id"), str) and bool(authority["review_comment_id"]), "approved Review comment is missing")
     _add(reasons, isinstance(authority.get("reviewer_id"), str) and bool(authority["reviewer_id"]), "approved Reviewer is missing")
+    _add(reasons, authority.get("reviewer_id") == authority.get("code_reviewer_id"), "approved Reviewer is not the roster Code Reviewer")
+    _add(reasons, authority.get("code_reviewer_id") not in {authority.get("original_owner_id"), authority.get("integrator_id")}, "approved Code Reviewer is not independent")
+    _add(reasons, source.get("reviewer_id") not in {context.get("original_owner_id"), context.get("integrator_id")}, "source Reviewer is not independent")
     _add(reasons, authority.get("merge_method") == "--no-ff", "approved merge method is invalid")
     if reasons:
         return _terminal_rejected(reasons)
