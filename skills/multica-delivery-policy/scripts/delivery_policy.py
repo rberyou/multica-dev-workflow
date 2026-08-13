@@ -24,9 +24,24 @@ WORKSPACE_MODES = ("branch_only", "lightweight", "isolated")
 PR_CONSTRAINTS = ("optional", "required", "forbidden")
 PROVIDERS = ("auto", "github", "none")
 FINAL_ACTIONS = ("open", "approve", "delivery", "handoff", "converge")
+TERMINAL_NORMALIZATION_ACTIONS = ("transition", "attest")
 DELIVERY_MODES = ("requirement_pr", "direct_push", "local_only")
 HANDOFF_OUTCOMES = ("queued", "coalesced", "deferred")
 LEASE_STATES = ("held", "released")
+TERMINAL_NORMALIZATION_RECORD_KEY = "workspace_lease_terminal_normalization_record"
+TERMINAL_NORMALIZATION_ENDPOINT_KEYS = (
+    "workspace_lease_state",
+    "workspace_lease_owner_issue_id",
+    "workspace_lease_owner_agent_id",
+    TERMINAL_NORMALIZATION_RECORD_KEY,
+)
+SUPERSEDED_TASK_RELEASE_RECORD_KEY = "workspace_lease_superseded_release_record"
+SUPERSEDED_TASK_RELEASE_KEYS = (
+    "workspace_lease_state",
+    "workspace_lease_owner_issue_id",
+    "workspace_lease_owner_agent_id",
+    SUPERSEDED_TASK_RELEASE_RECORD_KEY,
+)
 METADATA_RECORD_PREFIX = "v1."
 MAX_ISSUE_METADATA_KEYS = 50
 REMOTE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -2678,6 +2693,726 @@ def lease_transition_preflight(snapshot: Any) -> dict[str, Any]:
     }
 
 
+def _terminal_manifest_identity(manifest: dict[str, Any]) -> str:
+    return f"v2.sha256:{digest(manifest)}"
+
+
+def _terminal_tuple(value: Any, name: str) -> dict[str, Any]:
+    item = _require_object(value, name)
+    normalized = {
+        "status": item.get("status"),
+        "scope": item.get("scope"),
+        "state": item.get("state"),
+        "owner_issue_id": item.get("owner_issue_id", ""),
+        "owner_agent_id": item.get("owner_agent_id", ""),
+    }
+    if normalized["status"] != "done" or normalized["scope"] != "requirement":
+        raise DeliveryPolicyError(f"{name} must bind a done requirement lease")
+    if not isinstance(normalized["state"], str) or not normalized["state"]:
+        raise DeliveryPolicyError(f"{name} state is missing")
+    for key in ("owner_issue_id", "owner_agent_id"):
+        if not isinstance(normalized[key], str):
+            raise DeliveryPolicyError(f"{name} {key} is invalid")
+    return normalized
+
+
+def _validate_terminal_manifest(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    if manifest.get("schema_version") != 2:
+        raise DeliveryPolicyError("terminal normalization manifest schema is unsupported")
+    if manifest.get("canonicalization") != (
+        "json-recursive-key-sort-arrays-preserved-utf8-no-bom-no-trailing-newline"
+    ):
+        raise DeliveryPolicyError("terminal normalization canonicalization is invalid")
+    plan = _require_object(manifest.get("plan"), "terminal normalization manifest Plan")
+    if not isinstance(plan.get("issue_id"), str) or not plan.get("issue_id"):
+        raise DeliveryPolicyError("terminal normalization manifest Plan issue is missing")
+    revision = plan.get("plan_revision")
+    if not isinstance(revision, int) or isinstance(revision, bool) or revision <= 0:
+        raise DeliveryPolicyError("terminal normalization manifest Plan revision is invalid")
+    if not _is_digest(plan.get("delivery_policy_digest")):
+        raise DeliveryPolicyError("terminal normalization manifest policy digest is invalid")
+    if not isinstance(manifest.get("workflow_instance_id"), str) or not manifest.get(
+        "workflow_instance_id"
+    ):
+        raise DeliveryPolicyError("terminal normalization workflow instance is missing")
+    root_authority = _require_object(
+        manifest.get("root_authority"), "terminal normalization root authority"
+    )
+    if (
+        root_authority.get("workflow_object_type") != "requirement"
+        or root_authority.get("parent_issue_id") is not None
+        or plan.get("parent_issue_id") != root_authority.get("issue_id")
+        or plan.get("root_requirement_id") != root_authority.get("issue_id")
+    ):
+        raise DeliveryPolicyError("terminal normalization approved root authority is invalid")
+    immutable = _require_object(
+        manifest.get("immutable_snapshot"), "terminal normalization immutable snapshot"
+    )
+    if (
+        immutable.get("digest_algorithm") != "sha256"
+        or immutable.get("entry_schema_version") != 1
+        or not _is_digest(immutable.get("aggregate_digest"))
+        or not isinstance(immutable.get("requirements"), list)
+        or len(immutable["requirements"]) != 2
+    ):
+        raise DeliveryPolicyError("terminal normalization immutable snapshot authority is invalid")
+    issues = manifest.get("issues")
+    endpoints = manifest.get("endpoints")
+    order = manifest.get("endpoint_order")
+    if not isinstance(issues, list) or len(issues) != 6:
+        raise DeliveryPolicyError("terminal normalization manifest requires exactly six Issues")
+    if not isinstance(endpoints, list) or len(endpoints) != 4:
+        raise DeliveryPolicyError("terminal normalization manifest requires exactly four endpoints")
+    if not isinstance(order, list) or len(order) != 4 or len(set(order)) != 4:
+        raise DeliveryPolicyError("terminal normalization endpoint order is invalid")
+    issue_map: dict[str, dict[str, Any]] = {}
+    identifiers = set()
+    for issue in issues:
+        item = _require_object(issue, "terminal normalization manifest Issue")
+        issue_id = item.get("issue_id")
+        identifier = item.get("identifier")
+        if (
+            not isinstance(issue_id, str)
+            or not issue_id
+            or issue_id in issue_map
+            or not isinstance(identifier, str)
+            or not identifier
+            or identifier in identifiers
+        ):
+            raise DeliveryPolicyError("terminal normalization manifest Issue identity is invalid")
+        issue_map[issue_id] = item
+        identifiers.add(identifier)
+    normalized = []
+    endpoint_ids = set()
+    for endpoint in endpoints:
+        item = _require_object(endpoint, "terminal normalization manifest endpoint")
+        issue_id = item.get("issue_id")
+        if issue_id in endpoint_ids or issue_id not in issue_map:
+            raise DeliveryPolicyError("terminal normalization endpoint identity is invalid")
+        endpoint_ids.add(issue_id)
+        issue = issue_map[issue_id]
+        for key in (
+            "identifier",
+            "parent_issue_id",
+            "workflow_object_type",
+            "object_role",
+        ):
+            if item.get(key) != issue.get(key):
+                raise DeliveryPolicyError("terminal normalization endpoint Issue binding differs")
+        role = item.get("object_role")
+        object_type = item.get("workflow_object_type")
+        if role == "authority":
+            if object_type != "implementation" or item.get("parent_issue_id") is None:
+                raise DeliveryPolicyError("terminal normalization authority topology is invalid")
+        elif role == "final_mirror":
+            parent = issue_map.get(item.get("parent_issue_id"))
+            if object_type != "integration_validation" or not parent or parent.get(
+                "object_role"
+            ) != "authority":
+                raise DeliveryPolicyError("terminal normalization mirror topology is invalid")
+        else:
+            raise DeliveryPolicyError("terminal normalization endpoint role is invalid")
+        initial = _terminal_tuple(item.get("initial_tuple"), "endpoint initial tuple")
+        target = _terminal_tuple(item.get("target_tuple"), "endpoint target tuple")
+        if target != {
+            "status": "done",
+            "scope": "requirement",
+            "state": "released",
+            "owner_issue_id": "",
+            "owner_agent_id": "",
+        }:
+            raise DeliveryPolicyError("terminal normalization target tuple is invalid")
+        if not initial["owner_issue_id"] or not initial["owner_agent_id"]:
+            raise DeliveryPolicyError("terminal normalization initial owners are missing")
+        normalized.append({**item, "initial_tuple": initial, "target_tuple": target})
+    if order != [item["issue_id"] for item in normalized]:
+        raise DeliveryPolicyError("terminal normalization endpoint order differs from manifest")
+    authorities = [item for item in normalized if item["object_role"] == "authority"]
+    mirrors = [item for item in normalized if item["object_role"] == "final_mirror"]
+    roots = [item for item in issues if item.get("object_role") == "root_requirement"]
+    if len(authorities) != 2 or len(mirrors) != 2 or len(roots) != 2:
+        raise DeliveryPolicyError("terminal normalization manifest topology is incomplete")
+    for authority in authorities:
+        root = issue_map.get(authority.get("parent_issue_id"))
+        linked = [item for item in mirrors if item.get("parent_issue_id") == authority["issue_id"]]
+        if (
+            not root
+            or root.get("object_role") != "root_requirement"
+            or root.get("workflow_object_type") != "requirement"
+            or len(linked) != 1
+            or linked[0]["initial_tuple"] != authority["initial_tuple"]
+        ):
+            raise DeliveryPolicyError("terminal normalization Requirement pair is invalid")
+    approved_roots = {
+        (item.get("issue_id"), item.get("identifier")) for item in roots
+    }
+    immutable_roots = []
+    for item in immutable["requirements"]:
+        entry = _require_object(item, "terminal normalization immutable root")
+        if not _is_digest(entry.get("snapshot_digest")):
+            raise DeliveryPolicyError("terminal normalization immutable root digest is invalid")
+        immutable_roots.append((entry.get("issue_id"), entry.get("identifier")))
+    if set(immutable_roots) != approved_roots or len(set(immutable_roots)) != 2:
+        raise DeliveryPolicyError("terminal normalization immutable roots differ from manifest")
+    return normalized
+
+
+def _terminal_plan_binding(snapshot: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    manifest = _require_object(snapshot.get("manifest"), "terminal normalization manifest")
+    endpoints = _validate_terminal_manifest(manifest)
+    plan_evidence = _require_object(snapshot.get("plan"), "terminal normalization Plan evidence")
+    manifest_plan = manifest["plan"]
+    identity = _terminal_manifest_identity(manifest)
+    if plan_evidence.get("workflow_object_type") != "plan":
+        raise DeliveryPolicyError("terminal normalization Plan evidence object type is invalid")
+    if _metadata_capacity_reasons(plan_evidence, []):
+        raise DeliveryPolicyError(
+            "terminal normalization Plan metadata key inventory is invalid"
+        )
+    approved_root = manifest["root_authority"]
+    root_requirement_id = plan_evidence.get("root_requirement_id")
+    if (
+        not isinstance(root_requirement_id, str)
+        or not root_requirement_id
+        or plan_evidence.get("parent_issue_id") != root_requirement_id
+        or root_requirement_id != approved_root.get("issue_id")
+        or plan_evidence.get("approved_root_requirement_id") != root_requirement_id
+    ):
+        raise DeliveryPolicyError(
+            "terminal normalization Plan root authority is invalid"
+        )
+    immutable_evidence_digest = _terminal_immutable_evidence_digest(
+        snapshot.get("immutable_evidence"), manifest
+    )
+    bindings = {
+        "issue_id": manifest_plan["issue_id"],
+        "plan_revision": manifest_plan["plan_revision"],
+        "delivery_policy_digest": manifest_plan["delivery_policy_digest"],
+        "workflow_instance_id": manifest["workflow_instance_id"],
+        "fixed_operation_manifest_identity": identity,
+        "root_requirement_id": root_requirement_id,
+        "approved_immutable_snapshot_digest": "sha256:"
+        + manifest["immutable_snapshot"]["aggregate_digest"],
+    }
+    if any(plan_evidence.get(key) != value for key, value in bindings.items()):
+        raise DeliveryPolicyError("terminal normalization Plan or manifest identity drifted")
+    return {
+        "schema_version": 1,
+        "record_type": "workspace_lease_terminal_normalization",
+        **bindings,
+        "pre_snapshot_digest": snapshot.get("pre_snapshot_digest"),
+        "immutable_evidence_digest": immutable_evidence_digest,
+        "endpoint_order": manifest["endpoint_order"],
+    }, endpoints
+
+
+TERMINAL_IMMUTABLE_FIELDS = (
+    "issue_id",
+    "identifier",
+    "parent_issue_id",
+    "workflow_object_type",
+    "status",
+    "approval_revision",
+    "approved_requirement_head_sha",
+    "reviewed_commit_sha",
+    "current_requirement_head_sha",
+    "plan_revision",
+    "delivery_policy_digest",
+    "requirement_branch",
+    "delivery_evidence_record",
+    "delivery_handoff_record",
+)
+
+
+def _terminal_immutable_entry(
+    value: Any, manifest_root: dict[str, Any]
+) -> dict[str, Any]:
+    entry = _require_object(value, "terminal immutable Requirement evidence")
+    if set(entry) != set(TERMINAL_IMMUTABLE_FIELDS):
+        raise DeliveryPolicyError(
+            "terminal immutable Requirement evidence fields are invalid"
+        )
+    normalized = {key: entry.get(key) for key in TERMINAL_IMMUTABLE_FIELDS}
+    for key in ("issue_id", "identifier", "parent_issue_id", "workflow_object_type"):
+        if normalized[key] != manifest_root.get(key):
+            raise DeliveryPolicyError(
+                "terminal immutable Requirement identity differs from manifest"
+            )
+    if normalized["status"] != "done":
+        raise DeliveryPolicyError("terminal immutable Requirement must remain done")
+    revision = normalized["approval_revision"]
+    if not isinstance(revision, int) or isinstance(revision, bool) or revision <= 0:
+        raise DeliveryPolicyError(
+            "terminal immutable Requirement approval revision is invalid"
+        )
+    plan_revision = normalized["plan_revision"]
+    if (
+        not isinstance(plan_revision, int)
+        or isinstance(plan_revision, bool)
+        or plan_revision <= 0
+    ):
+        raise DeliveryPolicyError(
+            "terminal immutable Requirement Plan revision is invalid"
+        )
+    approved = normalized["approved_requirement_head_sha"]
+    if (
+        not _is_sha(approved)
+        or normalized["reviewed_commit_sha"] != approved
+        or normalized["current_requirement_head_sha"] != approved
+    ):
+        raise DeliveryPolicyError(
+            "terminal immutable Requirement approved head binding is invalid"
+        )
+    if not _is_digest(normalized["delivery_policy_digest"]):
+        raise DeliveryPolicyError(
+            "terminal immutable Requirement policy digest is invalid"
+        )
+    if (
+        not isinstance(normalized["requirement_branch"], str)
+        or not normalized["requirement_branch"]
+    ):
+        raise DeliveryPolicyError(
+            "terminal immutable Requirement branch is missing"
+        )
+    delivery_scalar = normalized["delivery_evidence_record"]
+    delivery = decode_metadata_record(
+        delivery_scalar, "terminal immutable delivery_evidence_record"
+    )
+    for key, expected in (
+        ("plan_revision", plan_revision),
+        ("delivery_policy_digest", normalized["delivery_policy_digest"]),
+        ("reviewed_commit_sha", approved),
+        ("current_requirement_head_sha", approved),
+    ):
+        if delivery.get(key) != expected:
+            raise DeliveryPolicyError(
+                f"terminal immutable delivery evidence {key} binding is invalid"
+            )
+    handoff = decode_metadata_record(
+        normalized["delivery_handoff_record"],
+        "terminal immutable delivery_handoff_record",
+    )
+    for key, expected in (
+        ("issue_id", normalized["issue_id"]),
+        ("plan_revision", plan_revision),
+        ("reviewed_commit_sha", approved),
+        ("delivery_policy_digest", normalized["delivery_policy_digest"]),
+    ):
+        if handoff.get(key) != expected:
+            raise DeliveryPolicyError(
+                f"terminal immutable handoff {key} binding is invalid"
+            )
+    expected_delivery_digest = hashlib.sha256(
+        delivery_scalar.encode("utf-8")
+    ).hexdigest()
+    if handoff.get("delivery_record_digest") != expected_delivery_digest:
+        raise DeliveryPolicyError(
+            "terminal immutable handoff delivery binding is invalid"
+        )
+    return normalized
+
+
+def _terminal_immutable_evidence_digest(value: Any, manifest: dict[str, Any]) -> str:
+    evidence = _require_object(value, "terminal immutable evidence")
+    if set(evidence) != {
+        "schema_version",
+        "pre",
+        "post",
+        "pre_digest",
+        "post_digest",
+    }:
+        raise DeliveryPolicyError("terminal immutable evidence fields are invalid")
+    if evidence.get("schema_version") != 1:
+        raise DeliveryPolicyError("terminal immutable evidence schema is unsupported")
+    roots = [
+        item
+        for item in manifest["issues"]
+        if item.get("object_role") == "root_requirement"
+    ]
+    root_map = {item["issue_id"]: item for item in roots}
+    pre = evidence.get("pre")
+    post = evidence.get("post")
+    if not isinstance(pre, list) or not isinstance(post, list):
+        raise DeliveryPolicyError("terminal immutable pre/post evidence is missing")
+
+    def normalize(items: list[Any], label: str) -> list[dict[str, Any]]:
+        if len(items) != 2:
+            raise DeliveryPolicyError(
+                f"terminal immutable {label} evidence requires exactly two Requirements"
+            )
+        item_map = {
+            item.get("issue_id"): item
+            for item in items
+            if isinstance(item, dict) and isinstance(item.get("issue_id"), str)
+        }
+        if len(item_map) != 2 or set(item_map) != set(root_map):
+            raise DeliveryPolicyError(
+                f"terminal immutable {label} Requirement identities are invalid"
+            )
+        return [
+            _terminal_immutable_entry(item_map[root["issue_id"]], root)
+            for root in roots
+        ]
+
+    normalized_pre = normalize(pre, "pre")
+    normalized_post = normalize(post, "post")
+    pre_digest = digest(normalized_pre)
+    post_digest = digest(normalized_post)
+    if evidence.get("pre_digest") != pre_digest:
+        raise DeliveryPolicyError("terminal immutable pre digest is not canonical")
+    if evidence.get("post_digest") != post_digest:
+        raise DeliveryPolicyError("terminal immutable post digest is not canonical")
+    if normalized_pre != normalized_post or pre_digest != post_digest:
+        raise DeliveryPolicyError("terminal immutable Requirement evidence drifted")
+    approved = manifest["immutable_snapshot"]
+    approved_entries = {
+        item["issue_id"]: item for item in approved["requirements"]
+    }
+    for entry in normalized_pre:
+        if approved_entries[entry["issue_id"]]["snapshot_digest"] != digest(entry):
+            raise DeliveryPolicyError(
+                "terminal immutable Requirement differs from approved snapshot"
+            )
+    if approved["aggregate_digest"] != pre_digest:
+        raise DeliveryPolicyError("terminal immutable aggregate digest drifted")
+    return digest(
+        {
+            "schema_version": 1,
+            "requirements": normalized_pre,
+            "evidence_digest": pre_digest,
+        }
+    )
+
+
+def _superseded_release_record(plan: dict[str, Any], checkpoint: int) -> str:
+    return encode_metadata_record({**plan, "checkpoint": checkpoint})
+
+
+def superseded_task_release(snapshot: Any) -> dict[str, Any]:
+    data = _require_object(snapshot, "superseded task release snapshot")
+    context = _require_object(data.get("context"), "superseded release context")
+    target = _require_object(data.get("target"), "superseded release target")
+    guard = _require_object(data.get("guard"), "superseded release guard")
+    pr = _require_object(data.get("pull_request"), "superseded release pull request")
+    source = _require_object(data.get("source"), "superseded release source")
+    reasons: list[str] = []
+    for key in (
+        "workspace_id", "root_requirement_id", "plan_issue_id",
+        "superseded_implementation_id", "target_issue_id", "original_owner_id",
+        "old_branch", "new_branch", "expected_worktree_path",
+    ):
+        _add(reasons, isinstance(context.get(key), str) and bool(context.get(key)), f"{key} is missing")
+    _add(reasons, context.get("plan_revision") == 4, "superseded release Plan revision is invalid")
+    _add(reasons, _is_digest(context.get("delivery_policy_digest")), "superseded release policy digest is invalid")
+    _add(reasons, isinstance(context.get("fixed_operation_manifest_identity"), str) and context["fixed_operation_manifest_identity"].startswith("v2.sha256:"), "superseded release manifest identity is invalid")
+    _add(reasons, target.get("issue_id") == context.get("target_issue_id"), "superseded release target identity drifted")
+    _add(reasons, target.get("workspace_lease_scope") == "task", "superseded release scope must be task")
+    existing_record = target.get(SUPERSEDED_TASK_RELEASE_RECORD_KEY)
+    if existing_record in {None, ""}:
+        _add(reasons, target.get("workspace_lease_state") == "held", "superseded release initial state must be held")
+        _add(reasons, target.get("workspace_lease_owner_issue_id") == context.get("target_issue_id"), "superseded release owner Issue is invalid")
+        _add(reasons, target.get("workspace_lease_owner_agent_id") == context.get("original_owner_id"), "superseded release original owner is invalid")
+    _add(reasons, target.get("status") == "blocked", "superseded task must remain blocked")
+    _add(reasons, pr.get("number") == 26 and pr.get("state") == "closed", "superseded PR must be closed PR 26")
+    _add(reasons, pr.get("head_branch") == context.get("old_branch"), "superseded PR branch drifted")
+    _add(reasons, guard.get("valid") is True and guard.get("clean") is True and guard.get("registered") is True, "superseded worktree guard is invalid")
+    _add(reasons, guard.get("resolved_path") == context.get("expected_worktree_path"), "superseded worktree path drifted")
+    _add(reasons, guard.get("branch") == context.get("old_branch") and guard.get("head") == pr.get("head_sha"), "superseded worktree branch or head drifted")
+    _add(reasons, guard.get("unfinished_operations") in (None, []), "superseded worktree has an unfinished operation")
+    _add(reasons, source.get("branch") == context.get("new_branch"), "reviewed source branch drifted")
+    _add(reasons, _is_sha(source.get("reviewed_commit_sha")) and source.get("reviewed_commit_sha") == source.get("merged_commit_sha"), "reviewed merged source is invalid")
+    _add(reasons, source.get("review_status") == "APPROVED", "reviewed source is not approved")
+    blocker = {key: target.get(key, "") for key in LEASE_BLOCKER_FIELDS}
+    if reasons:
+        return _terminal_rejected(reasons)
+    capacity = _metadata_capacity_reasons(target, SUPERSEDED_TASK_RELEASE_KEYS)
+    if capacity:
+        return _terminal_rejected(capacity)
+    initial = {
+        "workspace_lease_state": "held",
+        "workspace_lease_owner_issue_id": context["target_issue_id"],
+        "workspace_lease_owner_agent_id": context["original_owner_id"],
+    }
+    desired = {
+        "workspace_lease_state": "released",
+        "workspace_lease_owner_issue_id": "",
+        "workspace_lease_owner_agent_id": "",
+    }
+    plan = {
+        "schema_version": 1,
+        "record_type": "workspace_lease_superseded_release",
+        "action": "superseded_task_release",
+        **context,
+        "initial": initial,
+        "desired": desired,
+        "guard_digest": digest(guard),
+        "pull_request_digest": digest(pr),
+        "blocker_digest": digest(blocker),
+        "reviewed_source_digest": digest(source),
+    }
+    writes = [
+        {"kind": "metadata", "issue_id": target["issue_id"], "key": SUPERSEDED_TASK_RELEASE_RECORD_KEY, "value": _superseded_release_record(plan, 0)},
+        {"kind": "metadata", "issue_id": target["issue_id"], "key": "workspace_lease_state", "value": "released"},
+        {"kind": "metadata", "issue_id": target["issue_id"], "key": SUPERSEDED_TASK_RELEASE_RECORD_KEY, "value": _superseded_release_record(plan, 1)},
+        {"kind": "metadata", "issue_id": target["issue_id"], "key": "workspace_lease_owner_issue_id", "value": ""},
+        {"kind": "metadata", "issue_id": target["issue_id"], "key": SUPERSEDED_TASK_RELEASE_RECORD_KEY, "value": _superseded_release_record(plan, 2)},
+        {"kind": "metadata", "issue_id": target["issue_id"], "key": "workspace_lease_owner_agent_id", "value": ""},
+        {"kind": "metadata", "issue_id": target["issue_id"], "key": SUPERSEDED_TASK_RELEASE_RECORD_KEY, "value": _superseded_release_record(plan, 3)},
+    ]
+    expected = {**initial, SUPERSEDED_TASK_RELEASE_RECORD_KEY: ""}
+    actual = {key: target.get(key, "") for key in SUPERSEDED_TASK_RELEASE_KEYS}
+    prefixes = [0] if actual == expected else []
+    for index, write in enumerate(writes, start=1):
+        expected[write["key"]] = write["value"]
+        if actual == expected:
+            prefixes.append(index)
+    if not prefixes:
+        return _terminal_rejected(["superseded release state is not a canonical prefix"])
+    progress = max(prefixes)
+    if progress == len(writes):
+        return {"allowed": True, "outcome": "already_complete", "reasons": [], "writes": [], "complete": True, "no_action": True, "status_writes": [], "blocker_writes": []}
+    return {"allowed": True, "outcome": "next_write", "reasons": [], "writes": [writes[progress]], "complete": False, "no_action": False, "progress": progress, "total_writes": len(writes), "status_writes": [], "blocker_writes": []}
+
+
+def _terminal_record(plan: dict[str, Any], endpoint: dict[str, Any], checkpoint: int) -> str:
+    return encode_metadata_record(
+        {
+            **plan,
+            "endpoint_issue_id": endpoint["issue_id"],
+            "initial_tuple": endpoint["initial_tuple"],
+            "target_tuple": endpoint["target_tuple"],
+            "checkpoint": checkpoint,
+        }
+    )
+
+
+def _terminal_full_writes(plan: dict[str, Any], endpoints: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    writes = []
+    fields = (
+        ("workspace_lease_state", "state"),
+        ("workspace_lease_owner_issue_id", "owner_issue_id"),
+        ("workspace_lease_owner_agent_id", "owner_agent_id"),
+    )
+    for endpoint in endpoints:
+        writes.append(
+            {
+                "kind": "metadata",
+                "issue_id": endpoint["issue_id"],
+                "key": TERMINAL_NORMALIZATION_RECORD_KEY,
+                "value": _terminal_record(plan, endpoint, 0),
+            }
+        )
+        for checkpoint, (key, tuple_key) in enumerate(fields, start=1):
+            writes.append(
+                {
+                    "kind": "metadata",
+                    "issue_id": endpoint["issue_id"],
+                    "key": key,
+                    "value": endpoint["target_tuple"][tuple_key],
+                }
+            )
+            writes.append(
+                {
+                    "kind": "metadata",
+                    "issue_id": endpoint["issue_id"],
+                    "key": TERMINAL_NORMALIZATION_RECORD_KEY,
+                    "value": _terminal_record(plan, endpoint, checkpoint),
+                }
+            )
+    return writes
+
+
+def _terminal_endpoint_projection(endpoint: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "workspace_lease_state": endpoint.get("workspace_lease_state"),
+        "workspace_lease_owner_issue_id": endpoint.get("workspace_lease_owner_issue_id", ""),
+        "workspace_lease_owner_agent_id": endpoint.get("workspace_lease_owner_agent_id", ""),
+        TERMINAL_NORMALIZATION_RECORD_KEY: endpoint.get(TERMINAL_NORMALIZATION_RECORD_KEY, ""),
+    }
+
+
+def _terminal_rejected(reasons: list[str]) -> dict[str, Any]:
+    return {
+        "allowed": False,
+        "outcome": "rejected",
+        "reasons": reasons,
+        "writes": [],
+        "status_writes": [],
+        "blocker_writes": [],
+    }
+
+
+def terminal_normalization_transition(snapshot: Any) -> dict[str, Any]:
+    data = _require_object(snapshot, "terminal normalization snapshot")
+    plan, manifest_endpoints = _terminal_plan_binding(data)
+    if not _is_digest(plan.get("pre_snapshot_digest")):
+        raise DeliveryPolicyError("terminal normalization pre-snapshot digest is invalid")
+    if data.get("immutable_evidence") is None:
+        raise DeliveryPolicyError("terminal normalization immutable evidence is missing")
+    observed = data.get("endpoints")
+    if not isinstance(observed, list) or len(observed) != 4:
+        return _terminal_rejected(["exactly four observed endpoints are required"])
+    observed_map = {
+        item.get("issue_id"): item
+        for item in observed
+        if isinstance(item, dict) and isinstance(item.get("issue_id"), str)
+    }
+    if len(observed_map) != 4 or set(observed_map) != set(plan["endpoint_order"]):
+        return _terminal_rejected(["observed endpoints do not match the fixed manifest"])
+    expected: dict[str, dict[str, Any]] = {}
+    reasons = []
+    for manifest_endpoint in manifest_endpoints:
+        endpoint = observed_map[manifest_endpoint["issue_id"]]
+        for key in ("identifier", "parent_issue_id", "workflow_object_type"):
+            _add(
+                reasons,
+                endpoint.get(key) == manifest_endpoint.get(key),
+                f"endpoint {manifest_endpoint['issue_id']} {key} drifted",
+            )
+        _add(reasons, endpoint.get("status") == "done", "endpoint status drifted")
+        _add(
+            reasons,
+            endpoint.get("workspace_lease_scope") == "requirement",
+            "endpoint lease scope drifted",
+        )
+        capacity = _metadata_capacity_reasons(endpoint, TERMINAL_NORMALIZATION_ENDPOINT_KEYS)
+        reasons.extend(capacity)
+        initial = manifest_endpoint["initial_tuple"]
+        expected[manifest_endpoint["issue_id"]] = {
+            "workspace_lease_state": initial["state"],
+            "workspace_lease_owner_issue_id": initial["owner_issue_id"],
+            "workspace_lease_owner_agent_id": initial["owner_agent_id"],
+            TERMINAL_NORMALIZATION_RECORD_KEY: "",
+        }
+    if reasons:
+        return _terminal_rejected(reasons)
+    actual = {key: _terminal_endpoint_projection(value) for key, value in observed_map.items()}
+    writes = _terminal_full_writes(plan, manifest_endpoints)
+    prefixes = [0] if expected == actual else []
+    for index, write in enumerate(writes, start=1):
+        expected[write["issue_id"]][write["key"]] = write["value"]
+        if expected == actual:
+            prefixes.append(index)
+    if not prefixes:
+        return _terminal_rejected(["terminal normalization state is not a canonical prefix"])
+    progress = max(prefixes)
+    if progress == len(writes):
+        return {
+            "allowed": True,
+            "outcome": "already_complete",
+            "reasons": [],
+            "writes": [],
+            "progress": progress,
+            "total_writes": len(writes),
+            "complete": True,
+            "no_action": True,
+            "status_writes": [],
+            "blocker_writes": [],
+        }
+    return {
+        "allowed": True,
+        "outcome": "next_write",
+        "reasons": [],
+        "writes": [writes[progress]],
+        "progress": progress,
+        "total_writes": len(writes),
+        "complete": False,
+        "no_action": False,
+        "status_writes": [],
+        "blocker_writes": [],
+    }
+
+
+def terminal_normalization_attest(snapshot: Any) -> dict[str, Any]:
+    data = _require_object(snapshot, "terminal normalization attestation snapshot")
+    transitioned = terminal_normalization_transition(data)
+    if not transitioned["allowed"] or not transitioned.get("complete"):
+        return _terminal_rejected(["all fixed endpoints must be terminal before attestation"])
+    root = _require_object(data.get("root"), "terminal normalization root")
+    manifest = _require_object(data.get("manifest"), "terminal normalization manifest")
+    plan = _require_object(data.get("plan"), "terminal normalization Plan evidence")
+    deployment = _require_object(data.get("deployment"), "terminal normalization deployment evidence")
+    reasons = []
+    _add(reasons, root.get("issue_id") == root.get("root_requirement_id"), "attestation root is not top-level")
+    _add(
+        reasons,
+        root.get("issue_id") == plan.get("root_requirement_id")
+        and plan.get("parent_issue_id") == root.get("issue_id"),
+        "attestation root is not the current Plan authority",
+    )
+    _add(reasons, root.get("workflow_object_type") == "requirement", "attestation root type is invalid")
+    _add(reasons, root.get("workflow_instance_id") == manifest.get("workflow_instance_id"), "attestation workflow binding drifted")
+    _add(reasons, root.get("plan_revision") == manifest["plan"]["plan_revision"], "attestation Plan revision drifted")
+    _add(reasons, root.get("delivery_policy_digest") == manifest["plan"]["delivery_policy_digest"], "attestation policy digest drifted")
+    _add(reasons, plan.get("fixed_operation_manifest_identity") == _terminal_manifest_identity(manifest), "attestation manifest identity drifted")
+    _add(reasons, _is_sha(deployment.get("deployed_source_commit")), "deployed source commit is invalid")
+    for key in ("deployment_plan_digest", "pre_snapshot_digest", "post_snapshot_digest"):
+        _add(reasons, _is_digest(deployment.get(key)), f"{key} is invalid")
+    _add(reasons, deployment.get("pre_snapshot_digest") == data.get("pre_snapshot_digest"), "pre-snapshot digest drifted")
+    _add(
+        reasons,
+        deployment.get("post_snapshot_digest") == data.get("post_snapshot_digest"),
+        "post-snapshot digest drifted",
+    )
+    _add(
+        reasons,
+        deployment.get("deployed_source_commit")
+        == root.get("deployed_source_commit"),
+        "deployed source is not bound to the current root",
+    )
+    _add(
+        reasons,
+        deployment.get("deployment_plan_digest")
+        == root.get("deployment_plan_digest"),
+        "deployment Plan is not bound to the current root",
+    )
+    endpoint_records = {
+        endpoint["issue_id"]: endpoint.get(TERMINAL_NORMALIZATION_RECORD_KEY)
+        for endpoint in data["endpoints"]
+    }
+    immutable_evidence_digest = _terminal_immutable_evidence_digest(
+        data.get("immutable_evidence"), manifest
+    )
+    updates = {"terminal_normalization_evidence_record": "pending"}
+    reasons.extend(_metadata_capacity_reasons(root, updates))
+    if reasons:
+        return _terminal_rejected(reasons)
+    record = encode_metadata_record(
+        {
+            "schema_version": 1,
+            "record_type": "terminal_normalization_evidence",
+            "root_requirement_id": root["issue_id"],
+            "workflow_instance_id": manifest["workflow_instance_id"],
+            "plan_issue_id": manifest["plan"]["issue_id"],
+            "plan_revision": manifest["plan"]["plan_revision"],
+            "delivery_policy_digest": manifest["plan"]["delivery_policy_digest"],
+            "fixed_operation_manifest_identity": _terminal_manifest_identity(manifest),
+            "deployed_source_commit": deployment["deployed_source_commit"],
+            "deployment_plan_digest": deployment["deployment_plan_digest"],
+            "pre_snapshot_digest": deployment["pre_snapshot_digest"],
+            "post_snapshot_digest": deployment["post_snapshot_digest"],
+            "endpoint_records_digest": digest(endpoint_records),
+            "immutable_evidence_digest": immutable_evidence_digest,
+        }
+    )
+    return {
+        "allowed": True,
+        "outcome": "attested",
+        "reasons": [],
+        "writes": [
+            {
+                "kind": "metadata",
+                "issue_id": root["issue_id"],
+                "key": "terminal_normalization_evidence_record",
+                "value": record,
+            }
+        ],
+        "record": record,
+        "status_writes": [],
+        "blocker_writes": [],
+    }
+
+
 def git_operation_markers(root: Path) -> list[str]:
     markers = [
         "MERGE_HEAD",
@@ -2781,6 +3516,11 @@ def parser() -> argparse.ArgumentParser:
 
     lease = subparsers.add_parser("lease-transition")
     lease.add_argument("--snapshot", required=True)
+    terminal = subparsers.add_parser("terminal-normalization")
+    terminal.add_argument("--action", required=True, choices=TERMINAL_NORMALIZATION_ACTIONS)
+    terminal.add_argument("--snapshot", required=True)
+    superseded = subparsers.add_parser("superseded-task-release")
+    superseded.add_argument("--snapshot", required=True)
     return result
 
 
@@ -2826,6 +3566,16 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "lease-transition":
             snapshot = json.loads(Path(args.snapshot).read_text(encoding="utf-8"))
             result = lease_transition_preflight(snapshot)
+            print_json(result)
+            return 0 if result["allowed"] else 1
+        if args.command == "terminal-normalization":
+            snapshot = json.loads(Path(args.snapshot).read_text(encoding="utf-8"))
+            result = terminal_normalization_transition(snapshot) if args.action == "transition" else terminal_normalization_attest(snapshot)
+            print_json(result)
+            return 0 if result["allowed"] else 1
+        if args.command == "superseded-task-release":
+            snapshot = json.loads(Path(args.snapshot).read_text(encoding="utf-8"))
+            result = superseded_task_release(snapshot)
             print_json(result)
             return 0 if result["allowed"] else 1
     except (DeliveryPolicyError, OSError, json.JSONDecodeError) as exc:

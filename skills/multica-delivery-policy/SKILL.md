@@ -53,6 +53,17 @@ python <this-skill>/scripts/delivery_policy.py lease-transition --snapshot <file
 
 This is a deterministic zero-write preflight. Apply only its ordered lease-namespace writes. It never returns Issue status or blocker writes.
 
+For a reviewed, Plan-authorized fixed terminal normalization, use the schema-v2 manifest and immutable evidence with:
+
+```text
+python <this-skill>/scripts/delivery_policy.py terminal-normalization \
+  --action <transition|attest> --snapshot <file>
+```
+
+`transition` returns at most one endpoint metadata write per fresh read. `attest` returns only the root `terminal_normalization_evidence_record`. The portable validator trusts only the current Plan evidence for the approved schema-v2 manifest identity, approved root Requirement, and immutable snapshot aggregate; it contains no concrete Issue IDs or project paths.
+
+The separate `superseded-task-release` command is limited to an exact Plan-authorized task-scope held tuple with a closed superseded PR, clean registered worktree guard, unchanged blocker bytes, and independently reviewed merged source. It returns at most one write from the four-key superseded-release namespace and never changes Issue status or Incident fields.
+
 ## Validate Final Approval and Delivery
 
 Before opening the final approval gate, accepting final approval, recording delivery, handing off to Leader, or completing the Requirement, normalize the current canonical evidence and run:
@@ -67,4 +78,5 @@ Apply only the returned metadata and status writes. A rejected transition writes
 Every final-gate snapshot includes the root's fresh `metadata_keys` inventory so projected writes can be rejected before exceeding Multica's 50-key limit. Delivery and handoff return versioned scalar `delivery_evidence_record` and `delivery_handoff_record` values. Store each returned string exactly as one metadata key; never expand or manually encode the record.
 
 Read [policy-contract.md](references/policy-contract.md) for configuration, remote capability, selection, and workspace lease rules. Read [evidence-contract.md](references/evidence-contract.md) before Review or merge evidence. Read [final-approval-contract.md](references/final-approval-contract.md) before opening or processing final approval, delivery handoff, recovery, or Requirement convergence.
+Read [terminal-normalization-contract.md](references/terminal-normalization-contract.md) before fixed endpoint transition, terminal attestation, or superseded task release.
 Read [resolver-contract.md](references/resolver-contract.md) before validating Resolver provenance, digest schemas, cross-version pinning, migration, rollback, or supersession evidence.
