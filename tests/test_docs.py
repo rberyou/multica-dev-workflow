@@ -203,6 +203,9 @@ class DocumentationTests(unittest.TestCase):
         resolver = (
             policy_root / "references/resolver-contract.md"
         ).read_text(encoding="utf-8")
+        lease = (
+            policy_root / "references/lease-transition-contract.md"
+        ).read_text(encoding="utf-8")
         instructions = "\n".join(
             path.read_text(encoding="utf-8")
             for path in (ROOT / "instructions").rglob("*.md")
@@ -213,6 +216,13 @@ class DocumentationTests(unittest.TestCase):
         self.assertIn("policy_digest", policy + evidence + instructions)
         self.assertIn("v3.sha256:", resolver + instructions)
         self.assertIn("verify-approved", skill + resolver + instructions)
+        self.assertIn("lease-transition", skill + lease + instructions)
+        self.assertIn("normalization_required", lease + instructions)
+        self.assertIn("implementation_authority", lease)
+        self.assertIn("final_integration_validation_mirror", lease)
+        self.assertIn("metadata byte", (skill + lease).lower())
+        self.assertIn("platform_cas_assumed=false", lease)
+        self.assertIn("held|released", policy + instructions)
         self.assertIn("schema-v1/v2", resolver + instructions)
         self.assertIn("完整 snapshot", resolver + instructions)
         self.assertIn("平台评论历史", resolver + instructions)

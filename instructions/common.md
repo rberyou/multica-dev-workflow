@@ -12,7 +12,7 @@ Plan 必须使用已附加的 `multica-delivery-policy` Skill 解析项目根目
 
 Plan 批准后交付配置冻结。每次 Implementation 启动、任务开始、Review、合并和最终批准前重新运行 `verify-approved`。设计正文发生实质变化，或 `policy_digest`/`target_branch` 改变，都必须递增 plan_revision、重新独立 Review 并取得新的 APPROVE PLAN；不得由 Agent 自动升级、降级或原地切换模式。Resolver 实现变化但 v3 digest 相同可以继续；未来 digest 前缀或 schema 不受当前 validator 支持时必须创建新 Plan，不做跨 schema 恢复。已有已批准 schema-v1/v2 Plan 不原地重写，继续用其完整 frozen snapshot 和旧 `verify --snapshot` 兼容验证；它一旦发生实质修订，就递增版本并迁移到三字段紧凑合同。
 
-所有模式都保留需求分支和任务分支。branch_only 使用现有 checkout 串行工作；lightweight 使用一个需求 worktree 串行切换任务分支；isolated 使用需求 worktree和每任务独立 worktree，可按依赖 DAG 并行。`parallel_tasks` 和 workspace lease scope 必须从已验证的 workspace_mode 派生，不作为 Plan 冻结字段。branch_only 和 lightweight 在任一时刻只能由一个 Developer、Code Reviewer 或 Integrator 持有 workspace lease。
+所有模式都保留需求分支和任务分支。branch_only 使用现有 checkout 串行工作；lightweight 使用一个需求 worktree 串行切换任务分支；isolated 使用需求 worktree和每任务独立 worktree，可按依赖 DAG 并行。`parallel_tasks` 和 workspace lease scope 必须从已验证的 workspace_mode 派生，不作为 Plan 冻结字段。branch_only 和 lightweight 在任一时刻只能由一个 Developer、Code Reviewer 或 Integrator 持有 workspace lease。新 lease 只写 `held|released`；`released` 必须清空 owner。acquire 前使用 Delivery Policy 的 `lease-transition --action acquire-preflight` 检查 fresh、完整的 authority/mirror batch；遇到 `legacy_terminal_normalization_required` 时只能显式执行 `normalize-legacy-terminal`，每次应用一个条件写入并完整重读，禁止在 acquire 中静默迁移。
 
 进入本地或 PR Review 前记录 base_commit_sha 和 reviewed_commit_sha。Task PR 启用时还记录 pr_head_sha、PR 和 CI；未启用时直接审查两个不可变 SHA 的 Git diff。任务合并后记录 merge_method 和 merged_commit_sha。集成验证同时记录仓库 default_branch/default_base_sha、Plan 指定的 target_branch/target_base_sha 和需求 reviewed_commit_sha；target_branch 可以不是默认分支。用户仍只需在顶层 Requirement 评论 `APPROVE REQUIREMENT vN`。
 

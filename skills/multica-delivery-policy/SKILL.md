@@ -52,6 +52,12 @@ python <this-skill>/scripts/delivery_policy.py guard-workspace \
 
 The command blocks dirty workspaces, detached HEAD, unfinished Git operations, unexpected branches, and unexpected commits. Never repair a failed guard with stash, reset, clean, force checkout, or by committing unknown changes.
 
+## Recover Legacy Terminal Leases
+
+Before acquiring a non-isolated lease, fresh-read the complete authority-domain batch and run `lease-transition --action acquire-preflight --snapshot <fresh-batch.json>`. `recovery_required` never writes or acquires. Run `normalize-legacy-terminal` explicitly and apply only its one ordered metadata write, then fresh-read the full batch and repeat until every whitelisted terminal group is complete.
+
+The validator never assumes platform metadata CAS. It binds each step to endpoint and inventory digests, checks UTF-8 scalar and total metadata byte capacity, and leaves Issue status, Plan, Review, approval, merge, and delivery evidence unchanged.
+
 ## Validate Final Approval and Delivery
 
 Before opening the final approval gate, accepting final approval, recording delivery, handing off to Leader, or completing the Requirement, normalize the current canonical evidence and run:
@@ -65,5 +71,5 @@ Apply only the returned metadata and status writes. A rejected transition writes
 
 Every final-gate snapshot includes the root's fresh `metadata_keys` inventory so projected writes can be rejected before exceeding Multica's 50-key limit. Delivery and handoff return versioned scalar `delivery_evidence_record` and `delivery_handoff_record` values. Store each returned string exactly as one metadata key; never expand or manually encode the record.
 
-Read [policy-contract.md](references/policy-contract.md) for configuration, remote capability, selection, workspace lease rules, and the [compact Plan schema](references/plan-policy.schema.json). Read [evidence-contract.md](references/evidence-contract.md) before Review or merge evidence. Read [final-approval-contract.md](references/final-approval-contract.md) before opening or processing final approval, delivery handoff, recovery, or Requirement convergence.
+Read [policy-contract.md](references/policy-contract.md) for configuration, remote capability, selection, workspace lease rules, and the [compact Plan schema](references/plan-policy.schema.json). Read [lease-transition-contract.md](references/lease-transition-contract.md) and its [snapshot schema](references/lease-transition.schema.json) before lease acquisition or terminal compatibility recovery. Read [evidence-contract.md](references/evidence-contract.md) before Review or merge evidence. Read [final-approval-contract.md](references/final-approval-contract.md) before opening or processing final approval, delivery handoff, recovery, or Requirement convergence.
 Read [resolver-contract.md](references/resolver-contract.md) before validating compact digests or migrating legacy schema-v1/v2 Plans.

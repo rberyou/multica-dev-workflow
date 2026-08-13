@@ -29,6 +29,8 @@ jobs:
         run: python -m check_jsonschema --schemafile skills/multica-delivery-policy/references/project-delivery.schema.json skills/multica-delivery-policy/references/project-delivery.example.json
       - name: Validate compact Plan policy example
         run: python -m check_jsonschema --schemafile skills/multica-delivery-policy/references/plan-policy.schema.json skills/multica-delivery-policy/references/plan-policy.example.json
+      - name: Validate lease transition example
+        run: python -m check_jsonschema --schemafile skills/multica-delivery-policy/references/lease-transition.schema.json skills/multica-delivery-policy/references/lease-transition.example.json
       - name: Compile tools
         run: python -m py_compile scripts/workflow.py scripts/workflow_lib.py scripts/package_skills.py scripts/release.py skills/multica-delivery-policy/scripts/delivery_policy.py skills/multica-workflow-incidents/scripts/incidents.py skills/multica-workflow-console/scripts/workflow_console.py
       - name: Run tests

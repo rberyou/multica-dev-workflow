@@ -8,6 +8,7 @@
 - Add explicit, idempotent external `incident_fix_requirement` creation with fail-closed Project/Squad checks and partial-write recovery.
 - Close external fixes with typed immutable fix and deployment verification references while preserving legacy ordinary Requirement commit and deployment Plan gates.
 - Publish all local-target Skills through the approved workflow Plan as staged, digest-verified physical copies under `~/.agents/skills`, migrating owned links and blocking foreign targets.
+- Add explicit, resumable batch normalization for whitelisted terminal legacy workspace leases, with authority-domain inventory selection, fresh-read digest checks, and metadata byte-capacity guards.
 
 ## 2.0.0-dev.6
 

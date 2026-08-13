@@ -17,6 +17,8 @@ Each managed development Agent also receives `multica-delivery-policy`. A produc
 
 Without project configuration, a supported GitHub remote resolves to `lightweight`, Task PR disabled, and Requirement PR enabled. Without any remote, both PRs are disabled and delivery remains local. An unsupported or ambiguous remote blocks planning until the project declares a valid policy. `branch_only` and `lightweight` are serial and require the acting Agents to share the same repository filesystem; `isolated` permits independent Task worktrees and DAG parallelism. Review, tests, human approval, and merge evidence remain mandatory in every mode.
 
+New non-isolated workspace lease states are only `held` or canonical `released`. Delivery Policy provides explicit, fail-closed batch recovery for terminal legacy role-state and released-with-owner pairs. It selects one Implementation authority plus one final integration-validation mirror per terminal Requirement, excludes ordinary Task residue from authority, checks fresh endpoint/full-inventory digests and metadata byte capacity, and never performs recovery inside ordinary acquisition.
+
 When a reviewed workspace Plan is applied, previously managed Agents, Skills, and scheduled automations that are absent from v4 desired state are retired. Retired Agents are removed from the managed Squad roster before archival. Historical Projects and their Issue records are preserved; a Project led by a retiring Agent is reassigned to the current development leader first.
 
 The rationale and exact boundaries are recorded in [docs/workflow-design.md](docs/workflow-design.md).

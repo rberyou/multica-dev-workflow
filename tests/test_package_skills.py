@@ -42,9 +42,13 @@ class PackageSkillsTests(unittest.TestCase):
                         self.assertIn("references/project-delivery.schema.json", names)
                         self.assertIn("references/plan-policy.schema.json", names)
                         self.assertIn("references/plan-policy.example.json", names)
+                        self.assertIn("references/lease-transition.schema.json", names)
+                        self.assertIn("references/lease-transition.example.json", names)
+                        self.assertIn("references/lease-transition-contract.md", names)
                         self.assertIn("references/resolver-contract.md", names)
                         self.assertIn("references/evidence-contract.md", names)
                         self.assertIn("references/final-approval-contract.md", names)
+                        self.assertIn("lease-transition", content)
 
     def test_package_omits_runtime_cache_files(self):
         with tempfile.TemporaryDirectory() as temp:

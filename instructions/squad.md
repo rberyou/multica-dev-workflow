@@ -10,7 +10,7 @@
 
 新 Plan 只冻结 plan_revision、带版本前缀的 policy_digest 和 target_branch，不保存完整 Resolver JSON、provenance、单独 digest schema 字段或 snapshot_record_digest。人工 APPROVE PLAN 后配置冻结；后续每个阶段通过 `verify-approved` 重新解析当前仓库并验证原摘要。设计实质变化、摘要变化或 target branch 变化都必须新 revision、独立 Review 和人工批准；Resolver 实现变化但摘要相同可以继续。已有 schema-v1/v2 Plan 保持不可变并继续使用旧完整 snapshot 验证，实质修订时迁移到紧凑合同。
 
-所有模式保留需求分支和任务分支。branch_only 不创建 worktree；lightweight 只创建一个需求 worktree；两者只在相关 Agent 共享同一个规范仓库文件系统时可用，并采用串行调度和排他 workspace lease。isolated 为每个任务创建独立 worktree，可按 DAG 并行。无法证明共享访问或 branch_only checkout 干净时必须阻塞，禁止自动切换模式或让多个 Agent 并行操作同一个非隔离 checkout。
+所有模式保留需求分支和任务分支。branch_only 不创建 worktree；lightweight 只创建一个需求 worktree；两者只在相关 Agent 共享同一个规范仓库文件系统时可用，并采用串行调度和排他 workspace lease。isolated 为每个任务创建独立 worktree，可按 DAG 并行。无法证明共享访问或 branch_only checkout 干净时必须阻塞，禁止自动切换模式或让多个 Agent 并行操作同一个非隔离 checkout。旧终态 lease 的恢复必须读取所有终态 Requirement 的 Implementation authority、最终 integration-validation mirror 和当前 claim；普通 Task 上残留的 lease 字段不是 authority。多组合法 legacy terminal 可顺序迁移，但全组 canonical 前不得 acquire。
 
 Task PR 与 Requirement PR 可独立启停。无 Task PR 时保留独立代码 Review、测试和本地任务合并证据；无 Requirement PR 时保留集成 Review、验收测试、人工批准和本地 target branch 合并证据；无远程时不执行 push、PR 或远程 CI。
 

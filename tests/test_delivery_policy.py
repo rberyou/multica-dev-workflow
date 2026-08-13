@@ -23,6 +23,10 @@ PLAN_SCHEMA_PATH = (
     ROOT
     / "skills/multica-delivery-policy/references/plan-policy.schema.json"
 )
+LEASE_SCHEMA_PATH = (
+    ROOT
+    / "skills/multica-delivery-policy/references/lease-transition.schema.json"
+)
 SPEC = importlib.util.spec_from_file_location("delivery_policy", POLICY_PATH)
 delivery_policy = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader
@@ -35,6 +39,141 @@ DEFAULT_BASE_SHA = "3" * 40
 MERGED_SHA = "4" * 40
 TREE_SHA = "5" * 40
 POLICY_DIGEST = "v3.sha256:" + "6" * 64
+
+
+def lease_group(root_id: str, state: str, suffix: str) -> dict:
+    owner_issue = f"T-holder-{suffix}"
+    owner_agent = "agent-integrator"
+    workflow_instance = f"workflow-{suffix}"
+    lease = {
+        "workspace_lease_state": state,
+        "workspace_lease_owner_issue_id": owner_issue,
+        "workspace_lease_owner_agent_id": owner_agent,
+    }
+    endpoint_base = {
+        "status": "done",
+        "root_requirement_id": root_id,
+        "workflow_instance_id": workflow_instance,
+        "workspace_lease_scope": "requirement",
+        "workspace_lease_transition_record": None,
+        "metadata_total_bytes": 4096,
+        "metadata_byte_limit": 8192,
+        "metadata_scalar_byte_limit": 8192,
+        **lease,
+    }
+    return {
+        "root": {
+            "issue_id": root_id,
+            "status": "done",
+            "workflow_instance_id": workflow_instance,
+            "workspace_mode": "lightweight",
+            "plan_schema_version": 3,
+            "plan_revision": 2,
+            "current_plan_revision": 2,
+            "approved_policy_digest": POLICY_DIGEST,
+            "current_policy_digest": POLICY_DIGEST,
+            "target_branch": f"req/{root_id}-completed",
+            "current_target_branch": f"req/{root_id}-completed",
+            "plan_frozen_fields": [
+                "plan_revision",
+                "policy_digest",
+                "target_branch",
+            ],
+            "active_child_issue_ids": [],
+            "pending_review_issue_ids": [],
+            "open_approval_gates": [],
+            "review_evidence_current": True,
+            "approval_evidence_current": True,
+            "merge_evidence_current": True,
+            "delivery_evidence_current": True,
+            "delivery_complete": True,
+        },
+        "git": {
+            "clean": True,
+            "unfinished_operations": [],
+            "branch": f"req/{root_id}-completed",
+            "expected_branch": f"req/{root_id}-completed",
+            "head_sha": REVIEWED_SHA,
+            "expected_head_sha": REVIEWED_SHA,
+            "worktree_id": f"worktree-{suffix}",
+            "expected_worktree_id": f"worktree-{suffix}",
+        },
+        "historical_holder": {
+            "issue_id": owner_issue,
+            "agent_id": owner_agent,
+            "agent_role": state if state in {"developer", "reviewer", "integrator"} else "integrator",
+            "status": "done",
+            "active": False,
+            "root_requirement_id": root_id,
+            "workflow_instance_id": workflow_instance,
+        },
+        "authority": {
+            "issue_id": f"I-authority-{suffix}",
+            "endpoint_role": "implementation_authority",
+            **endpoint_base,
+        },
+        "mirror": {
+            "issue_id": f"I-mirror-{suffix}",
+            "endpoint_role": "final_integration_validation_mirror",
+            **endpoint_base,
+        },
+    }
+
+
+def lease_snapshot(states=("integrator",)) -> dict:
+    groups = [
+        lease_group(f"R-{index + 1}", state, str(index + 1))
+        for index, state in enumerate(states)
+    ]
+    endpoint_inventory = []
+    for group in groups:
+        endpoint_inventory.extend(
+            [copy.deepcopy(group["authority"]), copy.deepcopy(group["mirror"])]
+        )
+    return {
+        "schema_version": 2,
+        "snapshot_read_id": "fresh-read-1",
+        "inventory_selection_rule": (
+            delivery_policy.LEASE_INVENTORY_SELECTION_RULE
+        ),
+        "inventory_complete": True,
+        "requirement_root_ids": [group["root"]["issue_id"] for group in groups],
+        "discovered_requirement_root_ids": [
+            group["root"]["issue_id"] for group in groups
+        ],
+        "migration_groups": groups,
+        "endpoint_inventory": endpoint_inventory,
+        "discovered_issue_inventory": copy.deepcopy(endpoint_inventory),
+        "current_claims": [],
+    }
+
+
+def apply_lease_write(snapshot: dict, result: dict) -> dict:
+    updated = copy.deepcopy(snapshot)
+    write = result["ordered_writes"][0]
+    root_id = write["group_root_requirement_id"]
+    group = next(
+        item for item in updated["migration_groups"]
+        if item["root"]["issue_id"] == root_id
+    )
+    endpoint = group[write["endpoint"]]
+    assert write["expected_endpoint_digest"] == delivery_policy.digest(
+        delivery_policy._lease_endpoint_projection(endpoint)
+    )
+    endpoint.update(write["metadata_updates"])
+    if write["projected_metadata_total_bytes"] is not None:
+        endpoint["metadata_total_bytes"] = write["projected_metadata_total_bytes"]
+    for inventory_item in updated["endpoint_inventory"]:
+        if inventory_item["issue_id"] == endpoint["issue_id"]:
+            inventory_item.update(write["metadata_updates"])
+            inventory_item["metadata_total_bytes"] = endpoint["metadata_total_bytes"]
+    for inventory_item in updated["discovered_issue_inventory"]:
+        if inventory_item["issue_id"] == endpoint["issue_id"]:
+            inventory_item.update(write["metadata_updates"])
+            inventory_item["metadata_total_bytes"] = endpoint["metadata_total_bytes"]
+    current = int(updated["snapshot_read_id"].split("-")[-1])
+    updated["snapshot_read_id"] = f"fresh-read-{current + 1}"
+    return updated
 
 
 def final_gate_snapshot(
@@ -240,6 +379,414 @@ def legacy_v2_policy_snapshot(repo: Path, **selections) -> dict:
 
 
 class DeliveryPolicyTests(unittest.TestCase):
+    def test_lease_transition_schema_example_is_valid(self):
+        schema = json.loads(LEASE_SCHEMA_PATH.read_text(encoding="utf-8"))
+        example = json.loads(
+            LEASE_SCHEMA_PATH.with_name("lease-transition.example.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        Draft202012Validator(schema).validate(example)
+
+    def test_legacy_role_and_released_with_owner_normalize_resumably(self):
+        for state, family in [
+            ("developer", "role_state"),
+            ("released", "released_with_owner"),
+        ]:
+            with self.subTest(state=state):
+                snapshot = lease_snapshot((state,))
+                preflight = delivery_policy.lease_transition(
+                    snapshot, "acquire-preflight"
+                )
+                self.assertFalse(preflight["valid"])
+                self.assertEqual(preflight["outcome"], "recovery_required")
+                self.assertEqual(preflight["groups"][0]["legacy_family"], family)
+                self.assertEqual(
+                    preflight["blocker_reasons"],
+                    ["legacy_terminal_normalization_required"],
+                )
+
+                expected_stages = [
+                    "prepare_authority_checkpoint",
+                    "prepare_mirror_checkpoint",
+                    "normalize_mirror",
+                    "normalize_authority",
+                    "complete_authority_checkpoint",
+                    "complete_mirror_checkpoint",
+                ]
+                records = []
+                for sequence, expected_stage in enumerate(expected_stages, 1):
+                    result = delivery_policy.lease_transition(
+                        snapshot, "normalize-legacy-terminal"
+                    )
+                    self.assertTrue(result["valid"])
+                    self.assertEqual(result["outcome"], "write_required")
+                    self.assertEqual(result["resume_stage"], expected_stage)
+                    self.assertEqual(result["ordered_writes"][0]["sequence"], sequence)
+                    self.assertEqual(result["status_writes"], [])
+                    records.append(result["transition_record"])
+                    repeated = delivery_policy.lease_transition(
+                        snapshot, "normalize-legacy-terminal"
+                    )
+                    self.assertEqual(result, repeated)
+                    snapshot = apply_lease_write(snapshot, result)
+
+                complete = delivery_policy.lease_transition(
+                    snapshot, "normalize-legacy-terminal"
+                )
+                self.assertTrue(complete["valid"])
+                self.assertEqual(complete["outcome"], "normalization_complete")
+                self.assertEqual(complete["resume_stage"], "complete")
+                group = snapshot["migration_groups"][0]
+                self.assertEqual(group["authority"].get("status"), "done")
+                self.assertEqual(group["mirror"].get("status"), "done")
+                self.assertEqual(
+                    delivery_policy._lease_tuple(group["authority"]),
+                    delivery_policy.CANONICAL_RELEASED_LEASE,
+                )
+                self.assertEqual(records[:4], [records[0]] * 4)
+                self.assertEqual(records[4:], [records[4]] * 2)
+                self.assertNotEqual(records[0], records[4])
+                allowed = delivery_policy.lease_transition(
+                    snapshot, "acquire-preflight"
+                )
+                self.assertTrue(allowed["valid"])
+                self.assertTrue(allowed["acquisition_allowed"])
+
+    def test_lease_transition_fail_closed_boundaries(self):
+        cases = []
+
+        def add(code, mutate):
+            cases.append((code, mutate))
+
+        endpoints = lambda s: [s["migration_groups"][0]["authority"], s["migration_groups"][0]["mirror"], *s["endpoint_inventory"][:2]]
+        add("held_lease_not_terminal", lambda s: [e.update(workspace_lease_state="held") for e in endpoints(s)])
+        add("unknown_lease_state", lambda s: [e.update(workspace_lease_state="held_by_integrator") for e in endpoints(s)])
+        add("legacy_owner_missing", lambda s: [e.update(workspace_lease_owner_agent_id="") for e in endpoints(s)])
+        add("legacy_owner_inconsistent", lambda s: s["migration_groups"][0]["historical_holder"].update(agent_id="other-agent"))
+        add("legacy_tuple_mismatch", lambda s: [s["migration_groups"][0]["mirror"].update(workspace_lease_owner_agent_id="other-agent"), s["endpoint_inventory"][1].update(workspace_lease_owner_agent_id="other-agent")])
+        add("root_not_done", lambda s: s["migration_groups"][0]["root"].update(status="in_progress"))
+        add("authority_not_done", lambda s: [s["migration_groups"][0]["authority"].update(status="in_progress"), s["endpoint_inventory"][0].update(status="in_progress")])
+        add("mirror_not_done", lambda s: [s["migration_groups"][0]["mirror"].update(status="in_progress"), s["endpoint_inventory"][1].update(status="in_progress")])
+        add("root_identity_mismatch", lambda s: [s["migration_groups"][0]["mirror"].update(root_requirement_id="R-other"), s["endpoint_inventory"][1].update(root_requirement_id="R-other")])
+        add("workflow_instance_mismatch", lambda s: [s["migration_groups"][0]["mirror"].update(workflow_instance_id="other"), s["endpoint_inventory"][1].update(workflow_instance_id="other")])
+        add("lease_scope_mismatch", lambda s: [s["migration_groups"][0]["authority"].update(workspace_lease_scope="repository"), s["endpoint_inventory"][0].update(workspace_lease_scope="repository")])
+        add("isolated_mode_not_eligible", lambda s: s["migration_groups"][0]["root"].update(workspace_mode="isolated"))
+        add("active_legacy_lease", lambda s: s["migration_groups"][0]["historical_holder"].update(status="in_progress", active=True))
+        add("active_child_present", lambda s: s["migration_groups"][0]["root"].update(active_child_issue_ids=["T-active"]))
+        add("pending_review", lambda s: s["migration_groups"][0]["root"].update(pending_review_issue_ids=["V-review"]))
+        add("approval_gate_open", lambda s: s["migration_groups"][0]["root"].update(open_approval_gates=["final"]))
+        add("git_state_unsafe", lambda s: s["migration_groups"][0]["git"].update(clean=False))
+        add("delivery_evidence_drift", lambda s: s["migration_groups"][0]["root"].update(delivery_complete=False))
+        add("plan_binding_drift", lambda s: s["migration_groups"][0]["root"].update(current_policy_digest="v3.sha256:" + "7" * 64))
+        add("incomplete_lease_inventory", lambda s: s.update(inventory_complete=False))
+        add("incomplete_lease_inventory", lambda s: s.update(inventory_selection_rule="wrong"))
+        add("incomplete_lease_inventory", lambda s: s["endpoint_inventory"].pop(1))
+        add("metadata_byte_capacity_unknown", lambda s: [s["migration_groups"][0]["authority"].pop("metadata_total_bytes"), s["endpoint_inventory"][0].pop("metadata_total_bytes")])
+
+        for code, mutate in cases:
+            with self.subTest(code=code, index=cases.index((code, mutate))):
+                snapshot = lease_snapshot()
+                mutate(snapshot)
+                result = delivery_policy.lease_transition(
+                    snapshot, "normalize-legacy-terminal"
+                )
+                self.assertFalse(result["valid"])
+                self.assertEqual(result["ordered_writes"], [])
+                self.assertIn(code, result["blocker_reasons"])
+
+    def test_partial_transition_detects_conflict_and_concurrent_change(self):
+        snapshot = lease_snapshot()
+        prepared = delivery_policy.lease_transition(
+            snapshot, "normalize-legacy-terminal"
+        )
+        snapshot = apply_lease_write(snapshot, prepared)
+        snapshot["snapshot_read_id"] = "fresh-read-concurrent"
+        snapshot["migration_groups"][0]["root"]["review_evidence_current"] = False
+        changed = delivery_policy.lease_transition(
+            snapshot, "normalize-legacy-terminal"
+        )
+        self.assertFalse(changed["valid"])
+        self.assertIn("concurrent_inventory_change", changed["blocker_reasons"])
+        self.assertIn("pending_review", changed["blocker_reasons"])
+
+        snapshot = lease_snapshot()
+        prepared = delivery_policy.lease_transition(
+            snapshot, "normalize-legacy-terminal"
+        )
+        snapshot = apply_lease_write(snapshot, prepared)
+        snapshot["snapshot_read_id"] = "fresh-read-concurrent"
+        snapshot["migration_groups"][0]["authority"]["metadata_total_bytes"] += 1
+        snapshot["endpoint_inventory"][0]["metadata_total_bytes"] += 1
+        snapshot["discovered_issue_inventory"][0]["metadata_total_bytes"] += 1
+        changed = delivery_policy.lease_transition(
+            snapshot, "normalize-legacy-terminal"
+        )
+        self.assertFalse(changed["valid"])
+        self.assertIn("concurrent_inventory_change", changed["blocker_reasons"])
+
+        snapshot = lease_snapshot()
+        prepared = delivery_policy.lease_transition(
+            snapshot, "normalize-legacy-terminal"
+        )
+        snapshot = apply_lease_write(snapshot, prepared)
+        snapshot["migration_groups"][0]["mirror"]["workspace_lease_transition_record"] = "v1.invalid+record"
+        snapshot["endpoint_inventory"][1]["workspace_lease_transition_record"] = "v1.invalid+record"
+        conflicted = delivery_policy.lease_transition(
+            snapshot, "normalize-legacy-terminal"
+        )
+        self.assertFalse(conflicted["valid"])
+        self.assertIn(
+            "transition_checkpoint_conflict", conflicted["blocker_reasons"]
+        )
+
+    def test_complete_transition_rechecks_inventory_before_acquisition(self):
+        snapshot = lease_snapshot()
+        for _ in range(6):
+            result = delivery_policy.lease_transition(
+                snapshot, "normalize-legacy-terminal"
+            )
+            snapshot = apply_lease_write(snapshot, result)
+        snapshot["current_claims"].append(
+            {
+                "root_requirement_id": "R-current",
+                "owner_issue_id": "T-current",
+                "owner_agent_id": "agent-current",
+            }
+        )
+        preflight = delivery_policy.lease_transition(snapshot, "acquire-preflight")
+        self.assertFalse(preflight["valid"])
+        self.assertIn("competing_lease_claim", preflight["blocker_reasons"])
+
+    def test_complete_transition_accepts_fresh_read_id_advance(self):
+        snapshot = lease_snapshot()
+        for _ in range(6):
+            result = delivery_policy.lease_transition(
+                snapshot, "normalize-legacy-terminal"
+            )
+            snapshot = apply_lease_write(snapshot, result)
+        snapshot["snapshot_read_id"] = "fresh-read-later"
+        complete = delivery_policy.lease_transition(
+            snapshot, "normalize-legacy-terminal"
+        )
+        self.assertTrue(complete["valid"])
+        self.assertEqual(complete["outcome"], "normalization_complete")
+        preflight = delivery_policy.lease_transition(snapshot, "acquire-preflight")
+        self.assertTrue(preflight["acquisition_allowed"])
+
+    def test_lease_transition_accepts_legacy_v2_plan_binding(self):
+        snapshot = lease_snapshot()
+        root = snapshot["migration_groups"][0]["root"]
+        root["plan_schema_version"] = 2
+        root["approved_policy_digest"] = "6" * 64
+        root["current_policy_digest"] = "6" * 64
+        root.pop("plan_frozen_fields")
+        result = delivery_policy.lease_transition(
+            snapshot, "normalize-legacy-terminal"
+        )
+        self.assertTrue(result["valid"])
+        self.assertEqual(
+            result["groups"][0]["before"]["workspace_lease_state"],
+            "integrator",
+        )
+
+    def test_multiple_terminal_groups_normalize_without_interlock(self):
+        snapshot = lease_snapshot(("integrator", "released"))
+        preflight = delivery_policy.lease_transition(snapshot, "acquire-preflight")
+        self.assertEqual(
+            [item["legacy_family"] for item in preflight["groups"]],
+            ["role_state", "released_with_owner"],
+        )
+        self.assertEqual(preflight["recovery"]["pending_group_count"], 2)
+        for _ in range(6):
+            result = delivery_policy.lease_transition(
+                snapshot, "normalize-legacy-terminal"
+            )
+            self.assertEqual(
+                result["selected_group"]["root_requirement_id"], "R-1"
+            )
+            snapshot = apply_lease_write(snapshot, result)
+        between = delivery_policy.lease_transition(snapshot, "acquire-preflight")
+        self.assertFalse(between["valid"])
+        self.assertEqual(between["groups"][0]["state"], "complete")
+        self.assertNotIn(between["groups"][1]["state"], {"canonical", "complete"})
+        for _ in range(6):
+            result = delivery_policy.lease_transition(
+                snapshot, "normalize-legacy-terminal"
+            )
+            self.assertEqual(
+                result["selected_group"]["root_requirement_id"], "R-2"
+            )
+            snapshot = apply_lease_write(snapshot, result)
+        allowed = delivery_policy.lease_transition(snapshot, "acquire-preflight")
+        self.assertTrue(allowed["acquisition_allowed"])
+
+    def test_task_residue_is_outside_authority_inventory_domain(self):
+        snapshot = lease_snapshot()
+        snapshot["discovered_issue_inventory"].append(
+            {
+                "issue_id": "T-history",
+                "endpoint_role": None,
+                "workflow_object_type": "development_task",
+                "workflow_stage": "implementation",
+                "workspace_lease_state": "integrator",
+                "workspace_lease_owner_issue_id": "T-history",
+                "workspace_lease_owner_agent_id": "agent-integrator",
+            }
+        )
+        result = delivery_policy.lease_transition(
+            snapshot, "normalize-legacy-terminal"
+        )
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["selected_group"]["root_requirement_id"], "R-1")
+
+        duplicated = lease_snapshot()
+        duplicate = copy.deepcopy(duplicated["endpoint_inventory"][0])
+        duplicate["issue_id"] = "I-duplicate-authority"
+        duplicated["endpoint_inventory"].append(duplicate)
+        blocked = delivery_policy.lease_transition(
+            duplicated, "normalize-legacy-terminal"
+        )
+        self.assertFalse(blocked["valid"])
+        self.assertIn("incomplete_lease_inventory", blocked["blocker_reasons"])
+
+        unknown = lease_snapshot()
+        unknown["discovered_issue_inventory"].append(
+            {
+                "issue_id": "I-dev4",
+                "endpoint_role": "legacy_unknown_authority",
+                "workspace_lease_state": "held_by_integrator",
+            }
+        )
+        blocked = delivery_policy.lease_transition(
+            unknown, "normalize-legacy-terminal"
+        )
+        self.assertIn("unknown_lease_authority_role", blocked["blocker_reasons"])
+
+    def test_checkpoint_enforces_utf8_scalar_and_total_metadata_bytes(self):
+        snapshot = lease_snapshot()
+        result = delivery_policy.lease_transition(
+            snapshot, "normalize-legacy-terminal"
+        )
+        self.assertEqual(
+            result["transition_record_bytes"],
+            len(result["transition_record"].encode("utf-8")),
+        )
+        self.assertLessEqual(
+            result["ordered_writes"][0]["projected_metadata_total_bytes"],
+            8192,
+        )
+
+        blocked_snapshot = lease_snapshot()
+        authority = blocked_snapshot["migration_groups"][0]["authority"]
+        authority["metadata_total_bytes"] = 8180
+        blocked_snapshot["endpoint_inventory"][0]["metadata_total_bytes"] = 8180
+        blocked_snapshot["discovered_issue_inventory"][0]["metadata_total_bytes"] = 8180
+        blocked = delivery_policy.lease_transition(
+            blocked_snapshot, "normalize-legacy-terminal"
+        )
+        self.assertFalse(blocked["valid"])
+        self.assertIn(
+            "metadata_byte_capacity_exceeded", blocked["blocker_reasons"]
+        )
+
+        scalar_snapshot = lease_snapshot()
+        authority = scalar_snapshot["migration_groups"][0]["authority"]
+        authority["metadata_scalar_byte_limit"] = 64
+        scalar_snapshot["endpoint_inventory"][0]["metadata_scalar_byte_limit"] = 64
+        scalar_snapshot["discovered_issue_inventory"][0]["metadata_scalar_byte_limit"] = 64
+        blocked = delivery_policy.lease_transition(
+            scalar_snapshot, "normalize-legacy-terminal"
+        )
+        self.assertIn(
+            "metadata_scalar_capacity_exceeded", blocked["blocker_reasons"]
+        )
+
+    def test_discovered_terminal_root_set_must_match_batch(self):
+        snapshot = lease_snapshot()
+        snapshot["discovered_requirement_root_ids"].append("R-omitted")
+        blocked = delivery_policy.lease_transition(
+            snapshot, "normalize-legacy-terminal"
+        )
+        self.assertIn("incomplete_lease_inventory", blocked["blocker_reasons"])
+
+    def test_canonical_group_does_not_require_historical_holder(self):
+        snapshot = lease_snapshot()
+        for endpoint_name in ("authority", "mirror"):
+            snapshot["migration_groups"][0][endpoint_name].update(
+                delivery_policy.CANONICAL_RELEASED_LEASE
+            )
+        for inventory_name in ("endpoint_inventory", "discovered_issue_inventory"):
+            for endpoint in snapshot[inventory_name]:
+                endpoint.update(delivery_policy.CANONICAL_RELEASED_LEASE)
+        snapshot["migration_groups"][0]["historical_holder"] = {}
+        allowed = delivery_policy.lease_transition(snapshot, "acquire-preflight")
+        self.assertTrue(allowed["acquisition_allowed"])
+
+    def test_other_pending_group_change_stops_prepared_group(self):
+        snapshot = lease_snapshot(("integrator", "released"))
+        prepared = delivery_policy.lease_transition(
+            snapshot, "normalize-legacy-terminal"
+        )
+        snapshot = apply_lease_write(snapshot, prepared)
+        second = snapshot["migration_groups"][1]["authority"]
+        second["metadata_total_bytes"] += 1
+        snapshot["endpoint_inventory"][2]["metadata_total_bytes"] += 1
+        snapshot["discovered_issue_inventory"][2]["metadata_total_bytes"] += 1
+        blocked = delivery_policy.lease_transition(
+            snapshot, "normalize-legacy-terminal"
+        )
+        self.assertIn("concurrent_inventory_change", blocked["blocker_reasons"])
+
+    def test_new_lease_writer_only_accepts_canonical_states(self):
+        self.assertEqual(
+            delivery_policy.canonical_lease_tuple(
+                "held", "T-current", "agent-current"
+            )["workspace_lease_state"],
+            "held",
+        )
+        self.assertEqual(
+            delivery_policy.canonical_lease_tuple("released"),
+            delivery_policy.CANONICAL_RELEASED_LEASE,
+        )
+        for args in [
+            ("developer", "T-current", "agent-current"),
+            ("released", "T-current", "agent-current"),
+            ("held", "", "agent-current"),
+        ]:
+            with self.subTest(args=args), self.assertRaises(
+                delivery_policy.DeliveryPolicyError
+            ):
+                delivery_policy.canonical_lease_tuple(*args)
+
+    def test_lease_transition_cli_is_deterministic(self):
+        with tempfile.TemporaryDirectory() as temp:
+            snapshot_path = Path(temp) / "lease.json"
+            snapshot_path.write_text(
+                json.dumps(lease_snapshot()), encoding="utf-8"
+            )
+            command = [
+                sys.executable,
+                str(POLICY_PATH),
+                "lease-transition",
+                "--action",
+                "normalize-legacy-terminal",
+                "--snapshot",
+                str(snapshot_path),
+            ]
+            first = subprocess.run(
+                command, capture_output=True, text=True, encoding="utf-8", check=False
+            )
+            second = subprocess.run(
+                command, capture_output=True, text=True, encoding="utf-8", check=False
+            )
+        self.assertEqual(first.returncode, 0)
+        self.assertEqual(first.stdout, second.stdout)
+        self.assertEqual(
+            json.loads(first.stdout)["resume_stage"],
+            "prepare_authority_checkpoint",
+        )
+
     def test_schema_accepts_documented_project_policy(self):
         schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
         document = {
