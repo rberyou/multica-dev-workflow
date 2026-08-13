@@ -17,8 +17,12 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from workflow_lib import (  # noqa: E402
     WorkflowError,
+    _replace_local_skill_copy,
     _runtime_choice,
+    apply_local_skill_action,
     apply_plan,
+    build_local_skill_state,
+    default_local_skill_root,
     build_plan,
     deployment_evidence_record_path,
     deployment_record_path,
@@ -33,9 +37,20 @@ from workflow_lib import (  # noqa: E402
     source_identity,
     strip_marker,
     validate_release_bundle,
+    resolve_local_skill_root,
     validate_repository,
 )
 import release  # noqa: E402
+import workflow_lib  # noqa: E402
+
+
+_build_plan = build_plan
+
+
+def build_plan(*args, **kwargs):
+    root = Path(args[0] if args else kwargs["root"])
+    kwargs.setdefault("local_skill_root", root.parent / "home/.agents/skills")
+    return _build_plan(*args, **kwargs)
 
 
 CONSOLE_PATH = ROOT / "skills/multica-workflow-console/scripts/workflow_console.py"
@@ -443,6 +458,22 @@ class ReconcileTests(unittest.TestCase):
             self.assertIn("CREATE_PROJECT", types)
             self.assertIn("CREATE_SQUAD", types)
             self.assertNotIn("CREATE_AUTOPILOT", types)
+            local_actions = [
+                item for item in plan["actions"] if item.get("scope") == "local_skill"
+            ]
+            self.assertEqual(
+                {item["skill"] for item in local_actions},
+                {
+                    "multica-delivery-policy",
+                    "multica-requirement-intake",
+                    "multica-workflow-manager",
+                    "multica-workflow-incidents",
+                    "multica-workflow-console",
+                },
+            )
+            self.assertEqual(
+                {item["type"] for item in local_actions}, {"CREATE_LOCAL_SKILL"}
+            )
             plan_path = save_plan(root, plan)
             journal = apply_plan(root, cli, plan_path, plan["plan_digest"][:12])
             self.assertTrue(journal.get("finished_at"))
@@ -450,11 +481,25 @@ class ReconcileTests(unittest.TestCase):
             self.assertEqual(len(cli.projects), 1)
             self.assertEqual(len(cli.squads), 1)
             self.assertEqual(len(cli.skills), 3)
+            local_root = Path(plan["local_skills"]["root"])
+            self.assertTrue(
+                all(
+                    (local_root / item["skill"]).is_dir()
+                    and not (local_root / item["skill"]).is_symlink()
+                    for item in local_actions
+                )
+            )
             deployment_record = load_deployment_record(root, cli.workspace_id)
             self.assertIsNotNone(deployment_record)
             self.assertEqual(
                 Path(deployment_record["journal"]).parent,
                 root / ".multica/journals",
+            )
+            self.assertEqual(deployment_record["local_skills"]["mode"], "copy")
+            self.assertEqual(len(deployment_record["local_skills"]["results"]), 5)
+            self.assertNotIn(
+                str(local_root),
+                json.dumps(deployment_record["local_skills"]["results"]),
             )
             second = build_plan(
                 root, cli, workspace, "quality", runtime_map, False, False, False
@@ -501,6 +546,18 @@ class ReconcileTests(unittest.TestCase):
             apply_plan(root, cli, save_plan(root, plan), plan["plan_digest"][:12])
             deployment_record = load_deployment_record(root, cli.workspace_id)
             self.assertEqual(deployment_record["source"], source)
+            self.assertTrue(
+                (Path(plan["local_skills"]["root"]) / "multica-workflow-manager").is_dir()
+            )
+
+            standalone_target = root.parent / "standalone-local-skills"
+            standalone = install_skills(root, standalone_target)
+            self.assertEqual(
+                {item["action"] for item in standalone}, {"CREATE_LOCAL_SKILL"}
+            )
+            self.assertTrue(
+                (standalone_target / "multica-workflow-manager").is_dir()
+            )
 
     def test_release_bundle_rejects_changed_or_undeclared_source(self):
         with released_temp_bundle() as root:
@@ -754,7 +811,7 @@ class ReconcileTests(unittest.TestCase):
 
     def test_install_skills_copies_only_local_targets(self):
         with tempfile.TemporaryDirectory() as temp:
-            results = install_skills(ROOT, Path(temp), True, False)
+            results = install_skills(ROOT, Path(temp))
             self.assertEqual(
                 {item["skill"] for item in results},
                 {
@@ -767,6 +824,27 @@ class ReconcileTests(unittest.TestCase):
             )
             self.assertFalse(
                 any(Path(temp).rglob("__pycache__"))
+            )
+            self.assertEqual({item["action"] for item in results}, {"CREATE_LOCAL_SKILL"})
+            second = install_skills(ROOT, Path(temp))
+            self.assertEqual({item["action"] for item in second}, {"NO_CHANGE"})
+            self.assertFalse(any(path.is_symlink() for path in Path(temp).iterdir()))
+
+            manifest, _ = validate_repository(ROOT, "quality")
+            workspace_only = json.loads(json.dumps(manifest))
+            next(
+                item
+                for item in workspace_only["skills"]
+                if item["name"] == "multica-workflow-console"
+            )["targets"] = ["workspace"]
+            _, actions = build_local_skill_state(ROOT, workspace_only, Path(temp))
+            self.assertNotIn(
+                "multica-workflow-console",
+                {
+                    item["skill"]
+                    for item in actions
+                    if item.get("type") != "REMOVE_RETIRED_LOCAL_SKILL"
+                },
             )
 
     def test_install_skills_removes_only_owned_retired_skills(self):
@@ -783,13 +861,14 @@ class ReconcileTests(unittest.TestCase):
                 "---\n",
                 encoding="utf-8",
             )
-            results = install_skills(ROOT, target, True, False)
+            results = install_skills(ROOT, target)
             self.assertFalse(retired.exists())
             self.assertIn(
                 {
                     "skill": "multica-workflow-observer",
-                    "mode": "retired-removed",
-                    "path": str(retired),
+                    "action": "REMOVE_RETIRED_LOCAL_SKILL",
+                    "path": str(retired.resolve()),
+                    "digest": None,
                 },
                 results,
             )
@@ -800,9 +879,212 @@ class ReconcileTests(unittest.TestCase):
                 "---\nname: multica-workflow-maintainer\n---\n",
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(WorkflowError, "not owned"):
-                install_skills(ROOT, target, True, True)
+            results = install_skills(ROOT, target, True)
             self.assertTrue(foreign.exists())
+            self.assertIn(
+                "PRESERVE_FOREIGN_LOCAL_SKILL",
+                {item["action"] for item in results},
+            )
+
+    def test_local_skill_plan_updates_owned_copy_and_blocks_foreign_target(self):
+        with committed_temp_repo() as root:
+            manifest, _ = validate_repository(root, "quality")
+            target = root.parent / "local-root"
+            install_skills(root, target)
+            managed = target / "multica-workflow-manager"
+            (managed / "SKILL.md").write_text(
+                (managed / "SKILL.md").read_text(encoding="utf-8") + "\nstale\n",
+                encoding="utf-8",
+            )
+            foreign = target / "multica-workflow-console"
+            shutil.rmtree(foreign)
+            foreign.mkdir()
+            (foreign / "SKILL.md").write_text(
+                "---\nname: multica-workflow-console\n---\n",
+                encoding="utf-8",
+            )
+            _, actions = build_local_skill_state(root, manifest, target)
+            by_skill = {item["skill"]: item for item in actions}
+            self.assertEqual(
+                by_skill["multica-workflow-manager"]["type"], "UPDATE_LOCAL_SKILL"
+            )
+            self.assertEqual(
+                by_skill["multica-workflow-console"]["type"], "BLOCKED"
+            )
+            self.assertEqual(
+                by_skill["multica-workflow-console"]["current_type"], "foreign"
+            )
+            with self.assertRaisesRegex(WorkflowError, "blocked"):
+                install_skills(root, target, True)
+            self.assertEqual(
+                (foreign / "SKILL.md").read_text(encoding="utf-8"),
+                "---\nname: multica-workflow-console\n---\n",
+            )
+
+    def test_owned_symlink_is_planned_and_migrated_to_copy(self):
+        with committed_temp_repo() as root:
+            manifest, _ = validate_repository(root, "quality")
+            target = root.parent / "local-root"
+            target.mkdir()
+            source = root / "skills/multica-workflow-manager"
+            destination = target / "multica-workflow-manager"
+            shutil.copytree(source, destination)
+
+            real_is_symlink = Path.is_symlink
+
+            def classify_destination_as_symlink(path):
+                if (
+                    path.name == "multica-workflow-manager"
+                    and path.parent.resolve() == target.resolve()
+                ):
+                    return True
+                return real_is_symlink(path)
+
+            with patch.object(
+                Path, "is_symlink", autospec=True, side_effect=classify_destination_as_symlink
+            ):
+                _, actions = build_local_skill_state(root, manifest, target)
+            action = next(
+                item
+                for item in actions
+                if item.get("skill") == "multica-workflow-manager"
+            )
+            self.assertEqual(action["type"], "MIGRATE_LOCAL_SKILL_LINK_TO_COPY")
+            observed = {
+                "name": action["skill"],
+                "destination": action["destination"],
+                "current_type": "symlink",
+                "target_type": "symlink",
+                "owned": True,
+                "digest": action["current_digest"],
+            }
+            with patch("workflow_lib.observe_local_skill", return_value=observed):
+                apply_local_skill_action(root, manifest, action)
+            self.assertTrue(destination.is_dir())
+            self.assertFalse(destination.is_symlink())
+
+    def test_junction_classification_is_deterministic_without_creating_one(self):
+        with committed_temp_repo() as root:
+            manifest, _ = validate_repository(root, "quality")
+            target = root.parent / "local-root"
+            target.mkdir()
+            destination = target / "multica-workflow-manager"
+            shutil.copytree(root / "skills/multica-workflow-manager", destination)
+
+            def fake_junction(path):
+                return path.name == "multica-workflow-manager"
+
+            with patch("workflow_lib._path_is_junction", side_effect=fake_junction):
+                _, actions = build_local_skill_state(root, manifest, target)
+            action = next(
+                item
+                for item in actions
+                if item.get("skill") == "multica-workflow-manager"
+            )
+            self.assertEqual(action["current_type"], "junction")
+            self.assertEqual(action["type"], "MIGRATE_LOCAL_SKILL_LINK_TO_COPY")
+
+    def test_changed_local_target_invalidates_approved_plan(self):
+        with committed_temp_repo() as root:
+            cli = FakeCLI()
+            workspace = {"id": cli.workspace_id, "name": "Test", "slug": "test"}
+            plan = build_plan(
+                root, cli, workspace, "quality", runtime_map_for(root), False, False
+            )
+            plan_path = save_plan(root, plan)
+            local_root = Path(plan["local_skills"]["root"])
+            foreign = local_root / "multica-workflow-manager"
+            foreign.mkdir(parents=True)
+            (foreign / "SKILL.md").write_text(
+                "---\nname: multica-workflow-manager\n---\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(WorkflowError, "Local Skill state changed"):
+                apply_plan(root, cli, plan_path, plan["plan_digest"][:12])
+
+    def test_staged_copy_failure_restores_owned_destination(self):
+        with committed_temp_repo() as root:
+            manifest, _ = validate_repository(root, "quality")
+            target = root.parent / "local-root"
+            install_skills(root, target)
+            destination = target / "multica-workflow-manager"
+            original = (destination / "SKILL.md").read_bytes()
+            source = root / "skills/multica-workflow-manager"
+            desired_digest = next(
+                item["digest"]
+                for item in build_local_skill_state(root, manifest, target)[0]["desired"]
+                if item["name"] == "multica-workflow-manager"
+            )
+            real_hash = workflow_lib._skill_directory_hash
+
+            def fail_installed_hash(path):
+                if path == destination:
+                    raise WorkflowError("simulated installed verification failure")
+                return real_hash(path)
+
+            with patch("workflow_lib._skill_directory_hash", side_effect=fail_installed_hash):
+                with self.assertRaisesRegex(WorkflowError, "simulated"):
+                    _replace_local_skill_copy(
+                        source, destination, target.resolve(), desired_digest
+                    )
+            self.assertEqual((destination / "SKILL.md").read_bytes(), original)
+
+    def test_apply_resumes_local_phase_from_partial_journal(self):
+        with committed_temp_repo() as root:
+            cli = FakeCLI()
+            workspace = {"id": cli.workspace_id, "name": "Test", "slug": "test"}
+            plan = build_plan(
+                root, cli, workspace, "quality", runtime_map_for(root), False, False
+            )
+            plan_path = save_plan(root, plan)
+            real_apply = workflow_lib.apply_local_skill_action
+            calls = 0
+
+            def fail_second(source_root, manifest, action):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise RuntimeError("simulated local install failure")
+                return real_apply(source_root, manifest, action)
+
+            with patch("workflow_lib.apply_local_skill_action", side_effect=fail_second):
+                with self.assertRaisesRegex(RuntimeError, "simulated"):
+                    apply_plan(root, cli, plan_path, plan["plan_digest"][:12])
+            journal_path = root / f".multica/journals/{plan['plan_digest'][:12]}.json"
+            journal = json.loads(journal_path.read_text(encoding="utf-8"))
+            self.assertTrue(journal.get("workspace_completed_at"))
+            self.assertFalse(journal.get("finished_at"))
+            calls_before = len(cli.calls)
+            resumed = apply_plan(root, cli, plan_path, plan["plan_digest"][:12])
+            self.assertTrue(resumed.get("finished_at"))
+            mutation_prefixes = {
+                ("agent", "create"),
+                ("agent", "update"),
+                ("agent", "archive"),
+                ("skill", "import"),
+                ("skill", "delete"),
+                ("project", "create"),
+                ("project", "update"),
+                ("squad", "create"),
+                ("squad", "update"),
+            }
+            self.assertFalse(
+                any(
+                    call[:2] in mutation_prefixes
+                    for call in cli.calls[calls_before:]
+                )
+            )
+            self.assertEqual(len(resumed["local_skills"]), 5)
+
+    def test_local_skill_root_defaults_and_rejects_dangerous_targets(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            self.assertEqual(
+                default_local_skill_root(home),
+                (home / ".agents/skills").resolve(),
+            )
+        with self.assertRaisesRegex(WorkflowError, "unsafe Local Skill root"):
+            resolve_local_skill_root(Path(Path.cwd().anchor))
 
     def test_retirement_recovers_with_a_fresh_plan_after_partial_failure(self):
         with committed_temp_repo() as root:

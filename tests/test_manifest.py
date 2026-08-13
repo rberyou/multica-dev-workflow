@@ -113,6 +113,40 @@ class ManifestTests(unittest.TestCase):
                 "close-incident",
             },
         )
+        install = subparsers.choices["install-skills"]
+        option_strings = {
+            option
+            for action in install._actions
+            for option in action.option_strings
+        }
+        self.assertIn("--target", option_strings)
+        self.assertIn("--replace-existing", option_strings)
+        self.assertNotIn("--copy", option_strings)
+        implementation = (ROOT / "scripts/workflow_lib.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("os.symlink(", implementation)
+        self.assertNotIn('"mklink"', implementation)
+
+    def test_install_skills_uses_default_or_explicit_machine_root(self):
+        with mock.patch.object(workflow_cli, "source_identity"), mock.patch.object(
+            workflow_cli, "install_skills", return_value=[]
+        ) as install, mock.patch.object(
+            workflow_cli,
+            "default_local_skill_root",
+            return_value=Path("machine-home/.agents/skills").resolve(),
+        ):
+            default_args = workflow_cli.parser().parse_args(["install-skills"])
+            workflow_cli.command_install_skills(default_args, ROOT)
+            self.assertEqual(
+                install.call_args.args[1], Path("machine-home/.agents/skills").resolve()
+            )
+            explicit = Path("alternate/skills").resolve()
+            explicit_args = workflow_cli.parser().parse_args(
+                ["install-skills", "--target", str(explicit)]
+            )
+            workflow_cli.command_install_skills(explicit_args, ROOT)
+            self.assertEqual(install.call_args.args[1], explicit)
 
     def test_incident_wrappers_forward_external_creation_and_close_references(self):
         root = ROOT

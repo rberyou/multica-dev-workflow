@@ -16,11 +16,11 @@ Reviewed workflow source is desired state and Multica is runtime state. A clean 
 1. Use the Git checkout or extracted formal Release Bundle explicitly provided by the user, or locate `workflow.json` and `scripts/workflow.py` in the current directory or its parents.
 2. Run `python scripts/workflow.py doctor` for the intended profile, workspace, and deployment profile.
 3. Resolve workspace, Runtime, approver, and adoption ambiguity. Do not guess.
-4. Run `python scripts/workflow.py plan` and present all mutation actions and the short digest.
+4. Run `python scripts/workflow.py plan` and present every Workspace and machine-global Local Skill action plus the short digest.
 5. Wait for the exact approval `APPROVE WORKFLOW PLAN <short-digest>`.
 6. Apply the exact Plan and run a fresh `verify`.
 
-Any source, Runtime-map, or observed-state change invalidates the Plan. A dirty Git checkout may produce a draft Plan with `--allow-dirty`, but a draft cannot be applied. A Release Bundle with a changed or undeclared workflow file is invalid rather than draft.
+Every Skill whose manifest `targets` contains `local` is installed as a physical copy under `~/.agents/skills` by the normal approved Apply. The Plan binds the resolved root, desired Skill digests, observed destination types and digests, and all Local Skill actions. Any source, Runtime-map, Workspace, or Local Skill state change invalidates the Plan. A dirty Git checkout may produce a draft Plan with `--allow-dirty`, but a draft cannot be applied. A Release Bundle with a changed or undeclared workflow file is invalid rather than draft.
 
 ## Guardrails
 
@@ -30,6 +30,7 @@ Any source, Runtime-map, or observed-state change invalidates the Plan. A dirty 
 - Never commit Runtime, Workspace, Agent, Squad, or Member UUIDs, credentials, cookies, or environment secrets.
 - Preserve unrelated objects and non-conflicting extra roster members.
 - Existing unmarked same-name objects require `--adopt`.
+- Never create a Local Skill symlink or Windows junction. Migrate only links whose resolved `SKILL.md` proves this workflow owns them; never overwrite, adopt, or delete a foreign same-name target.
 - A reviewed Plan removes retired Agents from the managed Squad, deletes dependent automations, reassigns preserved Projects, archives the Agents, and deletes retired Skills. Retired Projects are preserved because they may contain durable history.
 - Runtime rebinding requires `--rebind-runtimes` and explicit review; Runtime profiles are provider selection, not an isolation boundary.
 - Do not add scheduled scans or maintenance-specific roles.

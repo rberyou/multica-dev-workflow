@@ -10,6 +10,7 @@ Protocol v4 deliberately keeps the system small:
 - event-driven workflow Incidents created only when a discovered problem must survive the current task;
 - Incident fixes tracked by external `incident_fix_requirement` records and executed outside this development Squad, with legacy ordinary Requirement links still supported;
 - workspace deployment from either a reviewed clean Git checkout or a verified formal Release Bundle;
+- approved workspace deployment also publishes every `local`-target Skill as a machine-global physical copy under `~/.agents/skills`;
 - optional formal releases created directly from a reviewed clean `main` checkout.
 
 Each managed development Agent also receives `multica-delivery-policy`. A product repository may commit `multica.delivery.json` to constrain and default its checkout topology, Task PR, Requirement PR, and direct-target-push capability. A new Requirement Plan freezes only `plan_revision`, a compact versioned policy digest, and `target_branch`; current policy and remote capability are re-resolved when the digest is verified.
@@ -33,9 +34,10 @@ Machine-level configuration lives under the current user's Home directory:
 ```text
 ~/.multica/profiles/
 ~/.multica/workflows/<workflow-id>/runtime-maps/<workspace-id>.json
+~/.agents/skills/
 ```
 
-Profiles select the Multica server and authentication context. Runtime maps select concrete Runtime UUIDs for one Workflow and Workspace, so every source copy of the same Workflow uses the same local selection.
+Profiles select the Multica server and authentication context. Runtime maps select concrete Runtime UUIDs for one Workflow and Workspace, so every source copy of the same Workflow uses the same local selection. `~/.agents/skills` is the shared Codex/OpenCode machine Skill root; this workflow writes only verified physical copies there, never symlinks or Windows junctions.
 
 Deployment-source generated state remains beside the Git checkout or extracted Release Bundle:
 
@@ -70,7 +72,7 @@ python scripts/workflow.py apply --plan <plan-file> --approve <short-digest>
 python scripts/workflow.py verify
 ```
 
-After resolving the target Workspace, `doctor`, `plan`, `drift`, and `verify` automatically use `~/.multica/workflows/<workflow-id>/runtime-maps/<workspace-id>.json`; `apply` uses the exact path and hash stored in its reviewed Plan. Workflow and Workspace namespacing prevents unrelated projects or Workspaces from sharing Runtime identities while allowing Git checkouts and extracted Release Bundles to share the intended machine-level selection. If the file is absent, provider selection is automatic and succeeds only when every required provider has a single online Runtime. Use `--runtime-map <path>` only for an explicit override.
+After resolving the target Workspace, `doctor`, `plan`, `drift`, and `verify` automatically use `~/.multica/workflows/<workflow-id>/runtime-maps/<workspace-id>.json`; `apply` uses the exact path and hash stored in its reviewed Plan. The same Plan includes each manifest Skill targeted to `local`, the resolved `~/.agents/skills` root, current destination type/ownership/digest, desired digest, and copy/update/migrate/remove/block action. Source or destination changes invalidate approval. Apply performs staged, digest-verified copies and records results in the same journal and deployment evidence; Verify is `OK` only when the Workspace converges and every local target is an identical physical copy. Workflow and Workspace namespacing prevents unrelated projects or Workspaces from sharing Runtime identities while allowing Git checkouts and extracted Release Bundles to share the intended machine-level selection. If the Runtime map is absent, provider selection is automatic and succeeds only when every required provider has a single online Runtime. Use `--runtime-map <path>` only for an explicit override.
 
 Use `--deployment-profile codex-only --rebind-runtimes` only for an intentional Runtime-provider change. Runtime bindings select available execution providers; they are not a security-isolation boundary.
 

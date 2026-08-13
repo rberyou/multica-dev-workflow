@@ -15,6 +15,7 @@ from workflow_lib import (
     apply_plan,
     build_plan,
     discover_multica,
+    default_local_skill_root,
     fetch_state,
     install_skills,
     load_deployment_record,
@@ -30,6 +31,7 @@ from workflow_lib import (
     source_identity,
     summarize_actions,
     utc_now,
+    validate_local_skill_root_access,
     validate_repository,
     write_json,
 )
@@ -86,13 +88,24 @@ def action_label(action: dict) -> str:
     kind = action.get("type", "UNKNOWN")
     key = action.get("key") or action.get("agent_key") or action.get("member_ref") or ""
     reason = action.get("reason")
+    if action.get("scope") == "local_skill":
+        current = action.get("current_type", "unknown")
+        current_digest = action.get("current_digest") or "<none>"
+        desired_digest = action.get("desired_digest") or "<none>"
+        return (
+            f"{kind:32} {action.get('skill')}: root={action.get('target_root')} "
+            f"current={current} target_type={action.get('target_type', current)} "
+            f"current_digest={current_digest} "
+            f"desired_digest={desired_digest}"
+            f"{f': {reason}' if reason else ''}"
+        )
     return f"{kind:14} {key}{f': {reason}' if reason else ''}"
 
 
 def print_plan(plan: dict, path: Path | None = None) -> None:
     print(json.dumps(summarize_actions(plan.get("actions", [])), ensure_ascii=False, indent=2))
     for action in plan.get("actions", []):
-        if action.get("type") != "NO_CHANGE":
+        if action.get("type") != "NO_CHANGE" or action.get("scope") == "local_skill":
             print(action_label(action))
     if path:
         print(f"Plan file: {path}")
@@ -109,6 +122,7 @@ def command_doctor(args: argparse.Namespace, root: Path) -> int:
         args, workspace, str(manifest["workflow"]["id"])
     )
     runtime_map = load_runtime_map(selected_runtime_map_path)
+    local_skill_root = validate_local_skill_root_access(default_local_skill_root())
     required = [
         ["agent", "create", "--help"],
         ["agent", "update", "--help"],
@@ -175,6 +189,7 @@ def command_doctor(args: argparse.Namespace, root: Path) -> int:
         f"Runtime map: {selected_runtime_map_path} "
         f"({runtime_map_status}, {len(runtime_map.get('bindings') or {})} bindings)"
     )
+    print(f"Local Skill root: {local_skill_root} (copy-only)")
     print(f"Online runtimes: {json.dumps(providers, ensure_ascii=False, sort_keys=True)}")
     print("Doctor: OK")
     return 0
@@ -295,9 +310,9 @@ def command_install_skills(args: argparse.Namespace, root: Path) -> int:
     target = (
         Path(args.target).expanduser().resolve()
         if args.target
-        else Path.home() / ".agents/skills"
+        else default_local_skill_root()
     )
-    results = install_skills(root, target, args.copy, args.replace_existing)
+    results = install_skills(root, target, args.replace_existing)
     print(json.dumps(results, ensure_ascii=False, indent=2))
     return 0
 
@@ -452,7 +467,6 @@ def parser() -> argparse.ArgumentParser:
 
     install = subparsers.add_parser("install-skills")
     install.add_argument("--target")
-    install.add_argument("--copy", action="store_true")
     install.add_argument("--replace-existing", action="store_true")
     install.set_defaults(func=command_install_skills)
 

@@ -12,7 +12,9 @@ from pathlib import Path, PurePosixPath
 import platform
 import re
 import shutil
+import stat
 import subprocess
+import tempfile
 from typing import Any, Iterable
 
 from jsonschema import Draft202012Validator
@@ -26,6 +28,13 @@ RETIRED_LOCAL_SKILL_NAMES = {
     "multica-workflow-observer",
     "multica-workflow-maintainer",
     "multica-workflow-maintenance-reviewer",
+}
+LOCAL_SKILL_ROOT_PARTS = (".agents", "skills")
+LOCAL_SKILL_ACTION_TYPES = {
+    "CREATE_LOCAL_SKILL",
+    "UPDATE_LOCAL_SKILL",
+    "MIGRATE_LOCAL_SKILL_LINK_TO_COPY",
+    "REMOVE_RETIRED_LOCAL_SKILL",
 }
 MARKER_RE = re.compile(r"\A<!-- multica-workflow\r?\n(?P<body>.*?)\r?\n-->\r?\n?", re.DOTALL)
 UUID_RE = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
@@ -617,6 +626,318 @@ def desired_source_hash(root: Path, manifest: dict[str, Any], profile: dict[str,
     )
 
 
+def default_local_skill_root(home: Path | None = None) -> Path:
+    home_root = (home if home is not None else Path.home()).expanduser().resolve()
+    return home_root.joinpath(*LOCAL_SKILL_ROOT_PARTS).resolve()
+
+
+def resolve_local_skill_root(target: Path) -> Path:
+    resolved = target.expanduser().resolve()
+    anchor = Path(resolved.anchor)
+    home = Path.home().expanduser().resolve()
+    if (
+        resolved == anchor
+        or resolved == home
+        or resolved.parent == resolved
+        or len(resolved.parts) <= 2
+    ):
+        raise WorkflowError(f"unsafe Local Skill root: {resolved}")
+    if resolved.exists() and not resolved.is_dir():
+        raise WorkflowError(f"Local Skill root is not a directory: {resolved}")
+    return resolved
+
+
+def validate_local_skill_root_access(target: Path) -> Path:
+    resolved = resolve_local_skill_root(target)
+    ancestor = resolved
+    while not ancestor.exists() and ancestor.parent != ancestor:
+        ancestor = ancestor.parent
+    if not ancestor.is_dir():
+        raise WorkflowError(
+            f"Local Skill root has no usable parent directory: {resolved}"
+        )
+    if not os.access(ancestor, os.W_OK):
+        raise WorkflowError(
+            f"Local Skill root is not writable or creatable: {resolved}"
+        )
+    return resolved
+
+
+def _safe_skill_name(name: str) -> str:
+    value = str(name or "").strip()
+    if (
+        not value
+        or value in {".", ".."}
+        or "/" in value
+        or "\\" in value
+        or Path(value).name != value
+    ):
+        raise WorkflowError(f"unsafe Local Skill name: {name!r}")
+    return value
+
+
+def _local_skill_destination(target: Path, name: str) -> Path:
+    root = resolve_local_skill_root(target)
+    destination = root / _safe_skill_name(name)
+    if destination.parent != root:
+        raise WorkflowError(f"Local Skill destination escapes its root: {destination}")
+    return destination
+
+
+def _path_is_junction(path: Path) -> bool:
+    checker = getattr(path, "is_junction", None)
+    if checker is not None:
+        try:
+            return bool(checker())
+        except OSError:
+            return False
+    if os.name != "nt":
+        return False
+    try:
+        attributes = path.lstat().st_file_attributes
+    except (AttributeError, OSError):
+        return False
+    return bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT) and not path.is_symlink()
+
+
+def _path_present(path: Path) -> bool:
+    return path.exists() or path.is_symlink() or _path_is_junction(path)
+
+
+def _skill_frontmatter(path: Path) -> dict[str, str] | None:
+    try:
+        content = path.read_text(encoding="utf-8", errors="strict")
+    except (OSError, UnicodeError):
+        return None
+    match = re.match(r"\A---\r?\n(?P<header>.*?)\r?\n---(?:\r?\n|\Z)", content, re.DOTALL)
+    if not match:
+        return None
+    lines = match.group("header").splitlines()
+    values: dict[str, str] = {}
+    name_line = next(
+        (line for line in lines if re.match(r"^name:\s*", line)), None
+    )
+    if name_line:
+        name_match = re.match(r"^name:\s*([^\s#]+)\s*(?:#.*)?$", name_line)
+        if name_match:
+            values["name"] = name_match.group(1)
+    metadata_index = next(
+        (index for index, line in enumerate(lines) if line == "metadata:"), None
+    )
+    if metadata_index is not None:
+        for line in lines[metadata_index + 1 :]:
+            if line and not line.startswith((" ", "\t")):
+                break
+            for key in ("managed_by", "workflow_id"):
+                field = re.match(
+                    rf"^\s+{key}:\s*([^\s#]+)\s*(?:#.*)?$", line
+                )
+                if field:
+                    values[key] = field.group(1)
+    return values
+
+
+def _skill_is_owned(destination: Path, expected_name: str, workflow_id: str) -> bool:
+    metadata = _skill_frontmatter(destination / "SKILL.md")
+    return bool(
+        metadata
+        and metadata.get("name") == expected_name
+        and metadata.get("managed_by") == MANAGED_BY
+        and metadata.get("workflow_id") == workflow_id
+    )
+
+
+def _directory_files(directory: Path) -> list[Path]:
+    files: list[Path] = []
+    for path in directory.rglob("*"):
+        relative = path.relative_to(directory)
+        if any(part in {"__pycache__", ".git"} for part in relative.parts):
+            continue
+        if path.is_symlink() or _path_is_junction(path):
+            raise WorkflowError(f"Local Skill contains a nested link: {relative.as_posix()}")
+        if path.is_file():
+            files.append(path)
+    return sorted(files, key=lambda item: item.relative_to(directory).as_posix())
+
+
+def _skill_directory_hash(directory: Path) -> str:
+    digest = hashlib.sha256()
+    for path in _directory_files(directory):
+        relative = path.relative_to(directory).as_posix().encode("utf-8")
+        data = path.read_bytes()
+        digest.update(len(relative).to_bytes(4, "big"))
+        digest.update(relative)
+        digest.update(len(data).to_bytes(8, "big"))
+        digest.update(data)
+    return digest.hexdigest()
+
+
+def observe_local_skill(
+    target: Path, name: str, workflow_id: str
+) -> dict[str, Any]:
+    destination = _local_skill_destination(target, name)
+    observation: dict[str, Any] = {
+        "name": name,
+        "destination": str(destination),
+        "current_type": "missing",
+        "target_type": "missing",
+        "owned": False,
+        "digest": None,
+    }
+    if not _path_present(destination):
+        return observation
+    target_type = (
+        "symlink"
+        if destination.is_symlink()
+        else "junction"
+        if _path_is_junction(destination)
+        else "copy"
+        if destination.is_dir()
+        else "foreign"
+    )
+    observation["target_type"] = target_type
+    owned = _skill_is_owned(destination, name, workflow_id)
+    observation["owned"] = owned
+    observation["current_type"] = target_type if owned else "foreign"
+    if not owned:
+        try:
+            if target_type in {"copy", "symlink", "junction"}:
+                observation["digest"] = _skill_directory_hash(destination)
+            elif destination.is_file():
+                observation["digest"] = sha256_file(destination)
+        except (OSError, WorkflowError):
+            observation["error"] = "foreign content was not safely hashable"
+        return observation
+    try:
+        observation["digest"] = _skill_directory_hash(destination)
+    except (OSError, WorkflowError):
+        observation["current_type"] = "foreign"
+        observation["owned"] = False
+        observation["digest"] = None
+        observation["error"] = "owned metadata was readable but content was not safely hashable"
+    return observation
+
+
+def build_local_skill_state(
+    root: Path, manifest: dict[str, Any], target: Path
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    target = validate_local_skill_root_access(target)
+    workflow_id = str((manifest.get("workflow") or {}).get("id") or "")
+    desired: list[dict[str, Any]] = []
+    observed: list[dict[str, Any]] = []
+    actions: list[dict[str, Any]] = []
+    desired_names: set[str] = set()
+    for skill in sorted(
+        (
+            item
+            for item in manifest.get("skills", [])
+            if "local" in item.get("targets", [])
+        ),
+        key=lambda item: str(item.get("name") or ""),
+    ):
+        name = _safe_skill_name(str(skill["name"]))
+        desired_names.add(name)
+        source = (root / str(skill["path"])).resolve()
+        desired_digest = package_hash(source)
+        desired.append(
+            {
+                "key": skill["key"],
+                "name": name,
+                "digest": desired_digest,
+            }
+        )
+        current = observe_local_skill(target, name, workflow_id)
+        observed.append(current)
+        base = {
+            "scope": "local_skill",
+            "key": skill["key"],
+            "skill": name,
+            "target_root": str(target),
+            "destination": current["destination"],
+            "current_type": current["current_type"],
+            "target_type": current["target_type"],
+            "current_digest": current["digest"],
+            "desired_digest": desired_digest,
+        }
+        if current["current_type"] == "missing":
+            actions.append({**base, "type": "CREATE_LOCAL_SKILL"})
+        elif current["current_type"] == "copy":
+            actions.append(
+                {
+                    **base,
+                    "type": (
+                        "NO_CHANGE"
+                        if current["digest"] == desired_digest
+                        else "UPDATE_LOCAL_SKILL"
+                    ),
+                }
+            )
+        elif current["current_type"] in {"symlink", "junction"}:
+            actions.append(
+                {**base, "type": "MIGRATE_LOCAL_SKILL_LINK_TO_COPY"}
+            )
+        else:
+            actions.append(
+                {
+                    **base,
+                    "type": "BLOCKED",
+                    "reason": "same-name Local Skill is foreign or cannot be safely verified",
+                }
+            )
+
+    retired_candidates = set(RETIRED_LOCAL_SKILL_NAMES)
+    if target.is_dir():
+        try:
+            retired_candidates.update(path.name for path in target.iterdir())
+        except OSError as exc:
+            raise WorkflowError(f"cannot enumerate Local Skill root: {target}") from exc
+    for name in sorted(retired_candidates - desired_names):
+        current = observe_local_skill(target, name, workflow_id)
+        if current["current_type"] == "missing":
+            continue
+        if current["owned"]:
+            observed.append(current)
+            actions.append(
+                {
+                    "scope": "local_skill",
+                    "type": "REMOVE_RETIRED_LOCAL_SKILL",
+                    "key": name,
+                    "skill": name,
+                    "target_root": str(target),
+                    "destination": current["destination"],
+                    "current_type": current["current_type"],
+                    "target_type": current["target_type"],
+                    "current_digest": current["digest"],
+                    "desired_digest": None,
+                }
+            )
+        elif name in RETIRED_LOCAL_SKILL_NAMES:
+            observed.append(current)
+            actions.append(
+                {
+                    "scope": "local_skill",
+                    "type": "WARNING",
+                    "key": name,
+                    "skill": name,
+                    "target_root": str(target),
+                    "destination": current["destination"],
+                    "current_type": current["current_type"],
+                    "target_type": current["target_type"],
+                    "current_digest": current["digest"],
+                    "desired_digest": None,
+                    "reason": "foreign retired Local Skill was preserved",
+                }
+            )
+    state = {
+        "root": str(target),
+        "mode": "copy",
+        "desired": desired,
+        "observed": sorted(observed, key=lambda item: item["name"]),
+    }
+    state["state_digest"] = sha256_value(state)
+    return state, actions
+
+
 def instruction_body(root: Path, files: list[str]) -> str:
     parts = [root.joinpath(relative).read_text(encoding="utf-8").strip() for relative in files]
     return "\n\n".join(part for part in parts if part).strip() + "\n"
@@ -1044,6 +1365,7 @@ def build_plan(
     adopt: bool,
     rebind_runtimes: bool,
     write_archives: bool = True,
+    local_skill_root: Path | None = None,
 ) -> dict[str, Any]:
     manifest, profile = validate_repository(root, deployment_profile)
     workflow = manifest["workflow"]
@@ -1053,6 +1375,12 @@ def build_plan(
     runtime_map = load_runtime_map(runtime_map_path)
     runtimes = state.get("runtimes", [])
     runtime_by_id = runtime_index(state)
+    local_skill_state, local_skill_actions = build_local_skill_state(
+        root,
+        manifest,
+        local_skill_root if local_skill_root is not None else default_local_skill_root(),
+    )
+    actions.extend(local_skill_actions)
 
     desired_skill_by_key: dict[str, dict[str, Any]] = {}
     current_skills_by_name: dict[str, list[dict[str, Any]]] = {}
@@ -1600,7 +1928,7 @@ def build_plan(
     manifest_hash = desired_source_hash(root, manifest, profile)
     runtime_map_hash = sha256_value(runtime_map)
     plan = {
-        "schema_version": 1,
+        "schema_version": 2,
         "created_at": utc_now(),
         "source": source,
         "source_commit": source_commit,
@@ -1614,6 +1942,7 @@ def build_plan(
         "runtime_map_hash": runtime_map_hash,
         "manifest_hash": manifest_hash,
         "observed_hash": observed_hash(state),
+        "local_skills": local_skill_state,
         "adopt": adopt,
         "rebind_runtimes": rebind_runtimes,
         "actions": actions,
@@ -1832,6 +2161,36 @@ def finalize_deployment_record(
     applied_actor = str(journal.get("applied_actor") or "")
     if not applied_actor:
         raise WorkflowError("completed apply journal has no applied actor")
+    local_action_by_skill = {
+        str(item.get("skill") or ""): str(item.get("type") or "")
+        for item in plan.get("actions", [])
+        if item.get("scope") == "local_skill" and item.get("skill")
+    }
+    local_result_by_skill = {
+        str(item.get("skill") or ""): item
+        for item in (journal.get("local_skills") or [])
+        if item.get("skill")
+    }
+    local_evidence_results = [
+        {
+            "skill": item.get("name"),
+            "action": local_action_by_skill.get(str(item.get("name") or "")),
+            "digest": item.get("digest"),
+        }
+        for item in (plan.get("local_skills") or {}).get("desired", [])
+    ]
+    local_evidence_names = {
+        str(item.get("skill") or "") for item in local_evidence_results
+    }
+    local_evidence_results.extend(
+        {
+            "skill": name,
+            "action": result.get("action"),
+            "digest": result.get("digest"),
+        }
+        for name, result in sorted(local_result_by_skill.items())
+        if name not in local_evidence_names
+    )
     expected_record = {
         "schema_version": 1,
         "deployed_at": journal["finished_at"],
@@ -1844,6 +2203,11 @@ def finalize_deployment_record(
         "deployment_profile": plan.get("deployment_profile"),
         "applied_actor": applied_actor,
         "journal": str(journal_path),
+        "local_skills": {
+            "root": (plan.get("local_skills") or {}).get("root"),
+            "mode": "copy",
+            "results": local_evidence_results,
+        },
     }
     if plan.get("source"):
         expected_record["source"] = plan.get("source")
@@ -1872,6 +2236,117 @@ def finalize_deployment_record(
     journal["deployment_record"] = str(record_path)
     write_json(journal_path, journal)
     return journal
+
+
+def _local_action_completion_key(action: dict[str, Any]) -> tuple[str, str]:
+    return str(action.get("type") or ""), str(action.get("key") or "")
+
+
+def _local_action_final_state(
+    target: Path,
+    workflow_id: str,
+    action: dict[str, Any],
+) -> bool:
+    current = observe_local_skill(target, str(action["skill"]), workflow_id)
+    if action.get("type") == "REMOVE_RETIRED_LOCAL_SKILL":
+        return current.get("current_type") == "missing"
+    return bool(
+        current.get("current_type") == "copy"
+        and current.get("owned")
+        and current.get("digest") == action.get("desired_digest")
+    )
+
+
+def _apply_planned_local_skills(
+    root: Path,
+    manifest: dict[str, Any],
+    plan: dict[str, Any],
+    journal_path: Path,
+    journal: dict[str, Any],
+) -> None:
+    workflow_id = str((manifest.get("workflow") or {}).get("id") or "")
+    planned_target = Path(str((plan.get("local_skills") or {})["root"]))
+    target = resolve_local_skill_root(planned_target)
+    if os.path.normcase(str(target)) != os.path.normcase(
+        str(planned_target.absolute())
+    ):
+        raise WorkflowError("planned Local Skill root now resolves to a different path")
+    completed = {
+        (str(item.get("type") or ""), str(item.get("key") or ""))
+        for item in journal.get("completed", [])
+    }
+    local_results = list(journal.get("local_skills") or [])
+    recorded_results = {
+        (str(item.get("action") or ""), str(item.get("skill") or ""))
+        for item in local_results
+    }
+    for action in plan.get("actions", []):
+        if action.get("scope") != "local_skill":
+            continue
+        action_type = action.get("type")
+        if action_type == "NO_CHANGE":
+            if not _local_action_final_state(target, workflow_id, action):
+                raise WorkflowError(
+                    f"unchanged Local Skill no longer matches the approved Plan: {action['skill']}"
+                )
+        elif action_type == "WARNING":
+            current = observe_local_skill(target, str(action["skill"]), workflow_id)
+            expected = (
+                action.get("current_type"),
+                action.get("target_type"),
+                action.get("current_digest"),
+            )
+            actual = (
+                current.get("current_type"),
+                current.get("target_type"),
+                current.get("digest"),
+            )
+            if actual != expected:
+                raise WorkflowError(
+                    f"preserved foreign Local Skill changed after planning: {action['skill']}"
+                )
+    for action in plan.get("actions", []):
+        if action.get("type") not in LOCAL_SKILL_ACTION_TYPES:
+            continue
+        completion_key = _local_action_completion_key(action)
+        result_key = (str(action["type"]), str(action["skill"]))
+        if completion_key in completed:
+            if not _local_action_final_state(target, workflow_id, action):
+                raise WorkflowError(
+                    f"completed Local Skill action no longer matches its result: {action['skill']}"
+                )
+            continue
+        if _local_action_final_state(target, workflow_id, action):
+            result = {
+                "skill": action["skill"],
+                "action": action["type"],
+                "path": action["destination"],
+                "digest": action.get("desired_digest"),
+                "recovered": True,
+            }
+        else:
+            result = apply_local_skill_action(root, manifest, action)
+        result_record = {
+            "skill": result.get("skill"),
+            "action": result.get("action"),
+            "digest": result.get("digest"),
+        }
+        if result.get("recovered"):
+            result_record["recovered"] = True
+        if result_key not in recorded_results:
+            local_results.append(result_record)
+            recorded_results.add(result_key)
+        journal["local_skills"] = local_results
+        journal["completed"].append(
+            {
+                "type": action["type"],
+                "key": action.get("key"),
+                "digest": result.get("digest"),
+                "at": utc_now(),
+            }
+        )
+        completed.add(completion_key)
+        write_json(journal_path, journal)
 
 
 def apply_plan(root: Path, cli: MulticaCLI, plan_path: Path, approval: str) -> dict[str, Any]:
@@ -1911,7 +2386,14 @@ def apply_plan(root: Path, cli: MulticaCLI, plan_path: Path, approval: str) -> d
     runtime_map = load_runtime_map(Path(plan["runtime_map_path"]))
     if sha256_value(runtime_map) != plan.get("runtime_map_hash"):
         raise WorkflowError("runtime map changed after planning")
+    planned_local_state = plan.get("local_skills")
+    if not isinstance(planned_local_state, dict) or not planned_local_state.get("root"):
+        raise WorkflowError("deployment Plan has no Local Skill state")
+    current_local_state, _ = build_local_skill_state(
+        root, manifest, Path(str(planned_local_state["root"]))
+    )
     journal_path = root / f".multica/journals/{expected_digest[:12]}.json"
+    unfinished_journal: dict[str, Any] | None = None
     if journal_path.is_file():
         existing_journal = read_json(journal_path)
         if isinstance(existing_journal, dict) and existing_journal.get("finished_at"):
@@ -1929,9 +2411,65 @@ def apply_plan(root: Path, cli: MulticaCLI, plan_path: Path, approval: str) -> d
                 or existing_journal.get("workspace") != plan.get("workspace")
             ):
                 raise WorkflowError("completed apply journal differs from the deployment Plan")
+            _, current_local_actions = build_local_skill_state(
+                root, manifest, Path(str(planned_local_state["root"]))
+            )
+            if plan_has_blockers({"actions": current_local_actions}) or mutation_actions(
+                {"actions": current_local_actions}
+            ):
+                raise WorkflowError(
+                    "Local Skill state changed after completed Apply; generate a new Plan"
+                )
             return finalize_deployment_record(
                 root, plan, journal_path, existing_journal, expected_digest
             )
+        if isinstance(existing_journal, dict):
+            if (
+                str(existing_journal.get("plan_digest") or "") != expected_digest
+                or existing_journal.get("workspace") != plan.get("workspace")
+            ):
+                raise WorkflowError("unfinished apply journal differs from the deployment Plan")
+            unfinished_journal = existing_journal
+    resuming_local_phase = bool(
+        unfinished_journal and unfinished_journal.get("workspace_completed_at")
+    )
+    if not resuming_local_phase and current_local_state != planned_local_state:
+        raise WorkflowError("Local Skill state changed after planning; generate a new Plan")
+    if resuming_local_phase:
+        resume_plan = build_plan(
+            root=root,
+            cli=cli,
+            workspace=dict(plan["workspace"]),
+            deployment_profile=str(plan["deployment_profile"]),
+            runtime_map_path=Path(str(plan["runtime_map_path"])),
+            adopt=bool(plan.get("adopt")),
+            rebind_runtimes=bool(plan.get("rebind_runtimes")),
+            write_archives=False,
+            local_skill_root=Path(str(planned_local_state["root"])),
+        )
+        nonlocal_blockers = [
+            action
+            for action in resume_plan.get("actions", [])
+            if action.get("scope") != "local_skill"
+            and action.get("type") == "BLOCKED"
+        ]
+        nonlocal_mutations = [
+            action
+            for action in mutation_actions(resume_plan)
+            if action.get("scope") != "local_skill"
+        ]
+        if nonlocal_blockers or nonlocal_mutations:
+            raise WorkflowError(
+                "Workspace changed after the local phase began; generate a new Plan"
+            )
+        _apply_planned_local_skills(
+            root, manifest, plan, journal_path, unfinished_journal
+        )
+        unfinished_journal["finished_at"] = utc_now()
+        write_json(journal_path, unfinished_journal)
+        return finalize_deployment_record(
+            root, plan, journal_path, unfinished_journal, expected_digest
+        )
     current_state = fetch_state(cli)
     if observed_hash(current_state) != plan.get("observed_hash"):
         raise WorkflowError("Multica state changed after planning; generate a new plan")
@@ -2260,6 +2798,10 @@ def apply_plan(root: Path, cli: MulticaCLI, plan_path: Path, approval: str) -> d
         journal["completed"].append({"type": action["type"], "key": member_ref, "at": utc_now()})
         write_json(journal_path, journal)
 
+    journal["workspace_completed_at"] = utc_now()
+    write_json(journal_path, journal)
+    _apply_planned_local_skills(root, manifest, plan, journal_path, journal)
+
     journal["finished_at"] = utc_now()
     write_json(journal_path, journal)
     return finalize_deployment_record(
@@ -2267,10 +2809,12 @@ def apply_plan(root: Path, cli: MulticaCLI, plan_path: Path, approval: str) -> d
     )
 
 
-def _remove_skill_destination(destination: Path) -> None:
-    is_junction = bool(
-        getattr(destination, "is_junction", lambda: False)()
-    )
+def _remove_skill_destination(destination: Path, target: Path) -> None:
+    destination = destination.absolute()
+    target = resolve_local_skill_root(target)
+    if destination.parent.resolve() != target:
+        raise WorkflowError(f"refusing to remove path outside Local Skill root: {destination}")
+    is_junction = _path_is_junction(destination)
     if destination.is_symlink() or destination.is_file():
         destination.unlink()
     elif is_junction:
@@ -2279,23 +2823,8 @@ def _remove_skill_destination(destination: Path) -> None:
         shutil.rmtree(destination)
 
 
-def _owned_retired_skill(destination: Path, expected_name: str) -> bool:
-    skill_file = destination / "SKILL.md"
-    if not skill_file.is_file():
-        return destination.is_symlink() or bool(
-            getattr(destination, "is_junction", lambda: False)()
-        )
-    content = skill_file.read_text(encoding="utf-8", errors="replace")
-    name_match = re.search(r"(?m)^name:\s*(\S+)\s*$", content)
-    return bool(
-        name_match
-        and name_match.group(1) == expected_name
-        and re.search(rf"(?m)^\s*managed_by:\s*{re.escape(MANAGED_BY)}\s*$", content)
-        and re.search(r"(?m)^\s*workflow_id:\s*development-delivery\s*$", content)
-    )
-
-
 def _copy_skill_source(source: Path, destination: Path) -> None:
+    source = source.resolve()
     destination.mkdir(parents=True, exist_ok=False)
     for path in source_files(source):
         relative = path.relative_to(source)
@@ -2304,67 +2833,175 @@ def _copy_skill_source(source: Path, destination: Path) -> None:
         shutil.copy2(path, target)
 
 
-def install_skills(root: Path, target: Path, copy_mode: bool, replace_existing: bool) -> list[dict[str, str]]:
-    manifest = read_json(root / "workflow.json")
-    results: list[dict[str, str]] = []
+def _temporary_sibling(target: Path, name: str, purpose: str) -> Path:
+    target = target.absolute()
     target.mkdir(parents=True, exist_ok=True)
-    for retired_name in sorted(RETIRED_LOCAL_SKILL_NAMES):
-        destination = target / retired_name
-        if not (
-            destination.exists()
-            or destination.is_symlink()
-            or bool(getattr(destination, "is_junction", lambda: False)())
-        ):
-            continue
-        if not _owned_retired_skill(destination, retired_name):
+    temporary = Path(
+        tempfile.mkdtemp(prefix=f".{_safe_skill_name(name)}.{purpose}-", dir=target)
+    )
+    if temporary.parent != target:
+        raise WorkflowError("temporary Local Skill path escaped its root")
+    return temporary
+
+
+def _replace_local_skill_copy(
+    source: Path,
+    destination: Path,
+    target: Path,
+    desired_digest: str,
+) -> None:
+    stage = _temporary_sibling(target, destination.name, "stage")
+    stage.rmdir()
+    backup: Path | None = None
+    original_moved = False
+    new_installed = False
+    try:
+        _copy_skill_source(source, stage)
+        if _skill_directory_hash(stage) != desired_digest:
             raise WorkflowError(
-                f"retired skill destination is not owned by this workflow: {destination}"
+                f"staged Local Skill digest mismatch for {destination.name}"
             )
-        _remove_skill_destination(destination)
-        results.append(
-            {
-                "skill": retired_name,
-                "mode": "retired-removed",
-                "path": str(destination),
-            }
+        if _path_present(destination):
+            backup = _temporary_sibling(target, destination.name, "backup")
+            backup.rmdir()
+            destination.replace(backup)
+            original_moved = True
+        stage.replace(destination)
+        new_installed = True
+        if destination.is_symlink() or _path_is_junction(destination):
+            raise WorkflowError(
+                f"Local Skill replacement is not a physical copy: {destination.name}"
+            )
+        if _skill_directory_hash(destination) != desired_digest:
+            raise WorkflowError(
+                f"installed Local Skill digest mismatch for {destination.name}"
+            )
+        if backup is not None and _path_present(backup):
+            _remove_skill_destination(backup, target)
+            backup = None
+    except Exception:
+        if new_installed and _path_present(destination):
+            _remove_skill_destination(destination, target)
+        if original_moved and backup is not None and _path_present(backup):
+            backup.replace(destination)
+            backup = None
+        raise
+    finally:
+        if _path_present(stage):
+            _remove_skill_destination(stage, target)
+
+
+def _remove_retired_local_skill(destination: Path, target: Path) -> None:
+    backup = _temporary_sibling(target, destination.name, "retired")
+    backup.rmdir()
+    destination.replace(backup)
+    try:
+        _remove_skill_destination(backup, target)
+    except Exception:
+        if _path_present(backup) and not _path_present(destination):
+            backup.replace(destination)
+        raise
+
+
+def apply_local_skill_action(
+    root: Path, manifest: dict[str, Any], action: dict[str, Any]
+) -> dict[str, Any]:
+    action_type = str(action.get("type") or "")
+    if action_type not in LOCAL_SKILL_ACTION_TYPES:
+        raise WorkflowError(f"unsupported Local Skill action: {action_type}")
+    planned_target = Path(str(action["target_root"]))
+    target = resolve_local_skill_root(planned_target)
+    if os.path.normcase(str(target)) != os.path.normcase(
+        str(planned_target.absolute())
+    ):
+        raise WorkflowError("approved Local Skill root now resolves to a different path")
+    target.mkdir(parents=True, exist_ok=True)
+    name = _safe_skill_name(str(action["skill"]))
+    destination = _local_skill_destination(target, name)
+    workflow_id = str((manifest.get("workflow") or {}).get("id") or "")
+    current = observe_local_skill(target, name, workflow_id)
+    expected_current = {
+        "current_type": action.get("current_type"),
+        "target_type": action.get("target_type"),
+        "digest": action.get("current_digest"),
+    }
+    actual_current = {
+        "current_type": current.get("current_type"),
+        "target_type": current.get("target_type"),
+        "digest": current.get("digest"),
+    }
+    if actual_current != expected_current:
+        raise WorkflowError(
+            f"Local Skill {name} changed before its approved action"
         )
-    for skill in manifest.get("skills", []):
-        if "local" not in skill.get("targets", []):
-            continue
-        source = (root / skill["path"]).resolve()
-        destination = target / skill["name"]
-        if destination.exists() or destination.is_symlink():
-            try:
-                if destination.resolve() == source:
-                    results.append({"skill": skill["name"], "mode": "existing-link", "path": str(destination)})
-                    continue
-            except OSError:
-                pass
-            if not replace_existing:
-                raise WorkflowError(f"skill destination exists: {destination}; pass --replace-existing after review")
-            _remove_skill_destination(destination)
-        mode = "copy" if copy_mode else "link"
-        if copy_mode:
-            _copy_skill_source(source, destination)
-        else:
-            try:
-                os.symlink(source, destination, target_is_directory=True)
-            except OSError:
-                if os.name == "nt":
-                    junction = subprocess.run(
-                        ["cmd.exe", "/d", "/c", "mklink", "/J", str(destination), str(source)],
-                        capture_output=True,
-                        text=True,
-                        encoding="utf-8",
-                        errors="replace",
-                    )
-                    if junction.returncode == 0:
-                        mode = "junction"
-                    else:
-                        _copy_skill_source(source, destination)
-                        mode = "copy-fallback"
-                else:
-                    _copy_skill_source(source, destination)
-                    mode = "copy-fallback"
-        results.append({"skill": skill["name"], "mode": mode, "path": str(destination)})
+    if action_type == "REMOVE_RETIRED_LOCAL_SKILL":
+        if not current.get("owned"):
+            raise WorkflowError(f"refusing to remove foreign Local Skill: {name}")
+        _remove_retired_local_skill(destination, target)
+        return {
+            "skill": name,
+            "action": action_type,
+            "path": str(destination),
+            "digest": None,
+        }
+    skill = next(
+        (
+            item
+            for item in manifest.get("skills", [])
+            if item.get("name") == name and "local" in item.get("targets", [])
+        ),
+        None,
+    )
+    if not skill:
+        raise WorkflowError(f"approved Local Skill is no longer desired: {name}")
+    if current["current_type"] not in {"missing", "copy", "symlink", "junction"}:
+        raise WorkflowError(f"refusing to overwrite foreign Local Skill: {name}")
+    source = (root / str(skill["path"])).resolve()
+    desired_digest = str(action.get("desired_digest") or "")
+    if package_hash(source) != desired_digest:
+        raise WorkflowError(f"Local Skill source changed before Apply: {name}")
+    _replace_local_skill_copy(source, destination, target, desired_digest)
+    return {
+        "skill": name,
+        "action": action_type,
+        "path": str(destination),
+        "digest": desired_digest,
+    }
+
+
+def install_skills(
+    root: Path, target: Path, replace_existing: bool = False
+) -> list[dict[str, Any]]:
+    del replace_existing  # Compatibility only; it never authorizes foreign replacement.
+    manifest, _ = validate_repository(root, "quality")
+    target = validate_local_skill_root_access(target)
+    _, actions = build_local_skill_state(root, manifest, target)
+    blockers = [item for item in actions if item.get("type") == "BLOCKED"]
+    if blockers:
+        raise WorkflowError(
+            "Local Skill installation is blocked: "
+            + "; ".join(str(item.get("reason") or item.get("skill")) for item in blockers)
+        )
+    results: list[dict[str, Any]] = []
+    for action in actions:
+        if action.get("type") in {"WARNING"}:
+            results.append(
+                {
+                    "skill": action.get("skill"),
+                    "action": "PRESERVE_FOREIGN_LOCAL_SKILL",
+                    "path": action.get("destination"),
+                    "digest": action.get("current_digest"),
+                }
+            )
+        elif action.get("type") == "NO_CHANGE":
+            results.append(
+                {
+                    "skill": action.get("skill"),
+                    "action": "NO_CHANGE",
+                    "path": action.get("destination"),
+                    "digest": action.get("desired_digest"),
+                }
+            )
+        elif action.get("type") in LOCAL_SKILL_ACTION_TYPES:
+            results.append(apply_local_skill_action(root, manifest, action))
     return results

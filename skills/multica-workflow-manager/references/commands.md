@@ -30,6 +30,7 @@ Keep machine configuration in the current user's Home directory:
 |---|---|
 | `~/.multica/profiles/` | Multica server and authentication profiles. |
 | `~/.multica/workflows/<workflow-id>/runtime-maps/<workspace-id>.json` | Concrete Runtime selection shared by checkouts of the same Workflow on this machine. |
+| `~/.agents/skills/` | Machine-global, cross-host Local Skills installed only as workflow-owned physical directory copies. |
 
 Keep execution state beside the selected Git checkout or extracted Release Bundle:
 
@@ -48,13 +49,13 @@ Neither area belongs in Git or a Release Bundle. Do not place source-local Plans
 
 | Command | State effect | Responsibility |
 |---|---|---|
-| `doctor` | Read-only | Validate the checkout and CLI prerequisites, resolve profile and Workspace, load the selected Runtime map, and report online provider counts. |
+| `doctor` | Read-only | Validate the checkout and CLI prerequisites, resolve profile and Workspace, load the selected Runtime map, report online provider counts, and check the resolved Local Skill root is safe and writable/creatable. |
 | `export` | Local write only | Fetch current Workspace state, redact secrets, and save a diagnostic snapshot under `exports/`. |
-| `plan` | Local write only | Compare Git desired state with current Multica state and save a digest-bound Plan. It never mutates the Workspace. |
+| `plan` | Local write only | Compare source desired state with current Multica and Local Skill state and save one digest-bound Plan. It never mutates the Workspace or Skill root. |
 | `drift` | Read-only | Perform the same comparison without saving a Plan. Exit `0` for no drift, `1` for mutation actions, and `2` for blockers. |
 | `verify` | Read-only | Perform a fresh comparison and report `OK`, `DRIFT`, or `BLOCKED`; also display the latest local deployment record when present. |
 | `apply` | Workspace and local write | Revalidate and execute the exact reviewed Plan, write a journal and deployment record, then run a fresh verification. |
-| `install-skills` | Local write only | Install locally targeted Skills into the selected Skill root using links/junctions by default. |
+| `install-skills` | Local write only | Repair/install local-target Skills using the same copy-only observation, ownership, staging, digest verification, and rollback logic as Apply. |
 
 Run the ordinary deployment sequence:
 
@@ -79,7 +80,7 @@ APPROVE WORKFLOW PLAN <short-digest>
 
 This is not a Multica Issue or GitHub comment. If the user operates the terminal directly, reviewing the Plan and supplying the digest through `apply --approve` is the approval action. The digest is not a credential.
 
-Apply accepts only the full Plan digest or its first 12 characters. It also rechecks the clean Git commit, desired-source hash, Runtime map hash, Workspace identity, and observed Multica state. Any change requires a fresh Plan and approval.
+Apply accepts only the full Plan digest or its first 12 characters. It rechecks the clean source identity, desired-source hash, Runtime map hash, Workspace identity, observed Multica state, resolved Local Skill root, destination types, ownership, and content digests. Any change requires a fresh Plan and approval.
 
 Do not confuse this gate with development approvals. `APPROVE PLAN vN` is posted on the current Plan approval target. `APPROVE REQUIREMENT vN` is posted only on the top-level Requirement after its revision/head/policy-bound final gate is open.
 
@@ -87,7 +88,7 @@ Do not confuse this gate with development approvals. `APPROVE PLAN vN` is posted
 
 Stop on a missing CLI, authentication failure, Workspace or Runtime ambiguity, invalid approver roster, an unreviewed adoption, or any `BLOCKED` action.
 
-If Apply partially mutates state and stops, retain the journal and generate a fresh Plan. Never reuse the stale Plan. Retirement actions remove retired Agents from the managed Squad, delete dependent automations, reassign preserved Projects, archive the Agents, and delete retired Skills. Historical Projects and Issues remain.
+If Apply stops before the Workspace phase finishes, retain the journal and generate a fresh Plan. If the Workspace phase finished and Local Skill publishing alone was interrupted, retrying the same approved Plan validates completed local actions and resumes the journal without repeating Workspace mutations. A fresh Plan can also reconcile the partial machine state. Retirement actions remove retired Agents from the managed Squad, delete dependent automations, reassign preserved Projects, archive the Agents, and delete retired Skills. Historical Projects and Issues remain.
 
 Apply refuses `MULTICA_AGENT_ID` or `MULTICA_TASK_ID` by default. Use `--allow-agent-identity` only as an explicitly reviewed break-glass action.
 
@@ -128,4 +129,6 @@ Formal Release is optional and separate from Workspace deployment. It requires a
 python scripts/workflow.py install-skills
 ```
 
-The default target is `~/.agents/skills`. Prefer links or Windows junctions. Use `--copy` only when links are unavailable, `--target` for another Skill root, and `--replace-existing` only after reviewing the existing destination. Retired Observer/Maintainer destinations are removed only when their metadata proves this workflow owns them.
+The default target is `~/.agents/skills`, the machine-global root shared by Codex and OpenCode discovery. Installation always uses physical directory copies; the command never invokes symlink or Windows junction creation. Use `--target` for an explicit alternate root. `--replace-existing` is a compatibility option only: it may update a destination whose `SKILL.md` proves the exact Skill name, `managed_by=multica-dev-workflow`, and `workflow_id=development-delivery`; it never authorizes foreign replacement or adoption.
+
+The normal `doctor -> plan -> approval -> apply -> verify` sequence already installs every manifest Skill with a `local` target. `install-skills` is an explicit repair/standalone entry, not a way around Plan approval for normal workflow publishing. Creation and updates copy into a temporary sibling, verify the exact file set and SHA-256 digest, switch through a rollback backup, and restore the prior owned destination if replacement fails. Owned symlinks/junctions are migrated to copies; unverifiable or foreign same-name targets block active installation. Retired targets are deleted only when the same ownership metadata is readable and valid; foreign retired names are preserved.

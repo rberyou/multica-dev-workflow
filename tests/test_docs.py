@@ -327,6 +327,35 @@ class DocumentationTests(unittest.TestCase):
         )
         self.assertNotIn("runtime-map.local.json", documented)
 
+    def test_local_skill_publishing_is_approved_copy_only_machine_state(self):
+        manager_root = ROOT / "skills/multica-workflow-manager"
+        content = "\n".join(
+            [
+                (manager_root / "SKILL.md").read_text(encoding="utf-8"),
+                (manager_root / "references/commands.md").read_text(
+                    encoding="utf-8"
+                ),
+                (ROOT / "README.md").read_text(encoding="utf-8"),
+                (ROOT / "docs/workflow-design.md").read_text(encoding="utf-8"),
+                (ROOT / "AGENTS.md").read_text(encoding="utf-8"),
+            ]
+        )
+        for expected in [
+            "~/.agents/skills",
+            "physical",
+            "copy",
+            "Local Skill",
+            "Plan",
+            "digest",
+            "foreign",
+            "Release Bundle",
+        ]:
+            with self.subTest(expected=expected):
+                self.assertIn(expected, content)
+        self.assertNotIn("Prefer links", content)
+        self.assertNotIn("links/junctions by default", content)
+        self.assertNotIn("Use `--copy`", content)
+
 
 if __name__ == "__main__":
     unittest.main()
