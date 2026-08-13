@@ -10,7 +10,7 @@
 
 ## Current Design Boundary
 
-Protocol v4 manages the seven ordinary development Agents, their Squad, reusable Skills, and one workflow Incident project. There is no Observer, workflow Maintainer, maintenance-specific Reviewer, scheduled scan, maintenance case, or secure execution environment. Workflow problems are reported only when discovered during real work and are fixed through an ordinary Requirement.
+Protocol v4 manages the seven ordinary development Agents, their Squad, reusable Skills, and one workflow Incident project. There is no Observer, workflow Maintainer, maintenance-specific Reviewer, scheduled scan, maintenance case, or secure execution environment. Workflow problems are reported only when discovered during real work. New fixes are tracked as external `incident_fix_requirement` records and are not executed by the managed development Squad; previously linked ordinary Requirements retain their legacy flow.
 
 ## Build, Test, and Development Commands
 

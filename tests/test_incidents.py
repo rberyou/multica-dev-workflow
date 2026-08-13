@@ -1,6 +1,8 @@
 from pathlib import Path
 import argparse
+import contextlib
 import importlib.util
+import io
 import json
 import sys
 import unittest
@@ -43,16 +45,61 @@ class FakeCLI:
                 "id": "project-incidents",
                 "title": "工作流问题",
                 "description": marker("project.workflow-incidents"),
-            }
+            },
+            {
+                "id": "project-external",
+                "title": "External Operations",
+                "description": "Owned outside the development workflow.",
+                "lead_id": "agent-external",
+            },
+            {
+                "id": "project-managed",
+                "title": "Managed Product",
+                "description": marker("project.managed-product"),
+            },
+            {
+                "id": "project-squad-owned",
+                "title": "Squad-Owned Product",
+                "description": "No marker, but managed Squad owns it.",
+                "lead_id": "agent-leader",
+            },
         ]
         self.agents = [
             {
                 "id": "agent-leader",
                 "name": "开发队长",
                 "instructions": marker("agent.leader"),
-            }
+            },
+            {
+                "id": "agent-external",
+                "name": "External Owner",
+                "instructions": "External process owner.",
+            },
         ]
+        self.squads = [
+            {
+                "id": "squad-development",
+                "name": "Development Delivery",
+                "instructions": marker("squad.development-delivery"),
+            },
+            {
+                "id": "squad-external",
+                "name": "External Operations",
+                "instructions": "External execution.",
+            },
+        ]
+        self.squad_members = {
+            "squad-development": [
+                {"member_type": "agent", "member_id": "agent-leader"},
+                {"member_type": "member", "member_id": "member-approver"},
+            ],
+            "squad-external": [
+                {"member_type": "agent", "member_id": "agent-external"},
+                {"member_type": "member", "member_id": "member-external"},
+            ],
+        }
         self.created = 0
+        self.metadata_set_failures = []
 
     def add_issue(
         self,
@@ -87,8 +134,25 @@ class FakeCLI:
         command = tuple(args)
         if command[:2] == ("project", "list"):
             return self.projects
+        if command[:2] == ("project", "get"):
+            return next(item for item in self.projects if item["id"] == args[2])
         if command[:2] == ("agent", "list"):
             return self.agents
+        if command[:2] == ("agent", "get"):
+            return next(item for item in self.agents if item["id"] == args[2])
+        if command[:2] == ("squad", "list"):
+            return self.squads
+        if command[:2] == ("squad", "get"):
+            return next(item for item in self.squads if item["id"] == args[2])
+        if command[:3] == ("squad", "member", "list"):
+            return self.squad_members.get(args[3], [])
+        if command[:3] == ("workspace", "member", "list"):
+            return [
+                {"id": "member-approver"},
+                {"id": "member-external"},
+            ]
+        if command[:3] == ("user", "profile", "get"):
+            return {"id": "member-current"}
         if command[:2] == ("issue", "get"):
             return self.resolve(args[2])
         if command[:3] == ("issue", "metadata", "list"):
@@ -96,6 +160,10 @@ class FakeCLI:
             return self.metadata[issue["identifier"]]
         if command[:3] == ("issue", "metadata", "set"):
             issue = self.resolve(args[3])
+            failure = (issue["identifier"], flag(args, "--key"))
+            if failure in self.metadata_set_failures:
+                self.metadata_set_failures.remove(failure)
+                raise incidents.IncidentError("simulated metadata write failure")
             value = flag(args, "--value", "")
             value_type = flag(args, "--type", "string")
             if value_type == "bool":
@@ -135,6 +203,7 @@ class FakeCLI:
                     "description": input_text or "",
                     "priority": flag(args, "--priority"),
                     "assignee_id": flag(args, "--assignee-id"),
+                    "parent_issue_id": None,
                 }
             )
             return issue
@@ -189,6 +258,20 @@ def close_args(incident, result="passed", **overrides):
         "evidence": "verified in workspace",
         "source_commit": "a" * 40,
         "deployment_plan_digest": "b" * 64,
+        "fix_reference_type": None,
+        "fix_reference": None,
+        "deployment_verification_reference_type": None,
+        "deployment_verification_reference": None,
+    }
+    values.update(overrides)
+    return argparse.Namespace(**values)
+
+
+def create_fix_args(incident, **overrides):
+    values = {
+        "incident": incident,
+        "project": "project-external",
+        "assignee_id": None,
     }
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -204,6 +287,39 @@ class IncidentTests(unittest.TestCase):
         self.cli.add_issue(identifier, status="done")
         incidents.bind_workflow_issue(self.cli, bind_args(identifier))
         return identifier
+
+    def test_create_fix_parser_requires_an_explicit_project(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                incidents.parser().parse_args(
+                    [
+                        "--workspace",
+                        "workspace-test",
+                        "create-fix-requirement",
+                        "--incident",
+                        "INC-1",
+                    ]
+                )
+
+    def create_external_fix(self, incident_id, **overrides):
+        result = incidents.create_fix_requirement(
+            self.cli, create_fix_args(incident_id, **overrides)
+        )
+        requirement_id = result["fix_requirement_id"]
+        return requirement_id, result
+
+    def external_close_args(self, incident_id, result="passed", **overrides):
+        values = {
+            "result": result,
+            "source_commit": None,
+            "deployment_plan_digest": None,
+            "fix_reference_type": "git_commit",
+            "fix_reference": "c" * 40,
+            "deployment_verification_reference_type": "deployment_record",
+            "deployment_verification_reference": "release-2026.08.13/verify-17",
+        }
+        values.update(overrides)
+        return close_args(incident_id, **values)
 
     def test_redaction_handles_nested_values_headers_and_private_keys(self):
         value = {
@@ -249,6 +365,149 @@ class IncidentTests(unittest.TestCase):
         self.assertEqual(metadata["fix_requirement_id"], fix)
         evidence = json.loads(metadata["incident_evidence_log"])
         self.assertEqual(len(evidence), 1)
+
+    def test_create_external_fix_is_unassigned_backlog_and_not_protocol_requirement(self):
+        incident_id = incidents.report_incident(
+            self.cli,
+            report_args(
+                "REQ-1",
+                summary="Token leak",
+                evidence="Authorization: Bearer secret-token",
+            ),
+        )["incident_id"]
+        requirement_id, result = self.create_external_fix(incident_id)
+        requirement = self.cli.issues[requirement_id]
+        metadata = self.cli.metadata[requirement_id]
+        self.assertEqual(result["fix_execution_mode"], "external")
+        self.assertEqual(requirement["status"], "backlog")
+        self.assertEqual(requirement["project_id"], "project-external")
+        self.assertIsNone(requirement["assignee_id"])
+        self.assertIsNone(requirement["parent_issue_id"])
+        self.assertEqual(metadata["workflow_object_type"], "incident_fix_requirement")
+        self.assertEqual(metadata["fix_execution_mode"], "external")
+        self.assertNotIn("root_requirement_id", metadata)
+        self.assertNotIn("protocol_revision", metadata)
+        self.assertNotIn("secret-token", requirement["description"])
+        self.assertEqual(
+            self.cli.metadata[incident_id]["waiting_on"], "external_fix_owner"
+        )
+
+    def test_create_external_fix_requires_safe_project_and_assignee(self):
+        incident_id = incidents.report_incident(
+            self.cli, report_args("REQ-1")
+        )["incident_id"]
+        with self.assertRaisesRegex(incidents.IncidentError, "Incident Project"):
+            self.create_external_fix(incident_id, project="project-incidents")
+        with self.assertRaisesRegex(incidents.IncidentError, "managed workflow Project"):
+            self.create_external_fix(incident_id, project="project-managed")
+        with self.assertRaisesRegex(incidents.IncidentError, "owned by the development Squad"):
+            self.create_external_fix(incident_id, project="project-squad-owned")
+        self.cli.projects.append(
+            {
+                "id": "project-unknown-owner",
+                "title": "Unknown Owner",
+                "description": "Owner is not readable in this Workspace.",
+                "lead_id": "unknown-owner",
+            }
+        )
+        with self.assertRaisesRegex(incidents.IncidentError, "owner identity"):
+            self.create_external_fix(incident_id, project="project-unknown-owner")
+        for assignee in ["squad-development", "agent-leader", "member-approver"]:
+            with self.subTest(assignee=assignee):
+                with self.assertRaisesRegex(incidents.IncidentError, "development Squad"):
+                    self.create_external_fix(incident_id, assignee_id=assignee)
+        requirement_id, _ = self.create_external_fix(
+            incident_id, assignee_id="member-external"
+        )
+        self.assertEqual(self.cli.issues[requirement_id]["assignee_id"], "member-external")
+
+    def test_create_external_fix_is_idempotent_and_recovers_partial_binding(self):
+        incident_id = incidents.report_incident(
+            self.cli, report_args("REQ-1")
+        )["incident_id"]
+        self.cli.metadata_set_failures.append((incident_id, "fix_requirement_id"))
+        with self.assertRaisesRegex(incidents.IncidentError, "metadata write failure"):
+            self.create_external_fix(incident_id)
+        self.assertEqual(self.cli.created, 2)
+        orphan = next(
+            key
+            for key, metadata in self.cli.metadata.items()
+            if metadata.get("workflow_object_type") == "incident_fix_requirement"
+        )
+        self.assertNotIn("fix_requirement_id", self.cli.metadata[incident_id])
+        recovered, result = self.create_external_fix(incident_id)
+        self.assertEqual(recovered, orphan)
+        self.assertEqual(result["action"], "created_or_recovered")
+        created_count = self.cli.created
+        again, repeated = self.create_external_fix(incident_id)
+        self.assertEqual(again, orphan)
+        self.assertEqual(repeated["action"], "reused")
+        self.assertEqual(self.cli.created, created_count)
+
+    def test_create_external_fix_reuses_an_existing_binding_when_assignee_is_omitted(self):
+        incident_id = incidents.report_incident(
+            self.cli, report_args("REQ-1")
+        )["incident_id"]
+        requirement_id, _ = self.create_external_fix(
+            incident_id, assignee_id="member-external"
+        )
+        repeated_id, result = self.create_external_fix(incident_id)
+        self.assertEqual(repeated_id, requirement_id)
+        self.assertEqual(result["action"], "reused")
+
+    def test_create_external_fix_rejects_multiple_candidates_and_binding_conflicts(self):
+        incident_id = incidents.report_incident(
+            self.cli, report_args("REQ-1")
+        )["incident_id"]
+        description = incidents.external_fix_description(
+            incident_id,
+            self.cli.issues[incident_id],
+            self.cli.metadata[incident_id],
+        )
+        for identifier in ["FIX-A", "FIX-B"]:
+            issue = self.cli.add_issue(
+                identifier, status="backlog", project_id="project-external"
+            )
+            issue["description"] = description
+        with self.assertRaisesRegex(incidents.IncidentError, "multiple external"):
+            self.create_external_fix(incident_id)
+
+        other = incidents.report_incident(
+            self.cli, report_args("REQ-1", rule_id="WF-TEST-OTHER")
+        )["incident_id"]
+        self.cli.issues.pop("FIX-B")
+        self.cli.metadata.pop("FIX-B")
+        self.cli.metadata[incident_id]["fix_requirement_id"] = "FIX-A"
+        self.cli.metadata["FIX-A"].update(
+            {
+                "managed_by": incidents.MANAGED_BY,
+                "workflow_id": incidents.WORKFLOW_ID,
+                "workflow_object_type": "incident_fix_requirement",
+                "fix_execution_mode": "external",
+                "workflow_incident_id": other,
+            }
+        )
+        with self.assertRaisesRegex(incidents.IncidentError, "workflow_incident_id conflicts"):
+            self.create_external_fix(incident_id)
+
+    def test_create_external_fix_rejects_an_orphan_after_an_existing_binding(self):
+        incident_id = incidents.report_incident(
+            self.cli, report_args("REQ-1")
+        )["incident_id"]
+        requirement_id, _ = self.create_external_fix(incident_id)
+        duplicate = self.cli.add_issue(
+            "FIX-ORPHAN", status="backlog", project_id="project-external"
+        )
+        duplicate["description"] = incidents.external_fix_description(
+            incident_id,
+            self.cli.issues[incident_id],
+            self.cli.metadata[incident_id],
+        )
+        with self.assertRaisesRegex(incidents.IncidentError, "another external"):
+            self.create_external_fix(incident_id)
+        self.assertEqual(
+            self.cli.metadata[incident_id]["fix_requirement_id"], requirement_id
+        )
 
     def test_deduplicated_report_updates_issue_priority_only_upward(self):
         created = incidents.report_incident(
@@ -310,11 +569,83 @@ class IncidentTests(unittest.TestCase):
         self.assertEqual(self.cli.metadata[incident_id]["incident_status"], "in_fix")
         self.assertEqual(self.cli.issues[incident_id]["status"], "in_progress")
 
+    def test_failed_external_verification_keeps_external_waiting_state(self):
+        incident_id = incidents.report_incident(
+            self.cli, report_args("REQ-1")
+        )["incident_id"]
+        requirement_id, _ = self.create_external_fix(incident_id)
+        self.cli.issues[requirement_id]["status"] = "done"
+        result = incidents.close_incident(
+            self.cli,
+            self.external_close_args(
+                incident_id,
+                result="failed",
+                evidence="Authorization: Bearer should-not-persist",
+                fix_reference_type=None,
+                fix_reference=None,
+                deployment_verification_reference_type=None,
+                deployment_verification_reference=None,
+            ),
+        )
+        self.assertFalse(result["closed"])
+        metadata = self.cli.metadata[incident_id]
+        self.assertEqual(metadata["waiting_on"], "external_fix_owner")
+        self.assertNotIn("should-not-persist", metadata["last_verification_evidence"])
+
+    def test_external_close_requires_structured_references_not_plan_digest(self):
+        incident_id = incidents.report_incident(
+            self.cli, report_args("REQ-1")
+        )["incident_id"]
+        requirement_id, _ = self.create_external_fix(incident_id)
+        self.cli.issues[requirement_id]["status"] = "done"
+        with self.assertRaisesRegex(incidents.IncidentError, "fix reference type"):
+            incidents.close_incident(
+                self.cli,
+                self.external_close_args(incident_id, fix_reference_type=None),
+            )
+        with self.assertRaisesRegex(incidents.IncidentError, "40-character commit"):
+            incidents.close_incident(
+                self.cli,
+                self.external_close_args(incident_id, fix_reference="short"),
+            )
+        with self.assertRaisesRegex(incidents.IncidentError, "must not contain secrets"):
+            incidents.close_incident(
+                self.cli,
+                self.external_close_args(
+                    incident_id,
+                    fix_reference_type="artifact_version",
+                    fix_reference="Authorization: Bearer secret-token",
+                ),
+            )
+        with self.assertRaisesRegex(incidents.IncidentError, "single immutable reference"):
+            incidents.close_incident(
+                self.cli,
+                self.external_close_args(
+                    incident_id,
+                    fix_reference_type="artifact_version",
+                    fix_reference="mutable release label",
+                ),
+            )
+        result = incidents.close_incident(
+            self.cli,
+            self.external_close_args(
+                incident_id,
+                fix_reference_type="artifact_version",
+                fix_reference="workflow-runtime-2.0.0-dev.7",
+                evidence="verified; Cookie: session-secret",
+            ),
+        )
+        self.assertTrue(result["closed"])
+        metadata = self.cli.metadata[incident_id]
+        self.assertEqual(metadata["immutable_fix_reference_type"], "artifact_version")
+        self.assertNotIn("deployment_plan_digest", metadata)
+        self.assertNotIn("session-secret", metadata["last_verification_evidence"])
+
     def test_passed_verification_requires_fix_commit_and_plan_digest(self):
         incident_id = incidents.report_incident(
             self.cli, report_args("REQ-1")
         )["incident_id"]
-        with self.assertRaisesRegex(incidents.IncidentError, "link an ordinary"):
+        with self.assertRaisesRegex(incidents.IncidentError, "link a fix Requirement"):
             incidents.close_incident(self.cli, close_args(incident_id))
         incidents.link_fix(self.cli, link_args(incident_id, self.bind_fix()))
         with self.assertRaisesRegex(incidents.IncidentError, "source commit"):
@@ -345,6 +676,147 @@ class IncidentTests(unittest.TestCase):
         self.bind_fix("REQ-FIX-2")
         with self.assertRaisesRegex(incidents.IncidentError, "different fix"):
             incidents.link_fix(self.cli, link_args(incident_id, "REQ-FIX-2"))
+
+    def test_link_fix_supports_external_and_rejects_reverse_conflicts(self):
+        incident_id = incidents.report_incident(
+            self.cli, report_args("REQ-1")
+        )["incident_id"]
+        external = self.cli.add_issue(
+            "FIX-EXTERNAL", status="backlog", project_id="project-external"
+        )
+        self.cli.metadata["FIX-EXTERNAL"].update(
+            {
+                "managed_by": incidents.MANAGED_BY,
+                "workflow_id": incidents.WORKFLOW_ID,
+                "workflow_object_type": "incident_fix_requirement",
+                "fix_execution_mode": "external",
+            }
+        )
+        result = incidents.link_fix(
+            self.cli, link_args(incident_id, external["identifier"])
+        )
+        self.assertEqual(result["fix_execution_mode"], "external")
+        self.assertEqual(
+            self.cli.metadata["FIX-EXTERNAL"]["workflow_incident_id"], incident_id
+        )
+
+        other = incidents.report_incident(
+            self.cli, report_args("REQ-1", rule_id="WF-LINK-OTHER")
+        )["incident_id"]
+        legacy = self.bind_fix("REQ-LEGACY-CONFLICT")
+        self.cli.metadata[legacy]["workflow_incident_id"] = incident_id
+        with self.assertRaisesRegex(incidents.IncidentError, "another Incident"):
+            incidents.link_fix(self.cli, link_args(other, legacy))
+
+    def test_link_fix_rejects_an_existing_incident_owner_even_without_reverse_metadata(self):
+        first = incidents.report_incident(
+            self.cli, report_args("REQ-1", rule_id="WF-OWNER-FIRST")
+        )["incident_id"]
+        second = incidents.report_incident(
+            self.cli, report_args("REQ-1", rule_id="WF-OWNER-SECOND")
+        )["incident_id"]
+        legacy = self.bind_fix("REQ-OWNER-CONFLICT")
+        self.cli.metadata[first]["fix_requirement_id"] = legacy
+        with self.assertRaisesRegex(incidents.IncidentError, "owned by another Incident"):
+            incidents.link_fix(self.cli, link_args(second, legacy))
+
+    def test_external_link_rejects_development_tree_metadata(self):
+        incident_id = incidents.report_incident(
+            self.cli, report_args("REQ-1")
+        )["incident_id"]
+        self.cli.add_issue(
+            "FIX-BAD", status="backlog", project_id="project-external"
+        )
+        self.cli.metadata["FIX-BAD"].update(
+            {
+                "managed_by": incidents.MANAGED_BY,
+                "workflow_id": incidents.WORKFLOW_ID,
+                "workflow_object_type": "incident_fix_requirement",
+                "fix_execution_mode": "external",
+                "root_requirement_id": "FIX-BAD",
+            }
+        )
+        with self.assertRaisesRegex(incidents.IncidentError, "development-delivery metadata"):
+            incidents.link_fix(self.cli, link_args(incident_id, "FIX-BAD"))
+
+    def test_external_link_requires_explicit_type_and_mode_without_creation_marker(self):
+        incident_id = incidents.report_incident(
+            self.cli, report_args("REQ-1")
+        )["incident_id"]
+        self.cli.add_issue(
+            "FIX-UNTYPED", status="backlog", project_id="project-external"
+        )
+        self.cli.metadata["FIX-UNTYPED"].update(
+            {
+                "managed_by": incidents.MANAGED_BY,
+                "workflow_id": incidents.WORKFLOW_ID,
+                "workflow_incident_id": incident_id,
+            }
+        )
+        with self.assertRaisesRegex(incidents.IncidentError, "protocol v4 Requirement"):
+            incidents.link_fix(self.cli, link_args(incident_id, "FIX-UNTYPED"))
+
+    def test_external_link_recovers_a_marker_only_partial_create(self):
+        incident_id = incidents.report_incident(
+            self.cli, report_args("REQ-1")
+        )["incident_id"]
+        orphan = self.cli.add_issue(
+            "FIX-MARKER", status="backlog", project_id="project-external"
+        )
+        orphan["description"] = incidents.external_fix_description(
+            incident_id,
+            self.cli.issues[incident_id],
+            self.cli.metadata[incident_id],
+        )
+        result = incidents.link_fix(self.cli, link_args(incident_id, "FIX-MARKER"))
+        self.assertEqual(result["fix_execution_mode"], "external")
+        self.assertEqual(
+            self.cli.metadata["FIX-MARKER"]["workflow_object_type"],
+            "incident_fix_requirement",
+        )
+
+    def test_external_link_revalidates_project_and_assignee_safety(self):
+        incident_id = incidents.report_incident(
+            self.cli, report_args("REQ-1")
+        )["incident_id"]
+        self.cli.add_issue(
+            "FIX-UNSAFE",
+            status="backlog",
+            project_id="project-managed",
+        )["assignee_id"] = "agent-leader"
+        self.cli.metadata["FIX-UNSAFE"].update(
+            {
+                "managed_by": incidents.MANAGED_BY,
+                "workflow_id": incidents.WORKFLOW_ID,
+                "workflow_object_type": "incident_fix_requirement",
+                "fix_execution_mode": "external",
+            }
+        )
+        with self.assertRaises(incidents.IncidentError):
+            incidents.link_fix(self.cli, link_args(incident_id, "FIX-UNSAFE"))
+
+    def test_close_restores_only_sources_still_owned_by_incident(self):
+        self.cli.add_issue("TASK-A", status="todo", parent_issue_id="REQ-1")
+        self.cli.add_issue("TASK-B", status="todo", parent_issue_id="REQ-1")
+        for task in ["TASK-A", "TASK-B"]:
+            incidents.bind_workflow_issue(
+                self.cli, bind_args(task, "development_task")
+            )
+        first = incidents.report_incident(
+            self.cli, report_args("TASK-A", dedupe_key="shared", block_source=True)
+        )
+        incidents.report_incident(
+            self.cli, report_args("TASK-B", dedupe_key="shared", block_source=True)
+        )
+        self.cli.metadata["TASK-B"]["workflow_blocked_by_incident_id"] = "INC-OTHER"
+        fix = self.bind_fix("REQ-FIX-OWNERSHIP")
+        incidents.link_fix(self.cli, link_args(first["incident_id"], fix))
+        result = incidents.close_incident(
+            self.cli, close_args(first["incident_id"])
+        )
+        self.assertEqual(result["sources_restored"], 1)
+        self.assertEqual(self.cli.issues["TASK-A"]["status"], "todo")
+        self.assertEqual(self.cli.issues["TASK-B"]["status"], "blocked")
 
     def test_blocking_does_not_overwrite_another_incident(self):
         self.cli.metadata["REQ-1"]["workflow_blocked_by_incident_id"] = "INC-OTHER"

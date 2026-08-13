@@ -1,6 +1,6 @@
 ---
 name: multica-workflow-incidents
-description: Bind development workflow Issues to protocol v4 and persist workflow Incidents when a problem must survive the current task. Use when a managed development Agent creates a workflow Issue, finds a workflow rule conflict, missing role or metadata, invalid gate, platform mismatch, or another cross-task workflow defect.
+description: Bind development workflow Issues to protocol v4, persist workflow Incidents, and create, link, or verify external Incident fix Requirements. Use when a managed development Agent creates a workflow Issue, finds a durable workflow rule conflict or platform mismatch, needs an explicit external incident fix record, or closes either an external or legacy fix after deployment verification.
 metadata:
   managed_by: multica-dev-workflow
   workflow_id: development-delivery
@@ -41,16 +41,39 @@ python <this-skill>/scripts/incidents.py --workspace <workspace> report \
 
 Use `--block-source` only when continuing risks correctness, approval integrity, privacy, security, or Git history. The script creates or reuses a deduplicated Incident in the managed workflow Incidents project and assigns it to the development leader.
 
-## Link and Close
+## Create or Link the Fix
 
-Link an ordinary Requirement that implements the fix:
+`report` creates or reuses only an Incident. When a durable fix is needed, create one external fix Requirement in an explicitly selected external Project:
+
+```text
+python <this-skill>/scripts/incidents.py --workspace <workspace> create-fix-requirement \
+  --incident <incident-id> --project <external-project-id-or-ref> \
+  [--assignee-id <external-owner-id>]
+```
+
+The Project is mandatory. The command rejects the managed Incident Project, other managed workflow Projects, and any assignee in the managed development Squad. Without `--assignee-id`, the new `backlog` object remains unassigned. It is an external `incident_fix_requirement`, not a protocol-v4 development-tree Requirement, and it does not enter Plan, implementation, Review, integration, or final approval.
+
+Use `link-fix` to recover or explicitly associate an external object, or to retain a previously existing ordinary protocol-v4 Requirement link:
 
 ```text
 python <this-skill>/scripts/incidents.py --workspace <workspace> link-fix \
   --incident <incident-id> --requirement <requirement-id>
 ```
 
-After the ordinary fix Requirement is `done` and the fix is deployed and checked, record the result. Passed verification requires the full source commit and deployment Plan digest:
+## Close
+
+After the external fix Requirement is `done`, close with redacted evidence, a typed immutable fix reference, and a typed deployment verification reference:
+
+```text
+python <this-skill>/scripts/incidents.py --workspace <workspace> close \
+  --incident <incident-id> --result passed --evidence <verification-evidence> \
+  --fix-reference-type <git_commit|artifact_version|other-stable-type> \
+  --fix-reference <immutable-reference> \
+  --deployment-verification-reference-type <stable-type> \
+  --deployment-verification-reference <immutable-reference>
+```
+
+Legacy ordinary Requirement links keep the existing source commit and deployment Plan digest gate:
 
 ```text
 python <this-skill>/scripts/incidents.py --workspace <workspace> close \
@@ -58,8 +81,8 @@ python <this-skill>/scripts/incidents.py --workspace <workspace> close \
   --source-commit <commit> --deployment-plan-digest <digest>
 ```
 
-A failed check keeps the Incident open. Never copy credentials, cookies, private keys, authorization headers, or raw environment values into Incident evidence.
+A failed check keeps the Incident open with mode-appropriate `waiting_on`. Never copy credentials, cookies, private keys, authorization headers, or raw environment values into Incident evidence or identity references.
 
-When operating from the workflow repository, the equivalent host wrappers are `workflow.py bind-workflow-issue`, `report-incident`, `link-incident-fix`, and `close-incident`. Managed Agents should use this Skill's direct script commands shown above because product repositories do not contain `scripts/workflow.py`.
+When operating from the workflow repository, the equivalent host wrappers are `workflow.py bind-workflow-issue`, `report-incident`, `create-incident-fix-requirement`, `link-incident-fix`, and `close-incident`. Managed Agents should use this Skill's direct script commands shown above because product repositories do not contain `scripts/workflow.py`.
 
 Read [incident-contract.md](references/incident-contract.md) when validating exact metadata, deduplication, blocking, or closure behavior.

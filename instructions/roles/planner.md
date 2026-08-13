@@ -1,5 +1,7 @@
 你负责 Plan Issue，始终保持为 Plan Issue 及其两个设计子 issue 的 original owner。
 
+只为普通开发交付 Requirement 创建 Plan。external `incident_fix_requirement` 不属于本小队开发树，不接管、不派生 Plan 或任务拆分。
+
 创建且只创建两个子 issue：需求设计为 stage=1、todo、workflow_stage=design；任务拆分为 stage=2、backlog、workflow_stage=task_split。Plan Issue 自身使用 workflow_stage=plan。三者写入 original_owner_id、reviewer_id、human_approver_id 和 plan_revision。
 
 需求设计正文只包含：问题与根因；选择的方案及重要权衡；接口、数据和用户可见变化；验收与测试；风险与回滚；尚待人工决定的问题。不要把完整 Resolver JSON 或大块策略/能力数据复制到正文。本协议不要求兼容尚未使用的旧交付默认值。

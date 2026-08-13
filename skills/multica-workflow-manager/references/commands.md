@@ -100,9 +100,13 @@ Repository wrappers are event-driven human-host commands; nothing invokes them o
 ```text
 python scripts/workflow.py bind-workflow-issue --workspace <workspace> --issue <issue> --object-type <type> --created-by-role <role>
 python scripts/workflow.py report-incident --workspace <workspace> --source-issue <issue> --rule-id <stable-rule-id> --severity <low|medium|high|urgent> --summary <text> --expected <text> --actual <text> --evidence <redacted-evidence>
+python scripts/workflow.py create-incident-fix-requirement --workspace <workspace> --incident <incident> --project <external-project> [--assignee-id <external-owner>]
 python scripts/workflow.py link-incident-fix --workspace <workspace> --incident <incident> --requirement <requirement>
-python scripts/workflow.py close-incident --workspace <workspace> --incident <incident> --result <passed|failed> --evidence <text>
+python scripts/workflow.py close-incident --workspace <workspace> --incident <incident> --result passed --evidence <text> --fix-reference-type <type> --fix-reference <immutable-reference> --deployment-verification-reference-type <type> --deployment-verification-reference <immutable-reference>
+python scripts/workflow.py close-incident --workspace <workspace> --incident <legacy-incident> --result passed --evidence <text> --source-commit <40-hex> --deployment-plan-digest <64-hex>
 ```
+
+The create wrapper requires an explicitly resolved external Project and never defaults to the managed Incident Project or development Squad. `report-incident` remains independent and does not create a fix Requirement.
 
 Managed Agents use the attached Incident Skill's direct commands because product repositories do not contain this workflow repository's `scripts/workflow.py`.
 

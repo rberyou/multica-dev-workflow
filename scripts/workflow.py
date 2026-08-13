@@ -357,6 +357,18 @@ def command_incidents(args: argparse.Namespace, root: Path) -> int:
                 command.extend([key, value])
         if args.block_source:
             command.append("--block-source")
+    elif args.command == "create-incident-fix-requirement":
+        command.extend(
+            [
+                "create-fix-requirement",
+                "--incident",
+                args.incident,
+                "--project",
+                args.project,
+            ]
+        )
+        if args.assignee_id:
+            command.extend(["--assignee-id", args.assignee_id])
     elif args.command == "link-incident-fix":
         command.extend(
             [
@@ -383,6 +395,20 @@ def command_incidents(args: argparse.Namespace, root: Path) -> int:
             command.extend(["--source-commit", args.source_commit])
         if args.deployment_plan_digest:
             command.extend(["--deployment-plan-digest", args.deployment_plan_digest])
+        for key, value in [
+            ("--fix-reference-type", args.fix_reference_type),
+            ("--fix-reference", args.fix_reference),
+            (
+                "--deployment-verification-reference-type",
+                args.deployment_verification_reference_type,
+            ),
+            (
+                "--deployment-verification-reference",
+                args.deployment_verification_reference,
+            ),
+        ]:
+            if value:
+                command.extend([key, value])
     result = run_process(command, cwd=root, check=False)
     if result.stdout:
         sys.stdout.write(result.stdout)
@@ -454,6 +480,13 @@ def parser() -> argparse.ArgumentParser:
     report.add_argument("--block-source", action="store_true")
     report.set_defaults(func=command_incidents)
 
+    create_fix = subparsers.add_parser("create-incident-fix-requirement")
+    add_context_args(create_fix)
+    create_fix.add_argument("--incident", required=True)
+    create_fix.add_argument("--project", required=True)
+    create_fix.add_argument("--assignee-id")
+    create_fix.set_defaults(func=command_incidents)
+
     link = subparsers.add_parser("link-incident-fix")
     add_context_args(link)
     link.add_argument("--incident", required=True)
@@ -467,6 +500,10 @@ def parser() -> argparse.ArgumentParser:
     close.add_argument("--evidence", required=True)
     close.add_argument("--source-commit")
     close.add_argument("--deployment-plan-digest")
+    close.add_argument("--fix-reference-type")
+    close.add_argument("--fix-reference")
+    close.add_argument("--deployment-verification-reference-type")
+    close.add_argument("--deployment-verification-reference")
     close.set_defaults(func=command_incidents)
     return root_parser
 

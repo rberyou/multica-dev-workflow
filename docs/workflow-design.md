@@ -42,16 +42,16 @@ The Incident Skill therefore combines:
 - written instructions for judgment and escalation;
 - a deterministic Python command for binding, redaction, deduplication, state changes, source blocking/restoration, and evidence persistence.
 
-The Python command is called by an ordinary Agent or human host at the moment an Issue is created, a durable workflow problem is found, a fix Requirement is linked, or a deployed fix is checked. It is never called by a timer.
+The Python command is called by an ordinary Agent or human host at the moment an ordinary development Issue is created, a durable workflow problem is found, an external fix record is explicitly created or linked, a legacy ordinary fix is linked, or a deployed fix is checked. It is never called by a timer. `report` itself does not manufacture a fix record.
 
 ## Fix Flow
 
 ```text
-discovery -> Incident(open) -> ordinary Requirement -> normal Review Loop
-          -> workspace Plan/Apply/Verify -> Incident(closed)
+discovery -> Incident(open) -> external incident_fix_requirement(backlog)
+          -> external owner/process -> deployed and verified -> Incident(closed)
 ```
 
-There is no Observation inbox, maintenance decision object, maintenance case, or maintenance-only approval. Product-impacting choices still use the ordinary Requirement's human gates.
+The external fix record is a verifiable Requirement-shaped Issue, but it has no development-tree root or protocol metadata and does not trigger Leader, Planner, Integrator, implementation, Code Review, integration validation, or final Requirement approval. It must use an explicitly selected external Project and must not be assigned to the managed development Squad. Existing Incidents already linked to ordinary protocol-v4 Requirements retain their legacy Review Loop and close gate. There is still no Observation inbox, maintenance decision object, maintenance case, maintenance-only role, scheduler, or secure runtime.
 
 ## Deployment and Release
 

@@ -8,7 +8,7 @@ Protocol v4 deliberately keeps the system small:
 - no Observer, maintenance-specific Agent, scheduled scan, or background maintenance loop;
 - no secure execution environment; Git branch/worktree isolation is a configurable delivery policy rather than a security boundary;
 - event-driven workflow Incidents created only when a discovered problem must survive the current task;
-- Incident fixes implemented and reviewed through an ordinary Requirement;
+- Incident fixes tracked by external `incident_fix_requirement` records and executed outside this development Squad, with legacy ordinary Requirement links still supported;
 - workspace deployment from either a reviewed clean Git checkout or a verified formal Release Bundle;
 - optional formal releases created directly from a reviewed clean `main` checkout.
 
@@ -76,12 +76,15 @@ Use `--deployment-profile codex-only --rebind-runtimes` only for an intentional 
 
 ## Workflow Incidents
 
-Every development Agent receives `multica-workflow-incidents`. It is invoked at four event points:
+Every development Agent receives `multica-workflow-incidents`. It is invoked at these event points:
 
 1. immediately after a managed workflow Issue is created, to bind protocol metadata;
 2. when an Agent or the host discovers a workflow defect that cannot be safely resolved inside the current task and needs durable tracking;
-3. when the ordinary Requirement that will fix an Incident is known, to link that Requirement;
-4. after the fix is deployed and verified, to record failed verification or close the Incident with exact deployment evidence.
+3. when an external Project and optional external owner are known, to explicitly and idempotently create an `incident_fix_requirement` outside the development Squad;
+4. when recovering or linking either the external record or a previously existing legacy ordinary Requirement;
+5. after the fix is deployed and verified, to record failed verification or close the Incident with mode-specific immutable evidence.
+
+`report` never creates a fix record automatically. New external fix records remain in `backlog`, have no development-tree root metadata, and do not enter Plan, implementation, Code Review, integration, or final Requirement approval.
 
 There is no polling or low-frequency fallback scan. See [docs/incident-runbook.md](docs/incident-runbook.md).
 

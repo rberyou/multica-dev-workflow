@@ -264,7 +264,7 @@ Agent 应读取：
 当 Agent 发现审批、Review、依赖、状态、角色、Runtime、Skill 或平台能力与工作流合同不一致时，先尝试在当前任务内安全修复。只有问题需要跨任务保留、可能复发、需要其他负责人或人工决定，或需要部署后验证时，才通过 `multica-workflow-incidents` 创建或复用独立 Incident。不存在后台扫描或中间 Observation。
 
 - 只有继续执行会影响正确性、审批完整性、安全、隐私或 Git 历史时，Incident 才阻塞来源 issue 并写入 `waiting_on=workflow_fix`。
-- Incident 修复直接创建普通 Requirement，完整经过 Plan、独立 Review、Implementation、集成验证和人工批准。
+- `report` 不自动创建修复项。需要修复时由 Incident Skill 显式创建 external `incident_fix_requirement`，指定外部 Project 和可选外部 owner；Requirement Intake 不创建、提交或跟踪该对象，也不得把它接入开发交付 Squad。已有普通 Requirement 关联保留 legacy 流程。
 - 修复部署到受影响 workspace 并验证后关闭 Incident；验证失败则保持 `in_fix`。
 
 ## 12. 在不同电脑上使用

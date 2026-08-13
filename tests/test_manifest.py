@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import sys
 import unittest
+from unittest import mock
 
 from jsonschema import Draft202012Validator
 
@@ -60,6 +61,7 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(set(skill["attach_to"]), reporters)
         self.assertIn("workspace", skill["targets"])
         self.assertEqual(project["lead"], "leader")
+        self.assertEqual(incidents["fix_execution_mode"], "external")
 
     def test_delivery_policy_skill_is_attached_to_every_squad_agent(self):
         squad_agents = {item["agent"] for item in self.manifest["squad"]["agent_members"]}
@@ -106,10 +108,75 @@ class ManifestTests(unittest.TestCase):
                 "install-skills",
                 "bind-workflow-issue",
                 "report-incident",
+                "create-incident-fix-requirement",
                 "link-incident-fix",
                 "close-incident",
             },
         )
+
+    def test_incident_wrappers_forward_external_creation_and_close_references(self):
+        root = ROOT
+        context_value = (
+            argparse.Namespace(binary="multica", profile=None),
+            {"id": "workspace-test"},
+            self.manifest,
+            {},
+        )
+        with mock.patch.object(
+            workflow_cli, "context", return_value=context_value
+        ), mock.patch.object(workflow_cli, "run_process") as run_process:
+            run_process.return_value = argparse.Namespace(
+                returncode=0, stdout="", stderr=""
+            )
+            create = workflow_cli.parser().parse_args(
+                [
+                    "create-incident-fix-requirement",
+                    "--incident",
+                    "INC-1",
+                    "--project",
+                    "external-project",
+                    "--assignee-id",
+                    "external-owner",
+                ]
+            )
+            workflow_cli.command_incidents(create, root)
+            command = run_process.call_args.args[0]
+            self.assertIn("create-fix-requirement", command)
+            self.assertIn("external-project", command)
+            self.assertIn("external-owner", command)
+
+            close = workflow_cli.parser().parse_args(
+                [
+                    "close-incident",
+                    "--incident",
+                    "INC-1",
+                    "--result",
+                    "passed",
+                    "--evidence",
+                    "verified",
+                    "--fix-reference-type",
+                    "artifact_version",
+                    "--fix-reference",
+                    "runtime-2",
+                    "--deployment-verification-reference-type",
+                    "deployment_record",
+                    "--deployment-verification-reference",
+                    "deploy-17",
+                ]
+            )
+            workflow_cli.command_incidents(close, root)
+            command = run_process.call_args.args[0]
+            for expected in [
+                "--fix-reference-type",
+                "artifact_version",
+                "--fix-reference",
+                "runtime-2",
+                "--deployment-verification-reference-type",
+                "deployment_record",
+                "--deployment-verification-reference",
+                "deploy-17",
+            ]:
+                self.assertIn(expected, command)
 
     def test_default_runtime_map_path_is_scoped_by_workflow_and_workspace(self):
         args = argparse.Namespace(runtime_map=None)

@@ -138,6 +138,7 @@
   "incidents": {
     "project": "workflow-incidents",
     "skill": "workflow-incidents",
+    "fix_execution_mode": "external",
     "reporter_agents": [
       "leader",
       "planner",

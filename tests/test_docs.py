@@ -103,6 +103,7 @@ class DocumentationTests(unittest.TestCase):
         )
         self.assertNotIn("python scripts/workflow.py bind-workflow-issue", content)
         self.assertNotIn("`report-incident`", content)
+        self.assertNotIn("`create-incident-fix-requirement`", content)
         self.assertNotIn("`link-incident-fix`", content)
         self.assertNotIn("`close-incident`", content)
         self.assertNotIn("由 Audit", content)
@@ -155,6 +156,37 @@ class DocumentationTests(unittest.TestCase):
         self.assertLess(len(incidents.splitlines()), 100)
         self.assertLess(len(delivery.splitlines()), 100)
         self.assertLess(len(console.splitlines()), 50)
+
+    def test_incident_docs_define_external_fix_contract_and_legacy_compatibility(self):
+        skill_root = ROOT / "skills/multica-workflow-incidents"
+        content = "\n".join(
+            [
+                (skill_root / "SKILL.md").read_text(encoding="utf-8"),
+                (skill_root / "references/incident-contract.md").read_text(
+                    encoding="utf-8"
+                ),
+                (ROOT / "docs/incident-runbook.md").read_text(encoding="utf-8"),
+                (ROOT / "docs/workflow-design.md").read_text(encoding="utf-8"),
+                (ROOT / "README.md").read_text(encoding="utf-8"),
+                (ROOT / "AGENTS.md").read_text(encoding="utf-8"),
+            ]
+        )
+        for expected in [
+            "incident_fix_requirement",
+            "fix_execution_mode=external",
+            "create-fix-requirement",
+            "create-incident-fix-requirement",
+            "legacy",
+            "external_fix_owner",
+        ]:
+            with self.subTest(expected=expected):
+                self.assertIn(expected, content)
+        instructions = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (ROOT / "instructions").rglob("*.md")
+        )
+        self.assertNotIn("Incident 修复必须创建普通 Requirement", instructions)
+        self.assertNotIn("Incident 修复进入本小队时就是普通顶层 Requirement", instructions)
 
     def test_delivery_policy_docs_match_protocol_contract(self):
         policy_root = ROOT / "skills/multica-delivery-policy"

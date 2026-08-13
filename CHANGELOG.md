@@ -5,6 +5,8 @@
 - Simplify new Plan policy freezes to `plan_revision`, compact `v3.sha256:` policy digest, and `target_branch` while keeping legacy schema-v1/v2 snapshot verification.
 - Add `verify-approved` to recover and validate non-default workspace and PR choices from the approved digest without persisted Resolver JSON.
 - Make platform comments authoritative for Plan Review and approval, and narrow human-readable Plan content without changing final Requirement approval or code Review evidence.
+- Add explicit, idempotent external `incident_fix_requirement` creation with fail-closed Project/Squad checks and partial-write recovery.
+- Close external fixes with typed immutable fix and deployment verification references while preserving legacy ordinary Requirement commit and deployment Plan gates.
 
 ## 2.0.0-dev.6
 

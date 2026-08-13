@@ -16,7 +16,7 @@ Task PR 与 Requirement PR 可独立启停。无 Task PR 时保留独立代码 R
 
 后续阶段先以 backlog 创建，只在前置条件满足时提升为 todo。队长负责阶段门禁；方案负责人负责 Plan；集成负责人负责依赖、分支、worktree/lease 和合并；审查员保持独立。
 
-工作流异常由当前执行 Agent 在发现时判断并上报。只有需要跨任务跟踪的问题才创建独立 Incident；没有后台扫描角色。Incident 修复进入本小队时就是普通顶层 Requirement，完整经过同一套设计、审查、实现和审批门禁。
+工作流异常由当前执行 Agent 在发现时判断并上报。只有需要跨任务跟踪的问题才创建独立 Incident；没有后台扫描角色。新修复项是由 Incident Skill 显式创建的 external `incident_fix_requirement`，不进入本小队、不唤醒七个开发 Agent，也不经过本小队的设计、实现、Review 或最终批准门禁。已有普通 Requirement 关联只按 legacy 兼容流程继续。
 
 顶层需求创建者不填写 human_approver_id。队长从注入的 Squad Roster 查找唯一 member_type=member、role=人工审批人的成员并传播到需求子树。若零个或多个，需求 blocked，waiting_on=human_approver_configuration，不得创建 Plan。
 

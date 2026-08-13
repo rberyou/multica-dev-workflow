@@ -32,6 +32,11 @@ class PackageSkillsTests(unittest.TestCase):
                     if skill.name == "multica-workflow-incidents":
                         self.assertIn("scripts/incidents.py", names)
                         self.assertIn("references/incident-contract.md", names)
+                        self.assertIn("create-fix-requirement", content)
+                        contract = archive.read(
+                            "references/incident-contract.md"
+                        ).decode("utf-8")
+                        self.assertIn("incident_fix_requirement", contract)
                     if skill.name == "multica-delivery-policy":
                         self.assertIn("scripts/delivery_policy.py", names)
                         self.assertIn("references/project-delivery.schema.json", names)
