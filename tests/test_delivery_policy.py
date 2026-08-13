@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 
 from jsonschema import Draft202012Validator
 
@@ -30,6 +31,12 @@ workflow_incidents = importlib.util.module_from_spec(INCIDENTS_SPEC)
 assert INCIDENTS_SPEC.loader
 sys.modules[INCIDENTS_SPEC.name] = workflow_incidents
 INCIDENTS_SPEC.loader.exec_module(workflow_incidents)
+PACKAGE_SPEC = importlib.util.spec_from_file_location(
+    "package_skills_for_delivery_test", ROOT / "scripts/package_skills.py"
+)
+package_skills = importlib.util.module_from_spec(PACKAGE_SPEC)
+assert PACKAGE_SPEC.loader
+PACKAGE_SPEC.loader.exec_module(package_skills)
 
 
 REVIEWED_SHA = "1" * 40
@@ -2725,7 +2732,29 @@ class DeliveryPolicyTests(unittest.TestCase):
     def test_terminal_normalization_rejects_each_immutable_root_field_drift(self):
         approved = terminal_normalization_snapshot()
         authority = terminal_authority(approved)
+        scalar_mutators = {
+            "delivery_evidence_record": lambda value: delivery_policy.encode_metadata_record(
+                {
+                    **delivery_policy.decode_metadata_record(
+                        value, "test delivery evidence"
+                    ),
+                    "plan_revision": 99,
+                }
+            ),
+            "delivery_handoff_record": lambda value: delivery_policy.encode_metadata_record(
+                {
+                    **delivery_policy.decode_metadata_record(
+                        value, "test delivery handoff"
+                    ),
+                    "reviewed_commit_sha": "9" * 40,
+                }
+            ),
+        }
         replacements = {
+            "issue_id": "R-ATTACKER",
+            "identifier": "R-ATTACKER",
+            "parent_issue_id": "ROOT-ATTACKER",
+            "workflow_object_type": "implementation",
             "status": "blocked",
             "approval_revision": 99,
             "approved_requirement_head_sha": "9" * 40,
@@ -2734,15 +2763,25 @@ class DeliveryPolicyTests(unittest.TestCase):
             "plan_revision": 99,
             "delivery_policy_digest": "9" * 64,
             "requirement_branch": "req/attacker",
+            "delivery_evidence_record": scalar_mutators["delivery_evidence_record"],
+            "delivery_handoff_record": scalar_mutators["delivery_handoff_record"],
         }
-        for field, value in replacements.items():
-            with self.subTest(field=field):
-                candidate = terminal_normalization_snapshot()
-                candidate["immutable_evidence"]["post"][0][field] = value
-                with self.assertRaises(delivery_policy.DeliveryPolicyError):
-                    delivery_policy.terminal_normalization_transition(
-                        candidate, authority
+        self.assertEqual(
+            set(replacements), set(delivery_policy.TERMINAL_IMMUTABLE_FIELDS)
+        )
+        for phase in ("pre", "post"):
+            for field in delivery_policy.TERMINAL_IMMUTABLE_FIELDS:
+                with self.subTest(phase=phase, field=field):
+                    candidate = terminal_normalization_snapshot()
+                    original = candidate["immutable_evidence"][phase][0][field]
+                    replacement = replacements[field]
+                    candidate["immutable_evidence"][phase][0][field] = (
+                        replacement(original) if callable(replacement) else replacement
                     )
+                    with self.assertRaises(delivery_policy.DeliveryPolicyError):
+                        delivery_policy.terminal_normalization_transition(
+                            candidate, authority
+                        )
 
     def test_superseded_task_release_exhaustive_prefix_replay_matrix(self):
         snapshot = superseded_release_snapshot()
@@ -2796,12 +2835,36 @@ class DeliveryPolicyTests(unittest.TestCase):
             writes.append(write)
             legal["target"][write["key"]] = write["value"]
 
-        prefix = copy.deepcopy(initial)
-        for progress in range(len(writes) - 1):
-            with self.subTest(progress=progress):
+        snapshots = [copy.deepcopy(initial)]
+        for write in writes:
+            snapshot = copy.deepcopy(snapshots[-1])
+            snapshot["target"][write["key"]] = write["value"]
+            snapshots.append(snapshot)
+        canonical_projections = {
+            delivery_policy.digest(
+                {
+                    key: snapshot["target"].get(key, "")
+                    for key in delivery_policy.SUPERSEDED_TASK_RELEASE_KEYS
+                }
+            )
+            for snapshot in snapshots
+        }
+
+        checked = 0
+        for progress, prefix in enumerate(snapshots[:-1]):
+            for future in range(progress + 1, len(writes)):
                 illegal = copy.deepcopy(prefix)
-                skipped = writes[progress + 1]
+                skipped = writes[future]
                 illegal["target"][skipped["key"]] = skipped["value"]
+                projection = delivery_policy.digest(
+                    {
+                        key: illegal["target"].get(key, "")
+                        for key in delivery_policy.SUPERSEDED_TASK_RELEASE_KEYS
+                    }
+                )
+                if projection in canonical_projections:
+                    continue
+                checked += 1
                 rejected = delivery_policy.superseded_task_release(
                     illegal, authority
                 )
@@ -2809,8 +2872,7 @@ class DeliveryPolicyTests(unittest.TestCase):
                 self.assertEqual(rejected["writes"], [])
                 self.assertEqual(rejected["status_writes"], [])
                 self.assertEqual(rejected["blocker_writes"], [])
-            current = writes[progress]
-            prefix["target"][current["key"]] = current["value"]
+        self.assertGreater(checked, 0)
 
     def test_superseded_task_release_guard_and_authority_attack_matrix(self):
         approved = superseded_release_snapshot()
@@ -2850,23 +2912,29 @@ class DeliveryPolicyTests(unittest.TestCase):
                 self.assertEqual(rejected["writes"], [])
 
     def test_fixed_terminal_portable_artifacts_exclude_environment_authority(self):
-        paths = (
-            ROOT / "skills/multica-delivery-policy/SKILL.md",
-            ROOT
-            / "skills/multica-delivery-policy/references/terminal-normalization-contract.md",
-            POLICY_PATH,
-        )
         forbidden = (
             "c6825311-6f39-4eb2-a5b8-1b22313397af",
             "41b50f12482cdfba061446f62e1dab6c3d2036f283a6dd7e18cf77441bc8cc3c",
             "D:\\Workspace\\AI\\CodeX",
             "C:\\Users\\Administrator",
         )
-        for path in paths:
-            content = path.read_text(encoding="utf-8")
-            for value in forbidden:
-                with self.subTest(path=str(path.relative_to(ROOT)), value=value):
-                    self.assertNotIn(value, content)
+        skill = ROOT / "skills/multica-delivery-policy"
+        with tempfile.TemporaryDirectory() as temp:
+            archive_path = Path(temp) / "multica-delivery-policy.zip"
+            package_skills.build_archive(skill, archive_path)
+            with zipfile.ZipFile(archive_path) as archive:
+                names = sorted(archive.namelist())
+                self.assertIn("agents/openai.yaml", names)
+                self.assertIn("references/terminal-normalization-contract.md", names)
+                self.assertIn("scripts/delivery_policy.py", names)
+                for name in names:
+                    try:
+                        content = archive.read(name).decode("utf-8")
+                    except UnicodeDecodeError:
+                        continue
+                    for value in forbidden:
+                        with self.subTest(entry=name, value=value):
+                            self.assertNotIn(value, content)
 
     def test_terminal_attest_rejects_self_consistent_forged_deployment_and_snapshots(self):
         snapshot = finish_terminal_transition(terminal_normalization_snapshot())
