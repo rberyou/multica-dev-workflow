@@ -2587,6 +2587,287 @@ class DeliveryPolicyTests(unittest.TestCase):
         self.assertFalse(rejected["allowed"])
         self.assertEqual(rejected["writes"], [])
 
+    def test_terminal_normalization_exhaustive_prefix_replay_matrix(self):
+        initial = terminal_normalization_snapshot()
+        authority = terminal_authority(initial)
+        plan, endpoints = delivery_policy._terminal_plan_binding(initial, authority)
+        writes = delivery_policy._terminal_full_writes(plan, endpoints)
+        snapshot = copy.deepcopy(initial)
+        canonical = []
+        for progress in range(len(writes) + 1):
+            projection = {
+                item["issue_id"]: delivery_policy._terminal_endpoint_projection(item)
+                for item in snapshot["endpoints"]
+            }
+            if not canonical or canonical[-1][1] != projection:
+                canonical.append((progress, projection, copy.deepcopy(snapshot)))
+            else:
+                canonical[-1] = (progress, projection, copy.deepcopy(snapshot))
+            if progress < len(writes):
+                snapshot = apply_terminal_write(snapshot, writes[progress])
+
+        for index, (progress, _, snapshot) in enumerate(canonical):
+            with self.subTest(progress=progress):
+                first = delivery_policy.terminal_normalization_transition(
+                    snapshot, authority
+                )
+                replay = delivery_policy.terminal_normalization_transition(
+                    copy.deepcopy(snapshot), authority
+                )
+                self.assertEqual(first, replay)
+                self.assertEqual(first["status_writes"], [])
+                self.assertEqual(first["blocker_writes"], [])
+                self.assertLessEqual(len(first["writes"]), 1)
+                if progress == len(writes):
+                    self.assertTrue(first["complete"])
+                    self.assertTrue(first["no_action"])
+                    self.assertEqual(first["writes"], [])
+                    continue
+                self.assertEqual(first["progress"], progress)
+                next_progress = canonical[index + 1][0]
+                self.assertEqual(first["writes"], [writes[progress]])
+                self.assertLessEqual(progress + 1, next_progress)
+                self.assertIn(
+                    first["writes"][0]["key"],
+                    delivery_policy.TERMINAL_NORMALIZATION_ENDPOINT_KEYS,
+                )
+
+    def test_terminal_normalization_rejects_every_skipped_prefix(self):
+        initial = terminal_normalization_snapshot()
+        authority = terminal_authority(initial)
+        plan, endpoints = delivery_policy._terminal_plan_binding(initial, authority)
+        writes = delivery_policy._terminal_full_writes(plan, endpoints)
+        canonical_projections = set()
+        prefix = copy.deepcopy(initial)
+        snapshots = [copy.deepcopy(prefix)]
+        for write in writes:
+            prefix = apply_terminal_write(prefix, write)
+            snapshots.append(copy.deepcopy(prefix))
+        for snapshot in snapshots:
+            canonical_projections.add(
+                delivery_policy.digest(
+                    {
+                        item["issue_id"]: delivery_policy._terminal_endpoint_projection(item)
+                        for item in snapshot["endpoints"]
+                    }
+                )
+            )
+
+        checked = 0
+        for progress, prefix in enumerate(snapshots[:-1]):
+            for future in range(progress + 1, len(writes)):
+                illegal = apply_terminal_write(prefix, writes[future])
+                projection = delivery_policy.digest(
+                    {
+                        item["issue_id"]: delivery_policy._terminal_endpoint_projection(item)
+                        for item in illegal["endpoints"]
+                    }
+                )
+                if projection in canonical_projections:
+                    continue
+                checked += 1
+                rejected = delivery_policy.terminal_normalization_transition(
+                    illegal, authority
+                )
+                self.assertFalse(rejected["allowed"])
+                self.assertEqual(rejected["writes"], [])
+                self.assertEqual(rejected["status_writes"], [])
+                self.assertEqual(rejected["blocker_writes"], [])
+        self.assertGreater(checked, 0)
+
+    def test_terminal_normalization_trust_root_attack_matrix(self):
+        approved = terminal_normalization_snapshot()
+        authority = terminal_authority(approved)
+        cases = []
+
+        root = terminal_normalization_snapshot()
+        root["manifest"]["root_authority"]["issue_id"] = "ROOT-ATTACKER"
+        root["manifest"]["plan"]["parent_issue_id"] = "ROOT-ATTACKER"
+        root["manifest"]["plan"]["root_requirement_id"] = "ROOT-ATTACKER"
+        root["plan"]["parent_issue_id"] = "ROOT-ATTACKER"
+        root["plan"]["root_requirement_id"] = "ROOT-ATTACKER"
+        root["plan"]["approved_root_requirement_id"] = "ROOT-ATTACKER"
+        root["plan"]["fixed_operation_manifest_identity"] = (
+            delivery_policy._terminal_manifest_identity(root["manifest"])
+        )
+        cases.append(("coordinated_root", root))
+
+        aggregate = terminal_normalization_snapshot()
+        forged = "f" * 64
+        aggregate["manifest"]["immutable_snapshot"]["aggregate_digest"] = forged
+        aggregate["plan"]["approved_immutable_snapshot_digest"] = "sha256:" + forged
+        aggregate["plan"]["fixed_operation_manifest_identity"] = (
+            delivery_policy._terminal_manifest_identity(aggregate["manifest"])
+        )
+        cases.append(("coordinated_aggregate", aggregate))
+
+        identity = terminal_normalization_snapshot()
+        identity["plan"]["fixed_operation_manifest_identity"] = "v2.sha256:" + "0" * 64
+        cases.append(("identity", identity))
+
+        schema = terminal_normalization_snapshot()
+        schema["manifest"]["schema_version"] = 3
+        cases.append(("schema", schema))
+
+        order = terminal_normalization_snapshot()
+        order["manifest"]["endpoint_order"] = list(
+            reversed(order["manifest"]["endpoint_order"])
+        )
+        cases.append(("order", order))
+
+        for label, snapshot in cases:
+            with self.subTest(label=label):
+                with self.assertRaises(delivery_policy.DeliveryPolicyError):
+                    delivery_policy.terminal_normalization_transition(
+                        snapshot, authority
+                    )
+
+    def test_terminal_normalization_rejects_each_immutable_root_field_drift(self):
+        approved = terminal_normalization_snapshot()
+        authority = terminal_authority(approved)
+        replacements = {
+            "status": "blocked",
+            "approval_revision": 99,
+            "approved_requirement_head_sha": "9" * 40,
+            "reviewed_commit_sha": "9" * 40,
+            "current_requirement_head_sha": "9" * 40,
+            "plan_revision": 99,
+            "delivery_policy_digest": "9" * 64,
+            "requirement_branch": "req/attacker",
+        }
+        for field, value in replacements.items():
+            with self.subTest(field=field):
+                candidate = terminal_normalization_snapshot()
+                candidate["immutable_evidence"]["post"][0][field] = value
+                with self.assertRaises(delivery_policy.DeliveryPolicyError):
+                    delivery_policy.terminal_normalization_transition(
+                        candidate, authority
+                    )
+
+    def test_superseded_task_release_exhaustive_prefix_replay_matrix(self):
+        snapshot = superseded_release_snapshot()
+        authority = superseded_authority(snapshot)
+        expected_keys = [
+            "workspace_lease_superseded_release_record",
+            "workspace_lease_state",
+            "workspace_lease_superseded_release_record",
+            "workspace_lease_owner_issue_id",
+            "workspace_lease_superseded_release_record",
+            "workspace_lease_owner_agent_id",
+            "workspace_lease_superseded_release_record",
+        ]
+        seen = []
+        for progress in range(len(expected_keys) + 1):
+            with self.subTest(progress=progress):
+                first = delivery_policy.superseded_task_release(snapshot, authority)
+                replay = delivery_policy.superseded_task_release(
+                    copy.deepcopy(snapshot), authority
+                )
+                self.assertEqual(first, replay)
+                self.assertEqual(first["status_writes"], [])
+                self.assertEqual(first["blocker_writes"], [])
+                self.assertLessEqual(len(first["writes"]), 1)
+                if progress == len(expected_keys):
+                    self.assertTrue(first["complete"])
+                    self.assertTrue(first["no_action"])
+                    continue
+                write = first["writes"][0]
+                self.assertEqual(write["key"], expected_keys[progress])
+                self.assertIn(
+                    write["key"], delivery_policy.SUPERSEDED_TASK_RELEASE_KEYS
+                )
+                seen.append(write["key"])
+                snapshot["target"][write["key"]] = write["value"]
+                snapshot["target"]["metadata_keys"] = sorted(
+                    set(snapshot["target"]["metadata_keys"]) | {write["key"]}
+                )
+        self.assertEqual(seen, expected_keys)
+
+    def test_superseded_task_release_rejects_every_skipped_prefix(self):
+        initial = superseded_release_snapshot()
+        authority = superseded_authority(initial)
+        legal = copy.deepcopy(initial)
+        writes = []
+        while True:
+            result = delivery_policy.superseded_task_release(legal, authority)
+            if result["complete"]:
+                break
+            write = result["writes"][0]
+            writes.append(write)
+            legal["target"][write["key"]] = write["value"]
+
+        prefix = copy.deepcopy(initial)
+        for progress in range(len(writes) - 1):
+            with self.subTest(progress=progress):
+                illegal = copy.deepcopy(prefix)
+                skipped = writes[progress + 1]
+                illegal["target"][skipped["key"]] = skipped["value"]
+                rejected = delivery_policy.superseded_task_release(
+                    illegal, authority
+                )
+                self.assertFalse(rejected["allowed"])
+                self.assertEqual(rejected["writes"], [])
+                self.assertEqual(rejected["status_writes"], [])
+                self.assertEqual(rejected["blocker_writes"], [])
+            current = writes[progress]
+            prefix["target"][current["key"]] = current["value"]
+
+    def test_superseded_task_release_guard_and_authority_attack_matrix(self):
+        approved = superseded_release_snapshot()
+        authority = superseded_authority(approved)
+        cases = (
+            ("guard_valid", "guard", "valid", False),
+            ("guard_clean", "guard", "clean", False),
+            ("guard_registered", "guard", "registered", False),
+            ("guard_path", "guard", "resolved_path", ".multica/other"),
+            ("guard_branch", "guard", "branch", "task/other"),
+            ("guard_head", "guard", "head", "9" * 40),
+            ("guard_operation", "guard", "unfinished_operations", ["MERGE_HEAD"]),
+            ("pr_number", "pull_request", "number", 27),
+            ("pr_state", "pull_request", "state", "open"),
+            ("pr_branch", "pull_request", "head_branch", "task/other"),
+            ("pr_head", "pull_request", "head_sha", "9" * 40),
+            ("source_branch", "source", "branch", "req/other"),
+            ("source_base", "source", "base_commit_sha", "9" * 40),
+            ("source_review", "source", "reviewed_commit_sha", "9" * 40),
+            ("source_merge", "source", "merged_commit_sha", "9" * 40),
+            ("source_tree", "source", "merged_tree_sha", "9" * 40),
+            ("source_parents", "source", "merge_parent_shas", ["9" * 40, "3" * 40]),
+            ("source_status", "source", "review_status", "CHANGES_REQUESTED"),
+            ("target_status", "target", "status", "in_review"),
+            ("target_scope", "target", "workspace_lease_scope", "requirement"),
+            ("target_blocker", "target", "blocked_reason", "changed"),
+            ("implementation_blocker", "superseded_implementation", "blocked_reason", "changed"),
+        )
+        for label, section, key, value in cases:
+            with self.subTest(label=label):
+                candidate = superseded_release_snapshot()
+                candidate[section][key] = value
+                rejected = delivery_policy.superseded_task_release(
+                    candidate, authority
+                )
+                self.assertFalse(rejected["allowed"])
+                self.assertEqual(rejected["writes"], [])
+
+    def test_fixed_terminal_portable_artifacts_exclude_environment_authority(self):
+        paths = (
+            ROOT / "skills/multica-delivery-policy/SKILL.md",
+            ROOT
+            / "skills/multica-delivery-policy/references/terminal-normalization-contract.md",
+            POLICY_PATH,
+        )
+        forbidden = (
+            "c6825311-6f39-4eb2-a5b8-1b22313397af",
+            "41b50f12482cdfba061446f62e1dab6c3d2036f283a6dd7e18cf77441bc8cc3c",
+            "D:\\Workspace\\AI\\CodeX",
+            "C:\\Users\\Administrator",
+        )
+        for path in paths:
+            content = path.read_text(encoding="utf-8")
+            for value in forbidden:
+                with self.subTest(path=str(path.relative_to(ROOT)), value=value):
+                    self.assertNotIn(value, content)
+
     def test_terminal_attest_rejects_self_consistent_forged_deployment_and_snapshots(self):
         snapshot = finish_terminal_transition(terminal_normalization_snapshot())
         snapshot, attestation = add_attestation_evidence(snapshot)
