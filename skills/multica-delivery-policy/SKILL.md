@@ -57,12 +57,14 @@ For a reviewed, Plan-authorized fixed terminal normalization, use the schema-v2 
 
 ```text
 python <this-skill>/scripts/delivery_policy.py terminal-normalization \
-  --action <transition|attest> --snapshot <file>
+  --action <transition|attest> --snapshot <file> \
+  --approved-authority <fresh-plan-authority.json> \
+  [--attestation-authority <reviewed-deployment-authority.json>]
 ```
 
-`transition` returns at most one endpoint metadata write per fresh read. `attest` returns only the root `terminal_normalization_evidence_record`. The portable validator trusts only the current Plan evidence for the approved schema-v2 manifest identity, approved root Requirement, and immutable snapshot aggregate; it contains no concrete Issue IDs or project paths.
+`transition` returns at most one endpoint metadata write per fresh read. `attest` returns only the root `terminal_normalization_evidence_record`. Authority files are independent trusted inputs constructed from fresh approved Plan metadata and reviewed delivery/deployment evidence; they are not copied from or recomputed by the operation snapshot. The portable validator contains no concrete Issue IDs or project paths.
 
-The separate `superseded-task-release` command is limited to an exact Plan-authorized task-scope held tuple with a closed superseded PR, clean registered worktree guard, unchanged blocker bytes, and independently reviewed merged source. It returns at most one write from the four-key superseded-release namespace and never changes Issue status or Incident fields.
+The separate `superseded-task-release --snapshot <file> --approved-authority <file>` command is limited to an exact Plan-authorized task-scope held tuple with a closed superseded PR, clean registered worktree guard, unchanged blocker bytes, and independently reviewed merged source. It returns at most one write from the four-key superseded-release namespace and never changes Issue status or Incident fields.
 
 ## Validate Final Approval and Delivery
 

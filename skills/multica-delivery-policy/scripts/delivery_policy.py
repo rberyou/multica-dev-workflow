@@ -2857,12 +2857,49 @@ def _validate_terminal_manifest(manifest: dict[str, Any]) -> list[dict[str, Any]
     return normalized
 
 
-def _terminal_plan_binding(snapshot: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+TERMINAL_AUTHORITY_FIELDS = {
+    "schema_version",
+    "plan_issue_id",
+    "plan_revision",
+    "delivery_policy_digest",
+    "workflow_instance_id",
+    "fixed_operation_manifest_identity",
+    "approved_root_requirement_id",
+    "approved_immutable_snapshot_digest",
+}
+
+
+def _terminal_authority(value: Any) -> dict[str, Any]:
+    authority = _require_object(value, "approved terminal authority")
+    if set(authority) != TERMINAL_AUTHORITY_FIELDS or authority.get("schema_version") != 1:
+        raise DeliveryPolicyError("approved terminal authority fields are invalid")
+    if (
+        not isinstance(authority.get("plan_issue_id"), str)
+        or not authority["plan_issue_id"]
+        or not isinstance(authority.get("approved_root_requirement_id"), str)
+        or not authority["approved_root_requirement_id"]
+        or authority.get("plan_revision") != 4
+        or not _is_digest(authority.get("delivery_policy_digest"))
+        or not isinstance(authority.get("workflow_instance_id"), str)
+        or not authority["workflow_instance_id"]
+        or not isinstance(authority.get("fixed_operation_manifest_identity"), str)
+        or not authority["fixed_operation_manifest_identity"].startswith("v2.sha256:")
+        or not isinstance(authority.get("approved_immutable_snapshot_digest"), str)
+        or not authority["approved_immutable_snapshot_digest"].startswith("sha256:")
+    ):
+        raise DeliveryPolicyError("approved terminal authority is invalid")
+    return authority
+
+
+def _terminal_plan_binding(
+    snapshot: dict[str, Any], approved_authority: Any
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     manifest = _require_object(snapshot.get("manifest"), "terminal normalization manifest")
     endpoints = _validate_terminal_manifest(manifest)
     plan_evidence = _require_object(snapshot.get("plan"), "terminal normalization Plan evidence")
     manifest_plan = manifest["plan"]
     identity = _terminal_manifest_identity(manifest)
+    authority = _terminal_authority(approved_authority)
     if plan_evidence.get("workflow_object_type") != "plan":
         raise DeliveryPolicyError("terminal normalization Plan evidence object type is invalid")
     if _metadata_capacity_reasons(plan_evidence, []):
@@ -2896,6 +2933,19 @@ def _terminal_plan_binding(snapshot: dict[str, Any]) -> tuple[dict[str, Any], li
     }
     if any(plan_evidence.get(key) != value for key, value in bindings.items()):
         raise DeliveryPolicyError("terminal normalization Plan or manifest identity drifted")
+    authority_bindings = {
+        "plan_issue_id": manifest_plan["issue_id"],
+        "plan_revision": manifest_plan["plan_revision"],
+        "delivery_policy_digest": manifest_plan["delivery_policy_digest"],
+        "workflow_instance_id": manifest["workflow_instance_id"],
+        "fixed_operation_manifest_identity": identity,
+        "approved_root_requirement_id": root_requirement_id,
+        "approved_immutable_snapshot_digest": bindings[
+            "approved_immutable_snapshot_digest"
+        ],
+    }
+    if any(authority.get(key) != value for key, value in authority_bindings.items()):
+        raise DeliveryPolicyError("approved terminal authority does not match the operation")
     return {
         "schema_version": 1,
         "record_type": "workspace_lease_terminal_normalization",
@@ -3088,13 +3138,27 @@ def _superseded_release_record(plan: dict[str, Any], checkpoint: int) -> str:
     return encode_metadata_record({**plan, "checkpoint": checkpoint})
 
 
-def superseded_task_release(snapshot: Any) -> dict[str, Any]:
+SUPERSEDED_AUTHORITY_FIELDS = {
+    "schema_version", "workspace_id", "root_requirement_id", "plan_issue_id",
+    "superseded_implementation_id", "target_issue_id", "original_owner_id",
+    "plan_revision", "delivery_policy_digest", "fixed_operation_manifest_identity",
+    "old_branch", "new_branch", "expected_worktree_path", "expected_pr_number",
+    "expected_pr_head_sha", "expected_blocker_digest", "base_commit_sha",
+    "reviewed_commit_sha", "merged_commit_sha", "review_comment_id", "reviewer_id",
+    "merge_method",
+}
+
+
+def superseded_task_release(snapshot: Any, approved_authority: Any) -> dict[str, Any]:
     data = _require_object(snapshot, "superseded task release snapshot")
     context = _require_object(data.get("context"), "superseded release context")
     target = _require_object(data.get("target"), "superseded release target")
     guard = _require_object(data.get("guard"), "superseded release guard")
     pr = _require_object(data.get("pull_request"), "superseded release pull request")
     source = _require_object(data.get("source"), "superseded release source")
+    authority = _require_object(approved_authority, "approved superseded release authority")
+    if set(authority) != SUPERSEDED_AUTHORITY_FIELDS or authority.get("schema_version") != 1:
+        raise DeliveryPolicyError("approved superseded release authority fields are invalid")
     reasons: list[str] = []
     for key in (
         "workspace_id", "root_requirement_id", "plan_issue_id",
@@ -3123,6 +3187,31 @@ def superseded_task_release(snapshot: Any) -> dict[str, Any]:
     _add(reasons, _is_sha(source.get("reviewed_commit_sha")) and source.get("reviewed_commit_sha") == source.get("merged_commit_sha"), "reviewed merged source is invalid")
     _add(reasons, source.get("review_status") == "APPROVED", "reviewed source is not approved")
     blocker = {key: target.get(key, "") for key in LEASE_BLOCKER_FIELDS}
+    context_binding = {
+        key: context.get(key)
+        for key in (
+            "workspace_id", "root_requirement_id", "plan_issue_id",
+            "superseded_implementation_id", "target_issue_id", "original_owner_id",
+            "plan_revision", "delivery_policy_digest", "fixed_operation_manifest_identity",
+            "old_branch", "new_branch", "expected_worktree_path",
+        )
+    }
+    if any(authority.get(key) != value for key, value in context_binding.items()):
+        reasons.append("approved superseded release identity drifted")
+    _add(reasons, pr.get("number") == authority.get("expected_pr_number"), "approved superseded PR number drifted")
+    _add(reasons, pr.get("head_sha") == authority.get("expected_pr_head_sha"), "approved superseded PR head drifted")
+    _add(reasons, digest(blocker) == authority.get("expected_blocker_digest"), "approved superseded blocker bytes drifted")
+    for key in (
+        "base_commit_sha", "reviewed_commit_sha", "merged_commit_sha",
+        "review_comment_id", "reviewer_id", "merge_method",
+    ):
+        _add(reasons, source.get(key) == authority.get(key), f"approved source {key} drifted")
+    _add(reasons, _is_sha(authority.get("base_commit_sha")), "approved source base SHA is invalid")
+    _add(reasons, _is_sha(authority.get("reviewed_commit_sha")), "approved source reviewed SHA is invalid")
+    _add(reasons, _is_sha(authority.get("merged_commit_sha")), "approved source merged SHA is invalid")
+    _add(reasons, isinstance(authority.get("review_comment_id"), str) and bool(authority["review_comment_id"]), "approved Review comment is missing")
+    _add(reasons, isinstance(authority.get("reviewer_id"), str) and bool(authority["reviewer_id"]), "approved Reviewer is missing")
+    _add(reasons, authority.get("merge_method") == "--no-ff", "approved merge method is invalid")
     if reasons:
         return _terminal_rejected(reasons)
     capacity = _metadata_capacity_reasons(target, SUPERSEDED_TASK_RELEASE_KEYS)
@@ -3242,9 +3331,9 @@ def _terminal_rejected(reasons: list[str]) -> dict[str, Any]:
     }
 
 
-def terminal_normalization_transition(snapshot: Any) -> dict[str, Any]:
+def terminal_normalization_transition(snapshot: Any, approved_authority: Any) -> dict[str, Any]:
     data = _require_object(snapshot, "terminal normalization snapshot")
-    plan, manifest_endpoints = _terminal_plan_binding(data)
+    plan, manifest_endpoints = _terminal_plan_binding(data, approved_authority)
     if not _is_digest(plan.get("pre_snapshot_digest")):
         raise DeliveryPolicyError("terminal normalization pre-snapshot digest is invalid")
     if data.get("immutable_evidence") is None:
@@ -3323,15 +3412,27 @@ def terminal_normalization_transition(snapshot: Any) -> dict[str, Any]:
     }
 
 
-def terminal_normalization_attest(snapshot: Any) -> dict[str, Any]:
+ATTEST_AUTHORITY_FIELDS = {
+    "schema_version", "reviewed_commit_sha", "delivery_evidence_record",
+    "deployed_source_commit", "deployment_plan_digest", "pre_snapshot_digest",
+    "post_snapshot_digest",
+}
+
+
+def terminal_normalization_attest(
+    snapshot: Any, approved_authority: Any, attestation_authority: Any
+) -> dict[str, Any]:
     data = _require_object(snapshot, "terminal normalization attestation snapshot")
-    transitioned = terminal_normalization_transition(data)
+    transitioned = terminal_normalization_transition(data, approved_authority)
     if not transitioned["allowed"] or not transitioned.get("complete"):
         return _terminal_rejected(["all fixed endpoints must be terminal before attestation"])
     root = _require_object(data.get("root"), "terminal normalization root")
     manifest = _require_object(data.get("manifest"), "terminal normalization manifest")
     plan = _require_object(data.get("plan"), "terminal normalization Plan evidence")
     deployment = _require_object(data.get("deployment"), "terminal normalization deployment evidence")
+    attested = _require_object(attestation_authority, "approved attestation authority")
+    if set(attested) != ATTEST_AUTHORITY_FIELDS or attested.get("schema_version") != 1:
+        raise DeliveryPolicyError("approved attestation authority fields are invalid")
     reasons = []
     _add(reasons, root.get("issue_id") == root.get("root_requirement_id"), "attestation root is not top-level")
     _add(
@@ -3366,6 +3467,21 @@ def terminal_normalization_attest(snapshot: Any) -> dict[str, Any]:
         == root.get("deployment_plan_digest"),
         "deployment Plan is not bound to the current root",
     )
+    delivery = decode_metadata_record(
+        attested.get("delivery_evidence_record"), "approved delivery evidence"
+    )
+    _add(reasons, attested.get("reviewed_commit_sha") == delivery.get("reviewed_commit_sha"), "approved delivery reviewed head drifted")
+    _add(reasons, attested.get("deployed_source_commit") == deployment.get("deployed_source_commit"), "approved deployed source drifted")
+    _add(reasons, attested.get("deployment_plan_digest") == deployment.get("deployment_plan_digest"), "approved deployment Plan drifted")
+    canonical_pre = data.get("canonical_pre_snapshot")
+    canonical_post = data.get("canonical_post_snapshot")
+    _add(reasons, isinstance(canonical_pre, dict), "canonical pre-snapshot is missing")
+    _add(reasons, isinstance(canonical_post, dict), "canonical post-snapshot is missing")
+    if isinstance(canonical_pre, dict) and isinstance(canonical_post, dict):
+        recomputed_pre = digest(canonical_pre)
+        recomputed_post = digest(canonical_post)
+        _add(reasons, deployment.get("pre_snapshot_digest") == recomputed_pre == attested.get("pre_snapshot_digest"), "canonical pre-snapshot digest drifted")
+        _add(reasons, deployment.get("post_snapshot_digest") == recomputed_post == attested.get("post_snapshot_digest"), "canonical post-snapshot digest drifted")
     endpoint_records = {
         endpoint["issue_id"]: endpoint.get(TERMINAL_NORMALIZATION_RECORD_KEY)
         for endpoint in data["endpoints"]
@@ -3519,8 +3635,11 @@ def parser() -> argparse.ArgumentParser:
     terminal = subparsers.add_parser("terminal-normalization")
     terminal.add_argument("--action", required=True, choices=TERMINAL_NORMALIZATION_ACTIONS)
     terminal.add_argument("--snapshot", required=True)
+    terminal.add_argument("--approved-authority", required=True)
+    terminal.add_argument("--attestation-authority")
     superseded = subparsers.add_parser("superseded-task-release")
     superseded.add_argument("--snapshot", required=True)
+    superseded.add_argument("--approved-authority", required=True)
     return result
 
 
@@ -3570,12 +3689,18 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if result["allowed"] else 1
         if args.command == "terminal-normalization":
             snapshot = json.loads(Path(args.snapshot).read_text(encoding="utf-8"))
-            result = terminal_normalization_transition(snapshot) if args.action == "transition" else terminal_normalization_attest(snapshot)
+            authority = json.loads(Path(args.approved_authority).read_text(encoding="utf-8"))
+            result = terminal_normalization_transition(snapshot, authority) if args.action == "transition" else terminal_normalization_attest(
+                snapshot,
+                authority,
+                json.loads(Path(args.attestation_authority).read_text(encoding="utf-8")) if args.attestation_authority else None,
+            )
             print_json(result)
             return 0 if result["allowed"] else 1
         if args.command == "superseded-task-release":
             snapshot = json.loads(Path(args.snapshot).read_text(encoding="utf-8"))
-            result = superseded_task_release(snapshot)
+            authority = json.loads(Path(args.approved_authority).read_text(encoding="utf-8"))
+            result = superseded_task_release(snapshot, authority)
             print_json(result)
             return 0 if result["allowed"] else 1
     except (DeliveryPolicyError, OSError, json.JSONDecodeError) as exc:
