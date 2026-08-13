@@ -301,7 +301,7 @@ def lease_snapshot(direction: str = "release") -> dict:
             "lease_inventory_complete": direction == "acquire",
         },
         "plan": {
-            "plan_revision": 2,
+            "plan_revision": 4,
             "delivery_policy_digest": POLICY_DIGEST,
         },
         "guard": {
@@ -357,6 +357,433 @@ def apply_lease_write(snapshot: dict, write: dict) -> dict:
         set(endpoint["metadata_keys"]) | {write["key"]}
     )
     return updated
+
+
+def terminal_normalization_snapshot() -> dict:
+    policy = POLICY_DIGEST
+    workflow = "workspace-1"
+    roots = [
+        {"issue_id": "R-1", "identifier": "R-1", "parent_issue_id": None},
+        {"issue_id": "R-2", "identifier": "R-2", "parent_issue_id": None},
+    ]
+    endpoints = []
+    issues = []
+    for root in roots:
+        issues.append(
+            {
+                **root,
+                "object_role": "root_requirement",
+                "workflow_object_type": "requirement",
+            }
+        )
+    pairs = [
+        ("A-1", "M-1", "R-1", "integrator"),
+        ("A-2", "M-2", "R-2", "released"),
+    ]
+    for authority_id, mirror_id, root_id, state in pairs:
+        initial = {
+            "status": "done",
+            "scope": "requirement",
+            "state": state,
+            "owner_issue_id": authority_id,
+            "owner_agent_id": "integrator-1",
+        }
+        target = {
+            "status": "done",
+            "scope": "requirement",
+            "state": "released",
+            "owner_issue_id": "",
+            "owner_agent_id": "",
+        }
+        authority = {
+            "issue_id": authority_id,
+            "identifier": authority_id,
+            "parent_issue_id": root_id,
+            "object_role": "authority",
+            "workflow_object_type": "implementation",
+            "initial_tuple": initial,
+            "target_tuple": target,
+        }
+        mirror = {
+            "issue_id": mirror_id,
+            "identifier": mirror_id,
+            "parent_issue_id": authority_id,
+            "object_role": "final_mirror",
+            "workflow_object_type": "integration_validation",
+            "initial_tuple": copy.deepcopy(initial),
+            "target_tuple": copy.deepcopy(target),
+        }
+        endpoints.extend([mirror, authority])
+        for item in (authority, mirror):
+            issues.append(
+                {
+                    key: item[key]
+                    for key in (
+                        "issue_id",
+                        "identifier",
+                        "parent_issue_id",
+                        "object_role",
+                        "workflow_object_type",
+                    )
+                }
+            )
+    manifest = {
+        "schema_version": 2,
+        "canonicalization": "json-recursive-key-sort-arrays-preserved-utf8-no-bom-no-trailing-newline",
+        "workflow_instance_id": workflow,
+        "plan": {
+            "issue_id": "PLAN-1",
+            "identifier": "PLAN-1",
+            "parent_issue_id": "ROOT-NEW",
+            "root_requirement_id": "ROOT-NEW",
+            "approved_root_requirement_id": "ROOT-NEW",
+            "plan_revision": 4,
+            "delivery_policy_digest": policy,
+        },
+        "root_authority": {
+            "issue_id": "ROOT-NEW",
+            "identifier": "ROOT-NEW",
+            "parent_issue_id": None,
+            "workflow_object_type": "requirement",
+        },
+        "issues": issues,
+        "endpoint_order": [item["issue_id"] for item in endpoints],
+        "endpoints": endpoints,
+    }
+    observed = []
+    for item in endpoints:
+        initial = item["initial_tuple"]
+        observed.append(
+            {
+                "issue_id": item["issue_id"],
+                "identifier": item["identifier"],
+                "parent_issue_id": item["parent_issue_id"],
+                "workflow_object_type": item["workflow_object_type"],
+                "status": "done",
+                "workspace_lease_scope": "requirement",
+                "workspace_lease_state": initial["state"],
+                "workspace_lease_owner_issue_id": initial["owner_issue_id"],
+                "workspace_lease_owner_agent_id": initial["owner_agent_id"],
+                "workspace_lease_terminal_normalization_record": "",
+                "metadata_keys": [f"key_{index}" for index in range(40)],
+            }
+        )
+    immutable_entries = []
+    for index, root in enumerate(roots, start=1):
+        head = str(index) * 40
+        root_policy = str(index + 1) * 64
+        delivery_scalar = delivery_policy.encode_metadata_record(
+            {
+                "schema_version": 1,
+                "state": "complete",
+                "plan_revision": index,
+                "delivery_policy_digest": root_policy,
+                "reviewed_commit_sha": head,
+                "current_requirement_head_sha": head,
+            }
+        )
+        handoff_scalar = delivery_policy.encode_metadata_record(
+            {
+                "schema_version": 1,
+                "issue_id": root["issue_id"],
+                "comment_id": f"handoff-{index}",
+                "target": "leader",
+                "trigger_outcome": "queued",
+                "plan_revision": index,
+                "reviewed_commit_sha": head,
+                "delivery_policy_digest": root_policy,
+                "delivery_record_digest": delivery_policy.hashlib.sha256(
+                    delivery_scalar.encode("utf-8")
+                ).hexdigest(),
+            }
+        )
+        immutable_entries.append(
+            {
+                "issue_id": root["issue_id"],
+                "identifier": root["identifier"],
+                "parent_issue_id": None,
+                "workflow_object_type": "requirement",
+                "status": "done",
+                "approval_revision": index,
+                "approved_requirement_head_sha": head,
+                "reviewed_commit_sha": head,
+                "current_requirement_head_sha": head,
+                "plan_revision": index,
+                "delivery_policy_digest": root_policy,
+                "requirement_branch": f"req/{root['identifier']}",
+                "delivery_evidence_record": delivery_scalar,
+                "delivery_handoff_record": handoff_scalar,
+            }
+        )
+    immutable_digest = delivery_policy.digest(immutable_entries)
+    manifest["immutable_snapshot"] = {
+        "digest_algorithm": "sha256",
+        "entry_schema_version": 1,
+        "aggregate_digest": immutable_digest,
+        "requirements": [
+            {
+                "issue_id": entry["issue_id"],
+                "identifier": entry["identifier"],
+                "snapshot_digest": delivery_policy.digest(entry),
+            }
+            for entry in immutable_entries
+        ],
+    }
+    identity = delivery_policy._terminal_manifest_identity(manifest)
+    immutable_evidence = {
+        "schema_version": 1,
+        "pre": copy.deepcopy(immutable_entries),
+        "post": copy.deepcopy(immutable_entries),
+        "pre_digest": immutable_digest,
+        "post_digest": immutable_digest,
+    }
+    result = {
+        "manifest": manifest,
+        "plan": {
+            "issue_id": "PLAN-1",
+            "workflow_object_type": "plan",
+            "plan_revision": 4,
+            "delivery_policy_digest": policy,
+            "workflow_instance_id": workflow,
+            "parent_issue_id": "ROOT-NEW",
+            "root_requirement_id": "ROOT-NEW",
+            "approved_root_requirement_id": "ROOT-NEW",
+            "fixed_operation_manifest_identity": identity,
+            "approved_immutable_snapshot_digest": "sha256:" + immutable_digest,
+            "metadata_keys": [f"plan_{index}" for index in range(26)],
+        },
+        "pre_snapshot_digest": "a" * 64,
+        "post_snapshot_digest": "d" * 64,
+        "immutable_evidence": immutable_evidence,
+        "endpoints": observed,
+    }
+    result["canonical_pre_snapshot"] = {
+        "phase": "before",
+        "issues": copy.deepcopy(immutable_entries),
+    }
+    result["canonical_post_snapshot"] = {
+        "phase": "after",
+        "target_tuples": [
+            {
+                "issue_id": item["issue_id"],
+                **item["target_tuple"],
+            }
+            for item in endpoints
+        ],
+    }
+    result["pre_snapshot_digest"] = delivery_policy.digest(
+        result["canonical_pre_snapshot"]
+    )
+    result["post_snapshot_digest"] = delivery_policy.digest(
+        result["canonical_post_snapshot"]
+    )
+    return result
+
+
+def apply_terminal_write(snapshot: dict, write: dict) -> dict:
+    updated = copy.deepcopy(snapshot)
+    endpoint = next(
+        item for item in updated["endpoints"] if item["issue_id"] == write["issue_id"]
+    )
+    endpoint[write["key"]] = write["value"]
+    endpoint["metadata_keys"] = sorted(set(endpoint["metadata_keys"]) | {write["key"]})
+    return updated
+
+
+def terminal_authority(snapshot: dict) -> dict:
+    manifest = snapshot["manifest"]
+    return {
+        "schema_version": 1,
+        "plan_issue_id": manifest["plan"]["issue_id"],
+        "plan_revision": manifest["plan"]["plan_revision"],
+        "delivery_policy_digest": manifest["plan"]["delivery_policy_digest"],
+        "workflow_instance_id": manifest["workflow_instance_id"],
+        "fixed_operation_manifest_identity": snapshot["plan"]["fixed_operation_manifest_identity"],
+        "approved_root_requirement_id": snapshot["plan"]["approved_root_requirement_id"],
+        "approved_immutable_snapshot_digest": snapshot["plan"]["approved_immutable_snapshot_digest"],
+    }
+
+
+def finish_terminal_transition(snapshot: dict) -> dict:
+    authority = terminal_authority(snapshot)
+    while True:
+        result = delivery_policy.terminal_normalization_transition(snapshot, authority)
+        if result["complete"]:
+            return snapshot
+        snapshot = apply_terminal_write(snapshot, result["writes"][0])
+
+
+def add_attestation_evidence(snapshot: dict) -> tuple[dict, dict]:
+    canonical_pre = snapshot["canonical_pre_snapshot"]
+    canonical_post = snapshot["canonical_post_snapshot"]
+    reviewed = "e" * 40
+    deployed = "f" * 40
+    deployment_plan = "c" * 64
+    delivery = delivery_policy.encode_metadata_record(
+        {
+            "schema_version": 1,
+            "reviewed_commit_sha": reviewed,
+            "merged_commit_sha": reviewed,
+            "delivery_policy_digest": POLICY_DIGEST,
+        }
+    )
+    snapshot["canonical_pre_snapshot"] = canonical_pre
+    snapshot["canonical_post_snapshot"] = canonical_post
+    snapshot["root"] = {
+        "issue_id": "ROOT-NEW",
+        "root_requirement_id": "ROOT-NEW",
+        "workflow_object_type": "requirement",
+        "workflow_instance_id": "workspace-1",
+        "plan_revision": 4,
+        "delivery_policy_digest": POLICY_DIGEST,
+        "deployed_source_commit": deployed,
+        "deployment_plan_digest": deployment_plan,
+        "metadata_keys": [f"root_{index}" for index in range(40)],
+    }
+    snapshot["deployment"] = {
+        "deployed_source_commit": deployed,
+        "deployment_plan_digest": deployment_plan,
+        "pre_snapshot_digest": delivery_policy.digest(canonical_pre),
+        "post_snapshot_digest": delivery_policy.digest(canonical_post),
+    }
+    return snapshot, {
+        "schema_version": 1,
+        "reviewed_commit_sha": reviewed,
+        "delivery_evidence_record": delivery,
+        "deployed_source_commit": deployed,
+        "deployment_plan_digest": deployment_plan,
+        "pre_snapshot_digest": delivery_policy.digest(canonical_pre),
+        "post_snapshot_digest": delivery_policy.digest(canonical_post),
+    }
+
+
+def superseded_release_snapshot() -> dict:
+    target_issue = "TASK-OLD"
+    owner = "developer-old"
+    old_branch = "task/TASK-OLD-fixed-terminal-validator"
+    new_branch = "req/ROOT-fixed-terminal-lease-normalization-v4"
+    head = "1" * 40
+    path = ".multica/worktrees/ROOT/tasks/TASK-OLD"
+    return {
+        "context": {
+            "workspace_id": "workspace-1",
+            "root_requirement_id": "ROOT-1",
+            "plan_issue_id": "PLAN-1",
+            "superseded_implementation_id": "IMP-OLD",
+            "target_issue_id": target_issue,
+            "original_owner_id": owner,
+            "integrator_id": "integrator-1",
+            "plan_revision": 4,
+            "delivery_policy_digest": POLICY_DIGEST,
+            "fixed_operation_manifest_identity": "v2.sha256:" + "2" * 64,
+            "old_branch": old_branch,
+            "new_branch": new_branch,
+            "expected_worktree_path": path,
+        },
+        "superseded_implementation": {
+            "issue_id": "IMP-OLD",
+            "identifier": "T-111",
+            "parent_issue_id": "PLAN-1",
+            "root_requirement_id": "ROOT-1",
+            "workflow_object_type": "implementation",
+            "workflow_stage": "implementation",
+            "protocol_revision": "v4",
+            "status": "blocked",
+            "waiting_on": "plan_revision",
+            "blocked_reason": "superseded implementation",
+            "workflow_blocked_by_incident_id": "",
+            "workflow_blocked_previous_status": "",
+        },
+        "target": {
+            "issue_id": target_issue,
+            "identifier": "T-112",
+            "parent_issue_id": "IMP-OLD",
+            "root_requirement_id": "ROOT-1",
+            "workflow_object_type": "development_task",
+            "workflow_stage": "development_task",
+            "protocol_revision": "v4",
+            "status": "blocked",
+            "waiting_on": "plan_revision",
+            "blocked_reason": "superseded",
+            "workflow_blocked_by_incident_id": "",
+            "workflow_blocked_previous_status": "",
+            "workspace_lease_scope": "task",
+            "workspace_lease_state": "held",
+            "workspace_lease_owner_issue_id": target_issue,
+            "workspace_lease_owner_agent_id": owner,
+            "workspace_lease_superseded_release_record": "",
+            "metadata_keys": [f"key_{index}" for index in range(40)],
+        },
+        "pull_request": {
+            "number": 26,
+            "state": "closed",
+            "head_branch": old_branch,
+            "head_sha": head,
+        },
+        "guard": {
+            "valid": True,
+            "clean": True,
+            "registered": True,
+            "resolved_path": path,
+            "branch": old_branch,
+            "head": head,
+            "unfinished_operations": [],
+        },
+        "source": {
+            "branch": new_branch,
+            "base_commit_sha": "2" * 40,
+            "reviewed_commit_sha": "3" * 40,
+            "merged_commit_sha": "4" * 40,
+            "review_comment_id": "review-1",
+            "reviewer_id": "reviewer-1",
+            "review_base_commit_sha": "2" * 40,
+            "review_commit_sha": "3" * 40,
+            "reviewed_tree_sha": "5" * 40,
+            "merged_tree_sha": "5" * 40,
+            "merge_parent_shas": ["2" * 40, "3" * 40],
+            "merge_method": "--no-ff",
+            "review_status": "APPROVED",
+        },
+    }
+
+
+def superseded_authority(snapshot: dict) -> dict:
+    context = snapshot["context"]
+    source = snapshot["source"]
+    target = snapshot["target"]
+    return {
+        "schema_version": 2,
+        **context,
+        "code_reviewer_id": source["reviewer_id"],
+        "superseded_implementation_tuple": {
+            key: snapshot["superseded_implementation"][key]
+            for key in delivery_policy.SUPERSEDED_ISSUE_TUPLE_FIELDS
+        },
+        "target_task_tuple": {
+            key: target[key]
+            for key in delivery_policy.SUPERSEDED_ISSUE_TUPLE_FIELDS
+        },
+        "superseded_implementation_blocker_digest": delivery_policy.digest(
+            {
+                key: snapshot["superseded_implementation"].get(key, "")
+                for key in delivery_policy.LEASE_BLOCKER_FIELDS
+            }
+        ),
+        "expected_pr_number": snapshot["pull_request"]["number"],
+        "expected_pr_head_sha": snapshot["pull_request"]["head_sha"],
+        "expected_blocker_digest": delivery_policy.digest(
+            {key: target.get(key, "") for key in delivery_policy.LEASE_BLOCKER_FIELDS}
+        ),
+        **{
+            key: source[key]
+            for key in (
+                "base_commit_sha", "reviewed_commit_sha", "merged_commit_sha",
+                "review_comment_id", "reviewer_id", "review_base_commit_sha",
+                "reviewed_tree_sha", "merged_tree_sha", "merge_parent_shas",
+                "merge_method",
+            )
+        },
+    }
 
 
 def run_git(repo: Path, *args: str) -> str:
@@ -1778,6 +2205,421 @@ class DeliveryPolicyTests(unittest.TestCase):
             self.assertEqual(first.stdout, second.stdout)
             self.assertEqual(path.read_text(encoding="utf-8"), original)
 
+    def test_terminal_normalization_returns_one_deterministic_next_write(self):
+        snapshot = terminal_normalization_snapshot()
+        authority = terminal_authority(snapshot)
+        seen = []
+        while True:
+            result = delivery_policy.terminal_normalization_transition(snapshot, authority)
+            self.assertTrue(result["allowed"])
+            self.assertEqual(result["status_writes"], [])
+            self.assertEqual(result["blocker_writes"], [])
+            if result["complete"]:
+                self.assertEqual(result["outcome"], "already_complete")
+                self.assertEqual(result["writes"], [])
+                self.assertTrue(result["no_action"])
+                break
+            self.assertEqual(result["outcome"], "next_write")
+            self.assertEqual(len(result["writes"]), 1)
+            write = result["writes"][0]
+            self.assertIn(
+                write["key"], delivery_policy.TERMINAL_NORMALIZATION_ENDPOINT_KEYS
+            )
+            seen.append((write["issue_id"], write["key"]))
+            snapshot = apply_terminal_write(snapshot, write)
+        expected = []
+        endpoint_map = {
+            item["issue_id"]: item for item in snapshot["manifest"]["endpoints"]
+        }
+        for issue_id in snapshot["manifest"]["endpoint_order"]:
+            item = endpoint_map[issue_id]
+            expected.append((issue_id, "workspace_lease_terminal_normalization_record"))
+            if item["initial_tuple"]["state"] != item["target_tuple"]["state"]:
+                expected.append((issue_id, "workspace_lease_state"))
+            expected.extend(
+                [
+                    (issue_id, "workspace_lease_terminal_normalization_record"),
+                    (issue_id, "workspace_lease_owner_issue_id"),
+                    (issue_id, "workspace_lease_terminal_normalization_record"),
+                    (issue_id, "workspace_lease_owner_agent_id"),
+                    (issue_id, "workspace_lease_terminal_normalization_record"),
+                ]
+            )
+        self.assertEqual(seen, expected)
+
+    def test_terminal_normalization_rejects_manifest_tuple_and_prefix_drift(self):
+        cases = []
+        replacement = terminal_normalization_snapshot()
+        replacement["manifest"]["endpoints"][0]["issue_id"] = "OTHER"
+        cases.append(replacement)
+        parent = terminal_normalization_snapshot()
+        parent["endpoints"][0]["parent_issue_id"] = "OTHER"
+        cases.append(parent)
+        tuple_drift = terminal_normalization_snapshot()
+        tuple_drift["endpoints"][0]["workspace_lease_owner_agent_id"] = "other"
+        cases.append(tuple_drift)
+        mirror_ahead = terminal_normalization_snapshot()
+        mirror_authority = terminal_authority(mirror_ahead)
+        second = delivery_policy._terminal_full_writes(
+            delivery_policy._terminal_plan_binding(mirror_ahead, mirror_authority)[0],
+            delivery_policy._terminal_plan_binding(mirror_ahead, mirror_authority)[1],
+        )[1]
+        mirror_ahead = apply_terminal_write(mirror_ahead, second)
+        cases.append(mirror_ahead)
+        for snapshot in cases:
+            with self.subTest(case=len(cases)):
+                try:
+                    result = delivery_policy.terminal_normalization_transition(
+                        snapshot, terminal_authority(snapshot)
+                    )
+                except delivery_policy.DeliveryPolicyError:
+                    continue
+                self.assertFalse(result["allowed"])
+                self.assertEqual(result["writes"], [])
+
+    def test_terminal_normalization_rejects_capacity_and_plan_identity_tamper(self):
+        capacity = terminal_normalization_snapshot()
+        capacity["endpoints"][0]["metadata_keys"] = [f"key_{index}" for index in range(50)]
+        rejected = delivery_policy.terminal_normalization_transition(
+            capacity, terminal_authority(capacity)
+        )
+        self.assertFalse(rejected["allowed"])
+        self.assertEqual(rejected["writes"], [])
+
+        tampered = terminal_normalization_snapshot()
+        tampered["plan"]["fixed_operation_manifest_identity"] = "v2.sha256:" + "0" * 64
+        with self.assertRaisesRegex(delivery_policy.DeliveryPolicyError, "identity drifted"):
+            delivery_policy.terminal_normalization_transition(
+                tampered, terminal_authority(terminal_normalization_snapshot())
+            )
+
+    def test_terminal_normalization_attest_returns_one_root_scalar(self):
+        snapshot = finish_terminal_transition(terminal_normalization_snapshot())
+        snapshot, attestation = add_attestation_evidence(snapshot)
+        authority = terminal_authority(snapshot)
+        attested = delivery_policy.terminal_normalization_attest(
+            snapshot, authority, attestation
+        )
+        self.assertTrue(attested["allowed"])
+        self.assertEqual(len(attested["writes"]), 1)
+        self.assertEqual(
+            attested["writes"][0]["key"], "terminal_normalization_evidence_record"
+        )
+        record = delivery_policy.decode_metadata_record(attested["record"])
+        self.assertEqual(record["deployed_source_commit"], "f" * 40)
+        self.assertEqual(record["fixed_operation_manifest_identity"], snapshot["plan"]["fixed_operation_manifest_identity"])
+
+    def test_terminal_normalization_attest_rejects_deployment_and_root_capacity(self):
+        snapshot = finish_terminal_transition(terminal_normalization_snapshot())
+        snapshot, attestation = add_attestation_evidence(snapshot)
+        authority = terminal_authority(snapshot)
+        snapshot["root"]["metadata_keys"] = [f"root_{index}" for index in range(50)]
+        rejected = delivery_policy.terminal_normalization_attest(
+            snapshot, authority, attestation
+        )
+        self.assertFalse(rejected["allowed"])
+        self.assertEqual(rejected["writes"], [])
+
+        source_drift = copy.deepcopy(snapshot)
+        source_drift["root"]["metadata_keys"] = ["existing"]
+        source_drift["deployment"]["deployed_source_commit"] = "e" * 40
+        source_drift["root"]["deployed_source_commit"] = "e" * 40
+        rejected = delivery_policy.terminal_normalization_attest(
+            source_drift, authority, attestation
+        )
+        self.assertFalse(rejected["allowed"])
+        self.assertIn("deployed source", " ".join(rejected["reasons"]))
+
+        post_drift = copy.deepcopy(snapshot)
+        post_drift["root"]["metadata_keys"] = ["existing"]
+        post_drift["deployment"]["post_snapshot_digest"] = "e" * 64
+        rejected = delivery_policy.terminal_normalization_attest(
+            post_drift, authority, attestation
+        )
+        self.assertFalse(rejected["allowed"])
+        self.assertIn("post-snapshot", " ".join(rejected["reasons"]))
+
+    def test_terminal_normalization_attest_rejects_unrelated_root_and_plan_parent(self):
+        snapshot = finish_terminal_transition(terminal_normalization_snapshot())
+        snapshot, attestation = add_attestation_evidence(snapshot)
+        authority = terminal_authority(snapshot)
+        snapshot["root"]["issue_id"] = "ROOT-UNRELATED"
+        snapshot["root"]["root_requirement_id"] = "ROOT-UNRELATED"
+        rejected = delivery_policy.terminal_normalization_attest(
+            snapshot, authority, attestation
+        )
+        self.assertFalse(rejected["allowed"])
+        self.assertEqual(rejected["writes"], [])
+        self.assertIn("Plan authority", " ".join(rejected["reasons"]))
+
+        bad_parent = terminal_normalization_snapshot()
+        bad_parent["plan"]["parent_issue_id"] = "ROOT-OTHER"
+        with self.assertRaisesRegex(
+            delivery_policy.DeliveryPolicyError, "root authority"
+        ):
+            delivery_policy.terminal_normalization_transition(
+                bad_parent, terminal_authority(terminal_normalization_snapshot())
+            )
+
+    def test_terminal_normalization_rejects_untrusted_or_drifted_immutable_evidence(self):
+        cases = []
+        attacker = terminal_normalization_snapshot()
+        attacker["immutable_evidence"] = {"attacker": "chosen"}
+        cases.append(attacker)
+
+        replaced = terminal_normalization_snapshot()
+        replaced["immutable_evidence"]["pre"][0]["issue_id"] = "ROOT-OTHER"
+        cases.append(replaced)
+
+        approved_head = terminal_normalization_snapshot()
+        approved_head["immutable_evidence"]["post"][0][
+            "approved_requirement_head_sha"
+        ] = "f" * 40
+        cases.append(approved_head)
+
+        delivery = terminal_normalization_snapshot()
+        delivery["immutable_evidence"]["post"][0]["delivery_evidence_record"] = (
+            delivery_policy.encode_metadata_record(
+                {"schema_version": 1, "plan_revision": 999}
+            )
+        )
+        cases.append(delivery)
+
+        self_reported = terminal_normalization_snapshot()
+        self_reported["immutable_evidence"]["post"][0]["requirement_branch"] = (
+            "req/attacker"
+        )
+        self_reported["immutable_evidence"]["post_digest"] = delivery_policy.digest(
+            self_reported["immutable_evidence"]["post"]
+        )
+        cases.append(self_reported)
+
+        extra_field = terminal_normalization_snapshot()
+        extra_field["immutable_evidence"]["pre"][0]["attacker"] = "chosen"
+        cases.append(extra_field)
+
+        for index, snapshot in enumerate(cases):
+            with self.subTest(index=index):
+                with self.assertRaises(delivery_policy.DeliveryPolicyError):
+                    delivery_policy.terminal_normalization_transition(
+                        snapshot, terminal_authority(snapshot)
+                    )
+
+
+    def test_terminal_normalization_cli_is_exposed(self):
+        actions = delivery_policy.parser()._subparsers._group_actions[0].choices
+        self.assertIn("terminal-normalization", actions)
+
+    def test_terminal_normalization_rejects_approved_root_and_aggregate_replacement(self):
+        root = terminal_normalization_snapshot()
+        root["manifest"]["root_authority"]["issue_id"] = "ROOT-OTHER"
+        root["manifest"]["plan"]["parent_issue_id"] = "ROOT-OTHER"
+        root["manifest"]["plan"]["root_requirement_id"] = "ROOT-OTHER"
+        root["plan"]["parent_issue_id"] = "ROOT-OTHER"
+        root["plan"]["root_requirement_id"] = "ROOT-OTHER"
+        root["plan"]["approved_root_requirement_id"] = "ROOT-OTHER"
+        root["plan"]["fixed_operation_manifest_identity"] = delivery_policy._terminal_manifest_identity(root["manifest"])
+        with self.assertRaisesRegex(delivery_policy.DeliveryPolicyError, "approved terminal authority"):
+            delivery_policy.terminal_normalization_transition(
+                root, terminal_authority(terminal_normalization_snapshot())
+            )
+
+        aggregate = terminal_normalization_snapshot()
+        aggregate["manifest"]["immutable_snapshot"]["aggregate_digest"] = "0" * 64
+        aggregate["plan"]["approved_immutable_snapshot_digest"] = "sha256:" + "0" * 64
+        aggregate["plan"]["fixed_operation_manifest_identity"] = delivery_policy._terminal_manifest_identity(aggregate["manifest"])
+        with self.assertRaisesRegex(delivery_policy.DeliveryPolicyError, "aggregate"):
+            delivery_policy.terminal_normalization_transition(
+                aggregate, terminal_authority(terminal_normalization_snapshot())
+            )
+
+    def test_superseded_task_release_converges_one_write_at_a_time(self):
+        snapshot = superseded_release_snapshot()
+        authority = superseded_authority(snapshot)
+        seen = []
+        while True:
+            result = delivery_policy.superseded_task_release(snapshot, authority)
+            self.assertTrue(result["allowed"])
+            self.assertEqual(result["status_writes"], [])
+            self.assertEqual(result["blocker_writes"], [])
+            if result["complete"]:
+                self.assertEqual(result["writes"], [])
+                break
+            self.assertEqual(len(result["writes"]), 1)
+            write = result["writes"][0]
+            self.assertIn(write["key"], delivery_policy.SUPERSEDED_TASK_RELEASE_KEYS)
+            seen.append(write["key"])
+            snapshot["target"][write["key"]] = write["value"]
+            snapshot["target"]["metadata_keys"] = sorted(
+                set(snapshot["target"]["metadata_keys"]) | {write["key"]}
+            )
+        self.assertEqual(
+            seen,
+            [
+                "workspace_lease_superseded_release_record",
+                "workspace_lease_state",
+                "workspace_lease_superseded_release_record",
+                "workspace_lease_owner_issue_id",
+                "workspace_lease_superseded_release_record",
+                "workspace_lease_owner_agent_id",
+                "workspace_lease_superseded_release_record",
+            ],
+        )
+
+    def test_superseded_task_release_rejects_scope_pr_guard_source_and_capacity(self):
+        cases = []
+        for path, value in (
+            (("target", "workspace_lease_scope"), "requirement"),
+            (("pull_request", "state"), "open"),
+            (("guard", "clean"), False),
+            (("source", "review_status"), "CHANGES_REQUESTED"),
+        ):
+            snapshot = superseded_release_snapshot()
+            snapshot[path[0]][path[1]] = value
+            cases.append(snapshot)
+        capacity = superseded_release_snapshot()
+        capacity["target"]["metadata_keys"] = [f"key_{index}" for index in range(50)]
+        cases.append(capacity)
+        for snapshot in cases:
+            result = delivery_policy.superseded_task_release(
+                snapshot, superseded_authority(superseded_release_snapshot())
+            )
+            self.assertFalse(result["allowed"])
+            self.assertEqual(result["writes"], [])
+
+    def test_superseded_task_release_rejects_coordinated_replacement_and_evidence_drift(self):
+        approved = superseded_release_snapshot()
+        authority = superseded_authority(approved)
+        coordinated = superseded_release_snapshot()
+        replacements = {
+            "workspace_id": "workspace-other",
+            "root_requirement_id": "ROOT-OTHER",
+            "plan_issue_id": "PLAN-OTHER",
+            "superseded_implementation_id": "IMP-OTHER",
+            "target_issue_id": "TASK-OTHER",
+            "original_owner_id": "owner-other",
+            "old_branch": "task/OTHER",
+            "new_branch": "req/OTHER",
+            "expected_worktree_path": ".multica/worktrees/OTHER/tasks/OTHER",
+        }
+        coordinated["context"].update(replacements)
+        coordinated["target"].update(
+            {
+                "issue_id": "TASK-OTHER",
+                "workspace_lease_owner_issue_id": "TASK-OTHER",
+                "workspace_lease_owner_agent_id": "owner-other",
+            }
+        )
+        coordinated["pull_request"]["head_branch"] = "task/OTHER"
+        coordinated["guard"].update(
+            {
+                "resolved_path": replacements["expected_worktree_path"],
+                "branch": "task/OTHER",
+            }
+        )
+        coordinated["source"]["branch"] = "req/OTHER"
+        rejected = delivery_policy.superseded_task_release(coordinated, authority)
+        self.assertFalse(rejected["allowed"])
+        self.assertEqual(rejected["writes"], [])
+
+    def test_superseded_task_release_accepts_real_no_ff_merge_evidence(self):
+        snapshot = superseded_release_snapshot()
+        self.assertNotEqual(
+            snapshot["source"]["reviewed_commit_sha"],
+            snapshot["source"]["merged_commit_sha"],
+        )
+        result = delivery_policy.superseded_task_release(
+            snapshot, superseded_authority(snapshot)
+        )
+        self.assertTrue(result["allowed"])
+        self.assertEqual(result["outcome"], "next_write")
+
+    def test_superseded_task_release_rejects_parent_tree_role_and_review_drift(self):
+        approved = superseded_release_snapshot()
+        authority = superseded_authority(approved)
+        cases = (
+            ("source", "merge_parent_shas", ["9" * 40, "3" * 40]),
+            ("source", "merged_tree_sha", "9" * 40),
+            ("source", "review_base_commit_sha", "9" * 40),
+            ("source", "review_commit_sha", "9" * 40),
+            ("source", "reviewer_id", approved["context"]["original_owner_id"]),
+            ("source", "reviewer_id", approved["context"]["integrator_id"]),
+            ("superseded_implementation", "identifier", "T-999"),
+            ("superseded_implementation", "parent_issue_id", "PLAN-OTHER"),
+            ("superseded_implementation", "root_requirement_id", "ROOT-OTHER"),
+            ("superseded_implementation", "workflow_object_type", "development_task"),
+            ("superseded_implementation", "workflow_stage", "development_task"),
+            ("superseded_implementation", "protocol_revision", "v3"),
+            ("superseded_implementation", "blocked_reason", "changed"),
+            ("target", "identifier", "T-999"),
+            ("target", "parent_issue_id", "IMP-OTHER"),
+            ("target", "root_requirement_id", "ROOT-OTHER"),
+            ("target", "workflow_object_type", "implementation"),
+            ("target", "workflow_stage", "implementation"),
+            ("target", "protocol_revision", "v3"),
+        )
+        for section, key, value in cases:
+            with self.subTest(section=section, key=key):
+                candidate = superseded_release_snapshot()
+                candidate[section][key] = value
+                result = delivery_policy.superseded_task_release(candidate, authority)
+                self.assertFalse(result["allowed"])
+                self.assertEqual(result["writes"], [])
+
+        for section, key, value in (
+            ("context", "original_owner_id", "wrong-owner"),
+            ("context", "plan_issue_id", "wrong-plan"),
+            ("context", "delivery_policy_digest", "0" * 64),
+            ("target", "blocked_reason", "changed blocker"),
+            ("source", "review_comment_id", "wrong-review"),
+            ("source", "reviewer_id", "wrong-reviewer"),
+            ("source", "merged_commit_sha", "9" * 40),
+        ):
+            candidate = superseded_release_snapshot()
+            candidate[section][key] = value
+            result = delivery_policy.superseded_task_release(candidate, authority)
+            self.assertFalse(result["allowed"])
+            self.assertEqual(result["writes"], [])
+
+        record = superseded_release_snapshot()
+        record["target"]["workspace_lease_superseded_release_record"] = "v1.invalid"
+        rejected = delivery_policy.superseded_task_release(record, authority)
+        self.assertFalse(rejected["allowed"])
+        self.assertEqual(rejected["writes"], [])
+
+    def test_terminal_attest_rejects_self_consistent_forged_deployment_and_snapshots(self):
+        snapshot = finish_terminal_transition(terminal_normalization_snapshot())
+        snapshot, attestation = add_attestation_evidence(snapshot)
+        authority = terminal_authority(snapshot)
+        forged = copy.deepcopy(snapshot)
+        forged_attestation = copy.deepcopy(attestation)
+        forged_source = "9" * 40
+        forged_plan = "8" * 64
+        forged["root"]["deployed_source_commit"] = forged_source
+        forged["deployment"]["deployed_source_commit"] = forged_source
+        forged["root"]["deployment_plan_digest"] = forged_plan
+        forged["deployment"]["deployment_plan_digest"] = forged_plan
+        rejected = delivery_policy.terminal_normalization_attest(
+            forged, authority, attestation
+        )
+        self.assertFalse(rejected["allowed"])
+        self.assertEqual(rejected["writes"], [])
+
+        forged_attestation["deployed_source_commit"] = forged_source
+        forged_attestation["deployment_plan_digest"] = forged_plan
+        forged["canonical_pre_snapshot"] = {"attacker": "pre"}
+        forged["canonical_post_snapshot"] = {"attacker": "post"}
+        forged_pre = delivery_policy.digest(forged["canonical_pre_snapshot"])
+        forged_post = delivery_policy.digest(forged["canonical_post_snapshot"])
+        forged["deployment"]["pre_snapshot_digest"] = forged_pre
+        forged["deployment"]["post_snapshot_digest"] = forged_post
+        forged_attestation["pre_snapshot_digest"] = forged_pre
+        forged_attestation["post_snapshot_digest"] = forged_post
+        rejected = delivery_policy.terminal_normalization_attest(
+            forged, authority, attestation
+        )
+        self.assertFalse(rejected["allowed"])
+        self.assertEqual(rejected["writes"], [])
 
 if __name__ == "__main__":
     unittest.main()
