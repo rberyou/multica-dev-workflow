@@ -51,8 +51,14 @@ For `branch_only`, the Planner and Plan Reviewer also run `guard-workspace` agai
 
 ## Plan Freeze
 
-The resolver output contains normalized project policy, a redacted capability snapshot, the effective selection, Resolver provenance, a versioned semantic `policy_digest`, and a complete `snapshot_record_digest`. The Planner stores the complete output in the versioned Plan. The Plan Reviewer verifies it independently.
+The Resolver may display normalized project policy, a redacted capability view, the effective selection, and diagnostics for the current run. A new or materially revised Plan stores none of that JSON. Its frozen policy contract contains only:
+
+- `plan_revision`;
+- `policy_digest`, formatted as `v3.sha256:<digest>`;
+- `target_branch`.
+
+The human-readable design contains only the problem/root cause, selected solution and important tradeoffs, interface/data/user-visible changes, acceptance/tests, risks/rollback, and unresolved human decisions. Do not embed the complete Resolver output.
 
 After `APPROVE PLAN vN`, the exact approved digest is propagated to Implementation, development Task, integration-validation, Review, merge, and final approval evidence. A semantic policy change requires a new Plan revision, independent Plan Review, and new human approval. If implementation already started, the Integrator must stop affected Tasks and explicitly re-establish branches, worktrees, leases, and replacement Tasks; no Agent may switch modes in place.
 
-A Resolver-only digest/schema change does not silently replace the approved digest. The explicit pinning and supersession process in [resolver-contract.md](resolver-contract.md) must prove semantic equivalence, preserve the old and current digests plus provenance, and retain the original digest in all descendant evidence. Without the accepted recovery record, verification remains blocked.
+`parallel_tasks` and workspace lease scope are derived from the verified workspace mode. Resolver provenance, selection source, annotations, diagnostics, compatibility aliases, and a complete snapshot record are not frozen inputs. A Resolver-only implementation change that preserves the v3 digest may continue. A future digest schema requires a new Plan rather than cross-schema recovery. Existing approved schema-v1/v2 Plans remain immutable and use their legacy complete-snapshot validator until a material revision migrates them to this contract.

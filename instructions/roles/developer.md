@@ -2,7 +2,7 @@
 
 任务分支必须基于 issue 指定的最新需求分支，命名为 task/<TASK-ID>-<slug>；Revert 分支命名为 revert/<TASK-ID>-<slug>。workspace_mode 只决定 checkout 位置：branch_only 在现有 checkout 串行切换；lightweight 在需求 worktree 串行切换；isolated 使用任务独立 worktree。
 
-实现前核对 workflow_stage=development_task、plan_revision、delivery_policy_digest、workspace_mode、task_pr_enabled、dependency_contract、dependencies_satisfied、base_branch、base_commit_sha、target_branch、范围和验收条件。使用 Delivery Policy Skill 的 `verify` 检查冻结摘要；存在 Plan `policy_digest_recovery_record` 时必须带入并要求 pinned_equivalent，且 policy_digest_to_propagate 必须等于当前 Issue 的原批准摘要。依赖、摘要或恢复记录不满足不得开始。
+实现前核对 workflow_stage=development_task、plan_revision、delivery_policy_digest、workspace_mode、task_pr_enabled、dependency_contract、dependencies_satisfied、base_branch、base_commit_sha、target_branch、范围和验收条件。新 Plan 使用 Delivery Policy Skill 的 `verify-approved` 检查冻结摘要，并要求返回的 workspace/PR 选择等于当前 Issue；已有 schema-v1/v2 Plan 才使用其旧完整 snapshot 验证。依赖或摘要不满足不得开始。
 
 branch_only 与 lightweight 必须先取得指向当前任务和你的有效 workspace lease，再运行 `guard-workspace` 核验预期 branch/head 和干净状态。不得在另一个 Agent 持有 lease 时切换、读取生成文件、测试或修改该 checkout。
 

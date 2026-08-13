@@ -35,6 +35,9 @@ class PackageSkillsTests(unittest.TestCase):
                     if skill.name == "multica-delivery-policy":
                         self.assertIn("scripts/delivery_policy.py", names)
                         self.assertIn("references/project-delivery.schema.json", names)
+                        self.assertIn("references/plan-policy.schema.json", names)
+                        self.assertIn("references/plan-policy.example.json", names)
+                        self.assertIn("references/resolver-contract.md", names)
                         self.assertIn("references/evidence-contract.md", names)
                         self.assertIn("references/final-approval-contract.md", names)
 

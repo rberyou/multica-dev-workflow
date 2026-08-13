@@ -11,7 +11,7 @@ metadata:
 
 Use this Skill before approving a Plan and again before implementation or merge operations. It does not choose or change a mode autonomously; it validates the project policy and the exact selection requested by the Plan.
 
-## Resolve the Plan Snapshot
+## Resolve the Plan Policy
 
 From the product repository:
 
@@ -19,19 +19,26 @@ From the product repository:
 python <this-skill>/scripts/delivery_policy.py resolve --repo <repo>
 ```
 
-Pass `--workspace-mode`, `--task-pr`, or `--requirement-pr` only when the Plan explicitly selects a non-default value. Copy the complete JSON result into the Plan and preserve `policy_digest` in every descendant Issue.
+Pass `--workspace-mode`, `--task-pr`, or `--requirement-pr` only when the Plan explicitly selects a non-default value. The Resolver returns diagnostics plus a `v3.sha256:<digest>` value. Freeze only `plan_revision`, `policy_digest`, and `target_branch` in a new Plan; do not copy the complete Resolver JSON into the human-readable Plan or Plan metadata. Preserve the approved digest in every descendant Issue.
 
 An absent `multica.delivery.json` uses the protocol defaults. A repository without any remote automatically resolves both PR values to `disabled`. An explicit or required PR selection without capability is an error, never an automatic fallback. A remote that is not supported for PRs requires explicit project policy for local/direct-push delivery.
 
-## Recheck a Frozen Plan
+## Recheck a Compact Frozen Plan
 
-Write the approved snapshot to a temporary UTF-8 JSON file and run:
+```text
+python <this-skill>/scripts/delivery_policy.py verify-approved \
+  --repo <repo> --policy-digest <digest>
+```
+
+The command re-resolves the current repository and enumerates the finite valid workspace/PR selections. Exactly one digest match returns the actual selection for propagation. No match, ambiguity, an unsupported future digest prefix, or a real project-policy/remote/capability/selection change requires a new Plan revision, independent Review, and `APPROVE PLAN vN`. A Resolver implementation change with the same digest continues.
+
+Existing approved schema-v1/v2 Plans remain immutable and continue to use their stored complete snapshot:
 
 ```text
 python <this-skill>/scripts/delivery_policy.py verify --repo <repo> --snapshot <file>
 ```
 
-An exact match continues with the frozen digest. A compatible cross-version digest change first returns `recovery_required`; persist the returned scalar `policy_digest_recovery_record`, obtain independent recovery Review, and rerun with `--recovery-record <file>`. Never replace the approved digest. A real project-policy, selected-remote, provider, semantic-capability, or effective-selection change returns `requires_plan_revision=true`; stop and return to Plan Review.
+Do not rewrite those Plans in place. If their design changes materially, migrate the new revision to the compact contract.
 
 ## Guard a Checkout
 
@@ -58,5 +65,5 @@ Apply only the returned metadata and status writes. A rejected transition writes
 
 Every final-gate snapshot includes the root's fresh `metadata_keys` inventory so projected writes can be rejected before exceeding Multica's 50-key limit. Delivery and handoff return versioned scalar `delivery_evidence_record` and `delivery_handoff_record` values. Store each returned string exactly as one metadata key; never expand or manually encode the record.
 
-Read [policy-contract.md](references/policy-contract.md) for configuration, remote capability, selection, and workspace lease rules. Read [evidence-contract.md](references/evidence-contract.md) before Review or merge evidence. Read [final-approval-contract.md](references/final-approval-contract.md) before opening or processing final approval, delivery handoff, recovery, or Requirement convergence.
-Read [resolver-contract.md](references/resolver-contract.md) before validating Resolver provenance, digest schemas, cross-version pinning, migration, rollback, or supersession evidence.
+Read [policy-contract.md](references/policy-contract.md) for configuration, remote capability, selection, workspace lease rules, and the [compact Plan schema](references/plan-policy.schema.json). Read [evidence-contract.md](references/evidence-contract.md) before Review or merge evidence. Read [final-approval-contract.md](references/final-approval-contract.md) before opening or processing final approval, delivery handoff, recovery, or Requirement convergence.
+Read [resolver-contract.md](references/resolver-contract.md) before validating compact digests or migrating legacy schema-v1/v2 Plans.

@@ -26,7 +26,7 @@ If the host cannot remain active or wake later, disclose that before ending, ret
 
 Before posting any approval or decision:
 
-1. Read the top-level Requirement, relevant child Issue, latest comments, metadata, Plan revision, review outcome, gate, and assignee. For final approval, the comment target is always the top-level Requirement itself.
+1. Read the top-level Requirement, relevant child Issue, complete current Plan Review/approval comment history, compact Plan contract (`plan_revision`, `policy_digest`, `target_branch`), gate, and assignee. For final approval, the comment target is always the top-level Requirement itself.
 2. Reject execution when `MULTICA_AGENT_ID` or `MULTICA_TASK_ID` indicates a daemon-managed Agent identity.
 3. Read the authenticated user ID, for example through `user profile get --output json`.
 4. Read the current Squad roster and require exactly one `member_type=member`, `role=人工审批人` entry.
@@ -36,13 +36,13 @@ If identity cannot be verified, do not post the command. Give the user the exact
 
 ## Plan Approval
 
-Post only after explicit user authorization for the current Plan revision and a valid independent Plan Review:
+Post only after explicit user authorization for the current Plan revision and a valid independent Plan Review in platform comment history:
 
 ```text
 APPROVE PLAN v<N>
 ```
 
-Mention the current Plan owner. Reject stale revisions and unreviewed Plans.
+Mention the current Plan owner. Reject stale revisions and unreviewed Plans. Do not rely on duplicated Plan-stage review or approval comment IDs; the comments themselves are authoritative.
 
 ## Decision Response
 

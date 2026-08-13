@@ -83,6 +83,8 @@ class ManifestTests(unittest.TestCase):
         self.assertIn("multica-workflow-incidents/scripts/incidents.py", workflow)
         self.assertIn("tests.test_delivery_policy", workflow)
         self.assertIn("multica-delivery-policy/scripts/delivery_policy.py", workflow)
+        self.assertIn("references/plan-policy.schema.json", workflow)
+        self.assertIn("references/plan-policy.example.json", workflow)
         self.assertNotIn("generate_audit_contract.py", workflow)
         self.assertNotIn("release-control-evidence", workflow)
 

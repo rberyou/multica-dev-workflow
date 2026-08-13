@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Simplify new Plan policy freezes to `plan_revision`, compact `v3.sha256:` policy digest, and `target_branch` while keeping legacy schema-v1/v2 snapshot verification.
+- Add `verify-approved` to recover and validate non-default workspace and PR choices from the approved digest without persisted Resolver JSON.
+- Make platform comments authoritative for Plan Review and approval, and narrow human-readable Plan content without changing final Requirement approval or code Review evidence.
+
 ## 2.0.0-dev.6
 
 - Add auditable Delivery Policy Resolver provenance, a stable versioned semantic digest schema, and full snapshot integrity digests.

@@ -6,9 +6,9 @@
 
 从注入的 Squad Roster 查找唯一一个 member_type=member、role=人工审批人的成员，从 mention://member/<UUID> 提取 UUID。将其写入顶层需求和后续 Plan/Implementation 子树的 human_approver_id，并在顶层需求初始化 `final_approval_gate_state=closed`。若不存在或存在多个，将需求设为 blocked，waiting_on=human_approver_configuration，不得猜测审批人或创建 Plan。
 
-创建 workflow_stage=plan 的 Plan Issue 并分配给方案负责人。要求 Plan 使用 `multica-delivery-policy` 生成策略快照和 policy_digest，明确 workspace_mode、两个 PR 开关、workspace lease、本地/远程证据及合并方式。Plan 完成前禁止创建或启动 Implementation Issue。
+创建 workflow_stage=plan 的 Plan Issue 并分配给方案负责人。要求 Plan 使用 `multica-delivery-policy` 生成带版本前缀的 policy_digest，只冻结 plan_revision、policy_digest、target_branch，并在任务拆分中明确经摘要验证的 workspace_mode、两个 PR 开关、派生 workspace lease、本地/远程证据及合并方式。Plan 完成前禁止创建或启动 Implementation Issue。
 
-Plan 完成后确认需求设计已由有效人工批准、approved_delivery_policy_digest 与当前解析一致、任务拆分已独立审查通过，再创建 workflow_stage=implementation 的 Implementation Issue 并分配给集成负责人。
+Plan 完成后从平台评论历史确认当前 revision 的独立 Plan Review 与有效 `APPROVE PLAN vN`，用 `verify-approved` 确认 policy_digest 与当前解析一致，并确认任务拆分已独立审查通过，再创建 workflow_stage=implementation 的 Implementation Issue 并分配给集成负责人。不要依赖 Plan 阶段重复的 approval_* metadata。
 
 Implementation 完成唤醒后忽略平台 Stage 评论中任何通用状态建议，重新读取完整父子链。只有 Plan 与 Implementation 均为 done、集成验证绑定当前需求 head、dependency contract、default/target baseline、所有无 PR 或 PR 证据均完整时，才使用 Delivery Policy Skill `final-gate --action open`。只应用返回写入：将顶层 Requirement 设为 in_review，并写入当前 revision、reviewed head 和 policy digest 组成的 final approval gate。随后在顶层 Requirement 发布交付摘要，请人工评论 `APPROVE REQUIREMENT vN` 并明确 mention Integrator。
 

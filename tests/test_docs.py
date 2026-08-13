@@ -179,10 +179,13 @@ class DocumentationTests(unittest.TestCase):
             self.assertIn(mode, skill + policy + instructions)
         self.assertIn("multica.delivery.json", policy)
         self.assertIn("policy_digest", policy + evidence + instructions)
-        self.assertIn("resolver_provenance", resolver + instructions)
-        self.assertIn("snapshot_record_digest", resolver + instructions)
-        self.assertIn("policy_digest_recovery_record", resolver + instructions)
-        self.assertIn("pinned_equivalent", resolver + instructions)
+        self.assertIn("v3.sha256:", resolver + instructions)
+        self.assertIn("verify-approved", skill + resolver + instructions)
+        self.assertIn("schema-v1/v2", resolver + instructions)
+        self.assertIn("完整 snapshot", resolver + instructions)
+        self.assertIn("平台评论历史", resolver + instructions)
+        self.assertIn("target_branch", resolver + instructions)
+        self.assertIn("Resolver implementation", resolver + policy)
         self.assertIn("approved_requirement_head_sha", evidence + instructions)
         self.assertIn("APPROVE REQUIREMENT vN", evidence + instructions)
         self.assertIn("不得让人工手工猜测或输入 SHA", instructions)
@@ -216,10 +219,39 @@ class DocumentationTests(unittest.TestCase):
         self.assertIn("Implementation", content)
         self.assertIn("diagnostic", content)
         self.assertIn("non-authoritative", content)
-        self.assertIn("snapshot_record_digest", content)
+        self.assertIn("plan_revision", content)
+        self.assertIn("policy_digest", content)
+        self.assertIn("target_branch", content)
+        self.assertNotIn("完整保存 Resolver provenance", content)
         self.assertIn("must not create approval metadata", skill)
         self.assertIn("评论在 Implementation 等子 Issue 上必须拒绝", manual)
         self.assertIn("批准本身不是终点", manual)
+
+    def test_plan_freeze_docs_define_only_the_compact_contract(self):
+        planner = (ROOT / "instructions/roles/planner.md").read_text(encoding="utf-8")
+        reviewer = (ROOT / "instructions/roles/plan-reviewer.md").read_text(
+            encoding="utf-8"
+        )
+        resolver = (
+            ROOT
+            / "skills/multica-delivery-policy/references/resolver-contract.md"
+        ).read_text(encoding="utf-8")
+        content = planner + reviewer + resolver
+        for section in [
+            "问题与根因",
+            "选择的方案及重要权衡",
+            "接口、数据和用户可见变化",
+            "验收与测试",
+            "风险与回滚",
+            "尚待人工决定的问题",
+        ]:
+            self.assertIn(section, content)
+        self.assertIn("只记录 `plan_revision`", planner)
+        self.assertIn("`policy_digest`", planner)
+        self.assertIn("`target_branch`", planner)
+        self.assertIn("不复制 Plan 阶段", planner)
+        self.assertIn("最终 Requirement 的 approval_*", planner)
+        self.assertIn("Review 评论历史是审批权威", reviewer)
 
     def test_ci_and_agent_guide_run_documentation_tests(self):
         self.assertIn(

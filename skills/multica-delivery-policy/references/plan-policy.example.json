@@ -1,0 +1,5 @@
+{
+  "plan_revision": 2,
+  "policy_digest": "v3.sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "target_branch": "release/v2"
+}

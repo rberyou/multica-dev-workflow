@@ -105,7 +105,7 @@ Agent 与你确认 Requirement Draft
 
 ### 项目交付策略
 
-Requirement Intake 不冻结或传播交付策略摘要。若用户明确要求在创建前预检仓库，预检必须标记为 diagnostic/non-authoritative，并完整保存 Resolver provenance、digest schema、策略快照与当时摘要；它只是 Plan 输入，不能替代 Planner 的独立解析、Plan Review 或人工批准。Planner 会从产品仓库的 `multica.delivery.json` 和 Git remote 解析本次交付策略，并把完整快照、Resolver provenance、`policy_digest` 和 `snapshot_record_digest` 写入 Plan，Plan 才是第一个冻结的交付策略合同。跨 Resolver 版本出现语义等价摘要差异时，必须使用 Delivery Policy Skill 的显式 pinning/supersession recovery record；不得静默让 intake 摘要覆盖 Plan 摘要，也不得把真实策略变化当作兼容迁移。
+Requirement Intake 不冻结或传播交付策略摘要。若用户明确要求在创建前预检仓库，预检必须标记为 diagnostic/non-authoritative，只作为当前会话的临时输入，不能替代 Planner 的独立解析、Plan Review 或人工批准。Planner 会从产品仓库的 `multica.delivery.json` 和 Git remote 解析本次交付策略；新的 Plan 只冻结 `plan_revision`、带版本前缀的 `policy_digest` 和 `target_branch`，不保存完整 Resolver JSON。已有已批准 schema-v1/v2 Plan 保持原样，只有实质修订时才迁移到紧凑合同。
 
 没有配置且存在受支持 GitHub remote 时，默认使用 `lightweight`、关闭 Task PR、启用 Requirement PR；没有任何 remote 时两个 PR 都关闭。不受支持或不明确的 remote 会阻塞 Plan，直到项目显式配置交付能力。
 
@@ -125,7 +125,9 @@ Requirement Intake 不冻结或传播交付策略摘要。若用户明确要求�
 
 - 当前 `plan_revision`；
 - 方案审查员是否明确给出 `APPROVED`；
-- 根因、影响范围、兼容性、测试和回滚是否合理；
+- 问题与根因、选择的方案和重要权衡是否合理；
+- 接口、数据和用户可见变化是否清晰；
+- 验收与测试、风险与回滚、尚待人工决定的问题是否完整；
 - 是否仍有待决策问题。
 
 确认后评论：

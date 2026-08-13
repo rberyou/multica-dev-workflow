@@ -12,7 +12,7 @@ Protocol v4 deliberately keeps the system small:
 - workspace deployment from either a reviewed clean Git checkout or a verified formal Release Bundle;
 - optional formal releases created directly from a reviewed clean `main` checkout.
 
-Each managed development Agent also receives `multica-delivery-policy`. A product repository may commit `multica.delivery.json` to constrain and default its checkout topology, Task PR, Requirement PR, and direct-default-push capability. The Requirement Plan freezes the resolved policy and redacted remote-capability snapshot by digest.
+Each managed development Agent also receives `multica-delivery-policy`. A product repository may commit `multica.delivery.json` to constrain and default its checkout topology, Task PR, Requirement PR, and direct-target-push capability. A new Requirement Plan freezes only `plan_revision`, a compact versioned policy digest, and `target_branch`; current policy and remote capability are re-resolved when the digest is verified.
 
 Without project configuration, a supported GitHub remote resolves to `lightweight`, Task PR disabled, and Requirement PR enabled. Without any remote, both PRs are disabled and delivery remains local. An unsupported or ambiguous remote blocks planning until the project declares a valid policy. `branch_only` and `lightweight` are serial and require the acting Agents to share the same repository filesystem; `isolated` permits independent Task worktrees and DAG parallelism. Review, tests, human approval, and merge evidence remain mandatory in every mode.
 

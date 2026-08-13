@@ -1,59 +1,56 @@
-# Delivery Policy Resolver and Digest Contract
+# Delivery Policy Digest and Legacy Migration Contract
 
-## Resolver provenance
+## Compact v3 digest
 
-Every schema-v2 resolution records `resolver_provenance` with the Resolver ID, Skill package version, SHA-256 implementation digest, snapshot schema version, and policy-digest schema version. Provenance is bound by `snapshot_record_digest`, which hashes the complete canonical snapshot except that digest field itself. It is audit evidence, not a delivery-policy input: a compatible Resolver implementation change may change provenance and the full record digest without changing `policy_digest`.
+New Plans use one self-identifying value: `v3.sha256:<digest>`. There is no separate `policy_digest_schema_version` Plan field.
 
-Legacy schema-v1 snapshots did not declare Resolver provenance or a full record digest. Verification identifies that fact as `provenance_status=legacy_undeclared`; it must not invent a package version. The immutable Plan, workflow Issue metadata, source deployment record, or other external evidence remains the authority for the workflow version that created such a snapshot.
+The SHA-256 payload binds only:
 
-## Stable policy digest schema
+- normalized project delivery policy;
+- selected remote identity and semantic capabilities;
+- actual `workspace_mode`;
+- actual Task PR and Requirement PR selections.
 
-`policy_digest_schema_version=2` hashes a fixed semantic projection rather than the complete Resolver output. The projection contains:
+It does not bind Resolver provenance, snapshot record digests, selection sources, derived `parallel_tasks`, derived workspace lease scope, diagnostics, annotations, compatibility aliases, policy-source bookkeeping, or complete Resolver output. Portable compatibility fields are normalized to canonical semantics before hashing (for example, `allow_direct_default_push` becomes `allow_direct_target_push`). Workspace concurrency and lease scope are derived from `workspace_mode` after verification.
 
-- workflow and project-policy source identity;
-- normalized project policy, with workspace-mode capability order canonicalized;
-- selected remote presence, name, fingerprint, provider, PR capability, and canonical `direct_target_push` capability;
-- effective workspace mode, PR selections, concurrency, and lease scope;
-- the source of each effective selection.
+The selected remote projection includes presence, configured name, URL fingerprint, provider, PR capability, and direct target-push capability. Raw remote URLs are never emitted.
 
-The legacy `direct_default_push` field is normalized to `direct_target_push`; when both exist they must agree. Resolver diagnostics, provenance, aliases, annotations, and future fields outside the fixed projection do not change `policy_digest`. Adding or removing a semantic field requires a new policy-digest schema version and the recovery process below. Project policy, selected remote identity or fingerprint, provider, semantic capabilities, effective choices, or selection sources still change the digest and invalidate the Plan.
+## Verification
 
-Schema-v2 snapshots carry both digests:
+Run:
 
-- `policy_digest` freezes the versioned semantic delivery contract across compatible Resolver versions;
-- `snapshot_record_digest` proves the complete snapshot and Resolver provenance were not modified.
+```text
+python <this-skill>/scripts/delivery_policy.py verify-approved \
+  --repo <repo> --policy-digest <digest>
+```
 
-## Pinning and supersession recovery
+The validator loads the current normalized project policy and selected remote once, enumerates the finite valid combinations of workspace mode plus two PR booleans, and requires exactly one digest match. A unique match returns the actual selection and its derived concurrency/lease values. No match returns `policy_drift` and `requires_plan_revision=true`. Multiple matches are rejected as ambiguous.
 
-Verification never overwrites an approved digest. An exact schema/digest match returns `verification_outcome=exact_match` and continues to propagate the frozen digest.
+This mechanism correctly restores non-default choices without storing selection metadata in the Plan. It never chooses a different valid combination when the digest does not match.
 
-When the frozen and current snapshots have equal schema-v2 semantic projections but different digest schemas or legacy full-snapshot digests, the first verification returns exit `1`, `verification_outcome=recovery_required`, `requires_plan_revision=false`, and a scalar `policy_digest_recovery_record`. The record binds:
+An unsupported prefix is not recovered or guessed. Future digest schemas require a new Plan revision, independent Review, and `APPROVE PLAN vN`. Resolver implementation changes that preserve the v3 digest require no new Plan.
 
-- the immutable frozen snapshot identity and pinned digest;
-- the digest that descendants must continue to propagate;
-- the current stable digest and semantic digest;
-- frozen and current Resolver provenance;
-- any legacy current digest superseded because a non-semantic Resolver field changed.
+## Legacy schema-v1/v2 Plans
 
-Persist the returned scalar without decoding or rewriting it on the versioned Plan as `policy_digest_recovery_record`, and record the same evidence in the recovery Review comment. An independent reviewer reruns verification with `--recovery-record <file>` containing that scalar. Only a matching, canonical, digest-bound record returns exit `0` with `verification_outcome=pinned_equivalent`. The approved Plan revision, `policy_digest`, Review, and human approval remain unchanged because the semantic contract is unchanged. Descendants continue to use `policy_digest_to_propagate`, which equals the original frozen digest.
-
-If the semantic projections differ, verification returns `verification_outcome=semantic_drift`, no recovery record, and `requires_plan_revision=true`. Reopen the Plan, increment its revision, repeat independent Review, obtain a new `APPROVE PLAN`, and re-establish affected implementation state. A recovery record can never authorize a real policy, remote, provider, capability, or effective-selection change.
-
-Rollback uses the same rule. A newer frozen snapshot may be pinned across an older compatible projection only when the current verifier can validate both schemas, prove semantic equality, and bind an explicit recovery record. Unsupported schemas block; they are never guessed or downgraded.
-
-## Command sequence
-
-Run ordinary verification first:
+Existing approved schema-v1/v2 Plans remain immutable. They continue to use their stored complete snapshot and the legacy command:
 
 ```text
 python <this-skill>/scripts/delivery_policy.py verify --repo <repo> --snapshot <file>
 ```
 
-For `recovery_required`, save the returned `policy_digest_recovery_record` as a JSON string or plain scalar in a temporary UTF-8 file, persist it on the Plan, obtain independent recovery Review, and rerun:
+The legacy validator retains the schema-v1/v2 provenance, snapshot-record, and explicit pinning/supersession recovery behavior needed to validate those historical contracts. Those fields and recovery records are compatibility-only; do not add them to a new Plan.
 
-```text
-python <this-skill>/scripts/delivery_policy.py verify --repo <repo> --snapshot <file> \
-  --recovery-record <record-file>
-```
+Do not rewrite an approved legacy Plan in place. When its design body changes materially, or its policy digest or target branch changes, increment `plan_revision` and create the new revision under the compact v3 contract. Preserve the old Plan and approval comments as history.
 
-The recovery file is evidence input, not portable project configuration. Do not commit project-specific digests, repository identities, or Issue IDs to this workflow repository.
+## Plan revision and approval
+
+Platform comment history is authoritative for independent Plan Review and `APPROVE PLAN vN`. New Plans do not duplicate `design_digest`, `review_comment_id`, `approval_comment_id`, or `approval_author_id` as Plan freeze fields.
+
+Increment `plan_revision` and repeat independent Review plus human Plan approval when:
+
+- the human-readable design changes materially;
+- `policy_digest` changes;
+- `target_branch` changes;
+- the current validator cannot validate the digest schema.
+
+Do not increment solely because Resolver implementation or diagnostic output changed while the approved v3 digest remains identical.

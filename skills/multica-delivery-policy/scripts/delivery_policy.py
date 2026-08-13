@@ -19,6 +19,8 @@ RESOLVER_ID = "multica-delivery-policy"
 SNAPSHOT_SCHEMA_VERSION = 2
 POLICY_DIGEST_SCHEMA_VERSION = 2
 LEGACY_POLICY_DIGEST_SCHEMA_VERSION = 1
+COMPACT_POLICY_DIGEST_VERSION = "v3"
+COMPACT_POLICY_DIGEST_PREFIX = f"{COMPACT_POLICY_DIGEST_VERSION}.sha256:"
 WORKSPACE_MODES = ("branch_only", "lightweight", "isolated")
 PR_CONSTRAINTS = ("optional", "required", "forbidden")
 PROVIDERS = ("auto", "github", "none")
@@ -30,6 +32,7 @@ MAX_ISSUE_METADATA_KEYS = 50
 REMOTE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 FULL_SHA_RE = re.compile(r"^[0-9a-fA-F]{40,64}$")
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+COMPACT_POLICY_DIGEST_RE = re.compile(r"^v3\.sha256:[0-9a-f]{64}$")
 
 DEFAULT_POLICY: dict[str, Any] = {
     "schema_version": 1,
@@ -265,6 +268,107 @@ def legacy_policy_digest(snapshot: dict[str, Any]) -> str:
 
 def semantic_policy_digest(snapshot: dict[str, Any]) -> str:
     return digest(semantic_policy_projection(snapshot))
+
+
+def compact_policy_projection(resolution: dict[str, Any]) -> dict[str, Any]:
+    policy = _semantic_project_policy(resolution)
+    remote_policy = policy["remote"]
+    compact_remote_policy = {
+        key: value
+        for key, value in remote_policy.items()
+        if key != "allow_direct_default_push"
+    }
+    compact_remote_policy["allow_direct_target_push"] = remote_policy[
+        "allow_direct_default_push"
+    ]
+    policy["remote"] = compact_remote_policy
+    capabilities = _semantic_capabilities(resolution)
+    effective = _require_object(resolution.get("effective"), "resolution.effective")
+    workspace_mode = effective.get("workspace_mode")
+    if workspace_mode not in WORKSPACE_MODES:
+        raise DeliveryPolicyError("resolution.effective.workspace_mode is invalid")
+    for name in ("task_pr", "requirement_pr"):
+        if not isinstance(effective.get(name), bool):
+            raise DeliveryPolicyError(f"resolution.effective.{name} must be boolean")
+    return {
+        "project_policy": policy,
+        "selected_remote": capabilities,
+        "selection": {
+            "workspace_mode": workspace_mode,
+            "task_pr": effective["task_pr"],
+            "requirement_pr": effective["requirement_pr"],
+        },
+    }
+
+
+def compact_plan_contract(
+    plan_revision: Any,
+    policy_digest: Any,
+    target_branch: Any,
+) -> dict[str, Any]:
+    if (
+        not isinstance(plan_revision, int)
+        or isinstance(plan_revision, bool)
+        or plan_revision < 1
+    ):
+        raise DeliveryPolicyError("plan_revision must be a positive integer")
+    if not isinstance(policy_digest, str) or not COMPACT_POLICY_DIGEST_RE.fullmatch(
+        policy_digest
+    ):
+        raise DeliveryPolicyError("policy_digest must use the v3.sha256 schema")
+    if not isinstance(target_branch, str) or not target_branch:
+        raise DeliveryPolicyError("target_branch is missing")
+    return {
+        "plan_revision": plan_revision,
+        "policy_digest": policy_digest,
+        "target_branch": target_branch,
+    }
+
+
+def plan_contract_requires_revision(
+    approved_contract: Any,
+    proposed_contract: Any,
+    *,
+    design_changed: bool = False,
+) -> dict[str, Any]:
+    approved = _require_object(approved_contract, "approved Plan contract")
+    proposed = _require_object(proposed_contract, "proposed Plan contract")
+    approved_compact = compact_plan_contract(
+        approved.get("plan_revision"),
+        approved.get("policy_digest"),
+        approved.get("target_branch"),
+    )
+    proposed_compact = compact_plan_contract(
+        proposed.get("plan_revision"),
+        proposed.get("policy_digest"),
+        proposed.get("target_branch"),
+    )
+    changed_fields = [
+        name
+        for name in ("policy_digest", "target_branch")
+        if approved_compact[name] != proposed_compact[name]
+    ]
+    material_change = bool(design_changed or changed_fields)
+    required_revision = approved_compact["plan_revision"] + (
+        1 if material_change else 0
+    )
+    valid = proposed_compact["plan_revision"] == required_revision
+    return {
+        "valid": valid,
+        "requires_new_revision": material_change,
+        "requires_plan_review": material_change,
+        "requires_plan_approval": material_change,
+        "changed_fields": changed_fields,
+        "design_changed": bool(design_changed),
+        "expected_plan_revision": required_revision,
+        "actual_plan_revision": proposed_compact["plan_revision"],
+    }
+
+
+def compact_policy_digest(resolution: dict[str, Any]) -> str:
+    return COMPACT_POLICY_DIGEST_PREFIX + digest(
+        compact_policy_projection(resolution)
+    )
 
 
 def snapshot_digest(snapshot: dict[str, Any]) -> str:
@@ -524,17 +628,27 @@ def resolve_pr(
     return value, source
 
 
-def resolve_policy(
+def _resolve_policy_inputs(
     repo: Path,
     *,
     config: str | None = None,
+) -> tuple[dict[str, Any], str, str | None, dict[str, Any]]:
+    root = repository_root(repo)
+    policy, policy_source, policy_file = load_policy(root, config)
+    capabilities = repository_capabilities(root, policy)
+    return policy, policy_source, policy_file, capabilities
+
+
+def _resolve_policy_state_from_inputs(
+    policy: dict[str, Any],
+    policy_source: str,
+    policy_file: str | None,
+    capabilities: dict[str, Any],
+    *,
     workspace_mode: str | None = None,
     task_pr: bool | None = None,
     requirement_pr: bool | None = None,
 ) -> dict[str, Any]:
-    root = repository_root(repo)
-    policy, policy_source, policy_file = load_policy(root, config)
-    capabilities = repository_capabilities(root, policy)
     selected_mode = workspace_mode or policy["workspace_modes"]["default"]
     if selected_mode not in policy["workspace_modes"]["allowed"]:
         raise DeliveryPolicyError(f"workspace_mode is not allowed: {selected_mode}")
@@ -564,11 +678,8 @@ def resolve_policy(
             "isolated": "task",
         }[selected_mode],
     }
-    snapshot: dict[str, Any] = {
-        "schema_version": SNAPSHOT_SCHEMA_VERSION,
+    return {
         "workflow_id": WORKFLOW_ID,
-        "resolver_provenance": resolver_provenance(),
-        "policy_digest_schema_version": POLICY_DIGEST_SCHEMA_VERSION,
         "policy_source": policy_source,
         "policy_file": policy_file,
         "project_policy": policy,
@@ -579,6 +690,70 @@ def resolve_policy(
             "task_pr": task_source,
             "requirement_pr": requirement_source,
         },
+    }
+
+
+def _resolve_policy_state(
+    repo: Path,
+    *,
+    config: str | None = None,
+    workspace_mode: str | None = None,
+    task_pr: bool | None = None,
+    requirement_pr: bool | None = None,
+) -> dict[str, Any]:
+    policy, policy_source, policy_file, capabilities = _resolve_policy_inputs(
+        repo, config=config
+    )
+    return _resolve_policy_state_from_inputs(
+        policy,
+        policy_source,
+        policy_file,
+        capabilities,
+        workspace_mode=workspace_mode,
+        task_pr=task_pr,
+        requirement_pr=requirement_pr,
+    )
+
+
+def resolve_policy(
+    repo: Path,
+    *,
+    config: str | None = None,
+    workspace_mode: str | None = None,
+    task_pr: bool | None = None,
+    requirement_pr: bool | None = None,
+) -> dict[str, Any]:
+    resolution = _resolve_policy_state(
+        repo,
+        config=config,
+        workspace_mode=workspace_mode,
+        task_pr=task_pr,
+        requirement_pr=requirement_pr,
+    )
+    resolution["policy_digest"] = compact_policy_digest(resolution)
+    return resolution
+
+
+def resolve_legacy_policy_snapshot(
+    repo: Path,
+    *,
+    config: str | None = None,
+    workspace_mode: str | None = None,
+    task_pr: bool | None = None,
+    requirement_pr: bool | None = None,
+) -> dict[str, Any]:
+    state = _resolve_policy_state(
+        repo,
+        config=config,
+        workspace_mode=workspace_mode,
+        task_pr=task_pr,
+        requirement_pr=requirement_pr,
+    )
+    snapshot: dict[str, Any] = {
+        "schema_version": SNAPSHOT_SCHEMA_VERSION,
+        "resolver_provenance": resolver_provenance(),
+        "policy_digest_schema_version": POLICY_DIGEST_SCHEMA_VERSION,
+        **state,
     }
     snapshot["policy_digest"] = snapshot_digest(snapshot)
     snapshot["snapshot_record_digest"] = snapshot_record_digest(snapshot)
@@ -942,7 +1117,7 @@ def verify_snapshot(
     selections = _require_object(
         expected.get("selection_source"), "snapshot.selection_source"
     )
-    current = resolve_policy(
+    current = resolve_legacy_policy_snapshot(
         repo,
         config=config or expected.get("policy_file"),
         workspace_mode=(
@@ -962,12 +1137,95 @@ def verify_snapshot(
     return verify_resolved_snapshots(expected, current, recovery_record)
 
 
+def verify_approved_digest(
+    repo: Path,
+    policy_digest: str,
+) -> dict[str, Any]:
+    if not isinstance(policy_digest, str) or not COMPACT_POLICY_DIGEST_RE.fullmatch(
+        policy_digest
+    ):
+        if _is_digest(policy_digest):
+            raise DeliveryPolicyError(
+                "legacy policy digests require verify --snapshot with the frozen "
+                "schema-v1/v2 Plan snapshot"
+            )
+        raise DeliveryPolicyError(
+            "policy_digest has an unsupported schema; create a new Plan for a future "
+            "digest schema"
+        )
+
+    policy, policy_source, policy_file, capabilities = _resolve_policy_inputs(
+        repo
+    )
+    matches: list[dict[str, Any]] = []
+    evaluated = 0
+    for workspace_mode in WORKSPACE_MODES:
+        for task_pr in (False, True):
+            for requirement_pr in (False, True):
+                try:
+                    resolution = _resolve_policy_state_from_inputs(
+                        policy,
+                        policy_source,
+                        policy_file,
+                        capabilities,
+                        workspace_mode=workspace_mode,
+                        task_pr=task_pr,
+                        requirement_pr=requirement_pr,
+                    )
+                except DeliveryPolicyError:
+                    continue
+                resolution["policy_digest"] = compact_policy_digest(resolution)
+                evaluated += 1
+                if resolution["policy_digest"] == policy_digest:
+                    matches.append(resolution)
+
+    if len(matches) > 1:
+        raise DeliveryPolicyError(
+            "policy_digest matches multiple effective selections; verification is "
+            "ambiguous and requires a new Plan"
+        )
+    if not matches:
+        return {
+            "valid": False,
+            "verification_outcome": "policy_drift",
+            "requires_plan_revision": True,
+            "approved_policy_digest": policy_digest,
+            "evaluated_valid_selections": evaluated,
+        }
+
+    resolution = matches[0]
+    effective = resolution["effective"]
+    return {
+        "valid": True,
+        "verification_outcome": "exact_match",
+        "requires_plan_revision": False,
+        "approved_policy_digest": policy_digest,
+        "policy_digest_to_propagate": policy_digest,
+        "workspace_mode": effective["workspace_mode"],
+        "task_pr_enabled": effective["task_pr"],
+        "requirement_pr_enabled": effective["requirement_pr"],
+        "parallel_tasks": effective["workspace_mode"] == "isolated",
+        "workspace_lease_scope": {
+            "branch_only": "repository",
+            "lightweight": "requirement",
+            "isolated": "task",
+        }[effective["workspace_mode"]],
+        "evaluated_valid_selections": evaluated,
+    }
+
+
 def _is_sha(value: Any) -> bool:
     return isinstance(value, str) and FULL_SHA_RE.fullmatch(value) is not None
 
 
 def _is_digest(value: Any) -> bool:
     return isinstance(value, str) and DIGEST_RE.fullmatch(value) is not None
+
+
+def _is_policy_digest(value: Any) -> bool:
+    return _is_digest(value) or (
+        isinstance(value, str) and COMPACT_POLICY_DIGEST_RE.fullmatch(value) is not None
+    )
 
 
 def _add(reasons: list[str], condition: bool, message: str) -> None:
@@ -1026,7 +1284,7 @@ def _root_reasons(root: dict[str, Any]) -> list[str]:
     )
     _add(
         reasons,
-        _is_digest(root.get("delivery_policy_digest")),
+        _is_policy_digest(root.get("delivery_policy_digest")),
         "delivery_policy_digest is invalid",
     )
     _add(
@@ -1782,18 +2040,29 @@ def parser() -> argparse.ArgumentParser:
     )
     subparsers = result.add_subparsers(dest="command", required=True)
 
-    resolve = subparsers.add_parser("resolve")
+    resolve = subparsers.add_parser(
+        "resolve",
+        help="resolve current policy diagnostics and emit a compact v3 digest",
+    )
     resolve.add_argument("--repo", default=".")
     resolve.add_argument("--config")
     resolve.add_argument("--workspace-mode", choices=WORKSPACE_MODES)
     resolve.add_argument("--task-pr", choices=("enabled", "disabled"))
     resolve.add_argument("--requirement-pr", choices=("enabled", "disabled"))
 
-    verify = subparsers.add_parser("verify")
+    verify = subparsers.add_parser(
+        "verify", help="verify an existing schema-v1/v2 frozen snapshot"
+    )
     verify.add_argument("--repo", default=".")
     verify.add_argument("--config")
     verify.add_argument("--snapshot", required=True)
     verify.add_argument("--recovery-record")
+
+    verify_approved = subparsers.add_parser(
+        "verify-approved", help="verify a compact approved policy digest"
+    )
+    verify_approved.add_argument("--repo", default=".")
+    verify_approved.add_argument("--policy-digest", required=True)
 
     guard = subparsers.add_parser("guard-workspace")
     guard.add_argument("--repo", default=".")
@@ -1828,6 +2097,13 @@ def main(argv: list[str] | None = None) -> int:
                 snapshot,
                 args.config,
                 load_recovery_record(args.recovery_record),
+            )
+            print_json(result)
+            return 0 if result["valid"] else 1
+        if args.command == "verify-approved":
+            result = verify_approved_digest(
+                Path(args.repo),
+                args.policy_digest,
             )
             print_json(result)
             return 0 if result["valid"] else 1

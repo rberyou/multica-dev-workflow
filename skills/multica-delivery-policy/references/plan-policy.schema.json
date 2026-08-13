@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/rberyou/multica-dev-workflow/main/skills/multica-delivery-policy/references/plan-policy.schema.json",
+  "title": "Multica Compact Plan Policy Contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["plan_revision", "policy_digest", "target_branch"],
+  "properties": {
+    "plan_revision": {"type": "integer", "minimum": 1},
+    "policy_digest": {
+      "type": "string",
+      "pattern": "^v3\\.sha256:[0-9a-f]{64}$"
+    },
+    "target_branch": {"type": "string", "minLength": 1}
+  }
+}

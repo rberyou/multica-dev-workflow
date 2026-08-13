@@ -8,7 +8,7 @@
 
 队长要求 Planner 使用 `multica-delivery-policy` 解析项目配置与仓库能力。未配置且存在受支持 PR remote 时，默认 workspace_mode=lightweight、task_pr_enabled=false、requirement_pr_enabled=true；没有任何 remote 时两个 PR 自动关闭。不受支持或不明确的 remote 必须通过项目策略解决。配置或能力矛盾必须在 Plan 阶段阻塞，不得自动改成另一模式。
 
-Plan 保存完整交付策略快照、Resolver provenance、版本化 policy_digest 和 snapshot_record_digest。人工 APPROVE PLAN 后配置冻结；后续每个阶段必须验证原摘要。真实语义调整必须重新 Plan、独立 Review 和人工批准。仅当 validator 证明跨版本语义等价、返回并保存 `policy_digest_recovery_record`、且独立审查员复验为 pinned_equivalent 时，才允许同一 Plan 继续；原摘要和审批证据不得覆盖，被 supersede 的摘要与新 Resolver provenance 必须保留。
+新 Plan 只冻结 plan_revision、带版本前缀的 policy_digest 和 target_branch，不保存完整 Resolver JSON、provenance、单独 digest schema 字段或 snapshot_record_digest。人工 APPROVE PLAN 后配置冻结；后续每个阶段通过 `verify-approved` 重新解析当前仓库并验证原摘要。设计实质变化、摘要变化或 target branch 变化都必须新 revision、独立 Review 和人工批准；Resolver 实现变化但摘要相同可以继续。已有 schema-v1/v2 Plan 保持不可变并继续使用旧完整 snapshot 验证，实质修订时迁移到紧凑合同。
 
 所有模式保留需求分支和任务分支。branch_only 不创建 worktree；lightweight 只创建一个需求 worktree；两者只在相关 Agent 共享同一个规范仓库文件系统时可用，并采用串行调度和排他 workspace lease。isolated 为每个任务创建独立 worktree，可按 DAG 并行。无法证明共享访问或 branch_only checkout 干净时必须阻塞，禁止自动切换模式或让多个 Agent 并行操作同一个非隔离 checkout。
 

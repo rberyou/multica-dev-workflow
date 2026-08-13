@@ -69,4 +69,4 @@ The normalized snapshot contains:
 - `delivery` for delivery/converge or duplicate recovery: state, mode, revision, digest, reviewed/current head, verified default/target baselines, merge parents, reviewed/merged tree, merge method/commit, local target SHA, and the mode-specific PR URL/number/checks/merge or remote/auth/push evidence;
 - `handoff` for handoff: root issue ID, comment ID, mentioned role, and normalized `trigger_outcomes` entries with recipient role and status. The current normalized `delivery` object is also required so the recorded delivery record can be compared before handoff.
 
-All Git identities are full SHAs. Digests are lowercase SHA-256 values. The snapshot is temporary evidence input and must not contain credentials, remote URLs, or machine-specific secrets.
+All Git identities are full SHAs. Legacy policy digests are lowercase SHA-256 values; compact Plan policy digests use `v3.sha256:<lowercase-sha256>`. Other record digests remain lowercase SHA-256 values. The snapshot is temporary evidence input and must not contain credentials, remote URLs, or machine-specific secrets.

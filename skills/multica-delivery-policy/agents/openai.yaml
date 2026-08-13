@@ -1,4 +1,4 @@
 interface:
   display_name: "Multica Delivery Policy"
   short_description: "Resolve workspace isolation and PR delivery policy"
-  default_prompt: "Use $multica-delivery-policy to validate project delivery capabilities and freeze the effective Requirement delivery policy."
+  default_prompt: "Use $multica-delivery-policy to validate project delivery capabilities and freeze or verify the compact Requirement policy digest."

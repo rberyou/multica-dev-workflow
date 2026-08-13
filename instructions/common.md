@@ -8,11 +8,11 @@ Review Loop 默认保持 original owner 为 assignee，不通过反复更换 ass
 
 创建工作流 Issue 后必须立即使用已附加的 `multica-workflow-incidents` Skill 执行直接命令 `bind-workflow-issue`，写入 managed_by、workflow_instance_id、workflow_object_type、root_requirement_id、created_by_role、workflow_version、protocol_revision 和 top_protocol_revision；随后写入 workflow_stage。不要假设当前产品仓库包含工作流仓库的 `scripts/workflow.py`。子 issue 的协议和 root_requirement_id 必须与父链一致。development_task 和 integration_validation 还必须维护 dependencies_satisfied。
 
-Plan 必须使用已附加的 `multica-delivery-policy` Skill 解析项目根目录的 `multica.delivery.json`、Git remote 和本次选择。完整策略快照、resolver_provenance、policy_digest_schema_version、policy_digest 和 snapshot_record_digest 写入 Plan；workspace_mode、task_pr_enabled、requirement_pr_enabled、delivery_policy_digest 和 plan_revision 传播到 Implementation、任务、Review、验证、批准和合并证据。没有项目配置时直接使用当前协议默认值，不迁移或推断旧项目行为。
+Plan 必须使用已附加的 `multica-delivery-policy` Skill 解析项目根目录的 `multica.delivery.json`、Git remote 和本次选择。新建或实质修订的 Plan 只冻结 `plan_revision`、带版本前缀的 `policy_digest` 和 `target_branch`；Resolver 返回的 project policy、capabilities、effective、selection_source、provenance、diagnostics 和完整 JSON 只用于当次解析与审查，不写入 Plan 正文或 metadata。使用 `verify-approved --repo <repo> --policy-digest <digest>` 恢复并验证 workspace_mode、Task PR 和 Requirement PR 选择，再把这些实际值与 delivery_policy_digest、plan_revision 传播到 Implementation、任务、Review、验证、批准和合并证据。没有项目配置时直接使用当前协议默认值，不迁移或推断旧项目行为。
 
-Plan 批准后交付配置冻结。每次 Implementation 启动、任务开始、Review、合并和最终批准前重新验证 policy_digest。真实项目策略、选定 remote、provider、语义能力或实际选择变化都必须重新打开 Plan、递增 plan_revision、重新独立 Review 并取得新的 APPROVE PLAN；不得由 Agent 自动升级、降级或原地切换模式。若 verify 仅证明跨 Resolver 版本语义等价并返回 recovery_required，由当前 Plan original owner 把 validator 返回的单键 `policy_digest_recovery_record` 原样保存到当前版本 Plan，再由独立审查员使用同一记录复验；只有 pinned_equivalent 才可继续，且所有后代仍传播原 approved policy_digest，不得覆盖摘要、跳过 Review 或取代人工批准。
+Plan 批准后交付配置冻结。每次 Implementation 启动、任务开始、Review、合并和最终批准前重新运行 `verify-approved`。设计正文发生实质变化，或 `policy_digest`/`target_branch` 改变，都必须递增 plan_revision、重新独立 Review 并取得新的 APPROVE PLAN；不得由 Agent 自动升级、降级或原地切换模式。Resolver 实现变化但 v3 digest 相同可以继续；未来 digest 前缀或 schema 不受当前 validator 支持时必须创建新 Plan，不做跨 schema 恢复。已有已批准 schema-v1/v2 Plan 不原地重写，继续用其完整 frozen snapshot 和旧 `verify --snapshot` 兼容验证；它一旦发生实质修订，就递增版本并迁移到三字段紧凑合同。
 
-所有模式都保留需求分支和任务分支。branch_only 使用现有 checkout 串行工作；lightweight 使用一个需求 worktree 串行切换任务分支；isolated 使用需求 worktree和每任务独立 worktree，可按依赖 DAG 并行。branch_only 和 lightweight 在任一时刻只能由一个 Developer、Code Reviewer 或 Integrator 持有 workspace lease。
+所有模式都保留需求分支和任务分支。branch_only 使用现有 checkout 串行工作；lightweight 使用一个需求 worktree 串行切换任务分支；isolated 使用需求 worktree和每任务独立 worktree，可按依赖 DAG 并行。`parallel_tasks` 和 workspace lease scope 必须从已验证的 workspace_mode 派生，不作为 Plan 冻结字段。branch_only 和 lightweight 在任一时刻只能由一个 Developer、Code Reviewer 或 Integrator 持有 workspace lease。
 
 进入本地或 PR Review 前记录 base_commit_sha 和 reviewed_commit_sha。Task PR 启用时还记录 pr_head_sha、PR 和 CI；未启用时直接审查两个不可变 SHA 的 Git diff。任务合并后记录 merge_method 和 merged_commit_sha。集成验证同时记录仓库 default_branch/default_base_sha、Plan 指定的 target_branch/target_base_sha 和需求 reviewed_commit_sha；target_branch 可以不是默认分支。用户仍只需在顶层 Requirement 评论 `APPROVE REQUIREMENT vN`。
 
@@ -20,9 +20,9 @@ Plan 批准后交付配置冻结。每次 Implementation 启动、任务开始�
 
 只有继续执行会危及正确性、审批完整性、安全、隐私或 Git 历史时，才使用 `--block-source`。Incident 修复必须创建普通 Requirement，并用直接命令 `link-fix` 关联；不存在 Maintenance Case 或专用维护角色。修复部署并验证后，用直接命令 `close` 记录结果。不得把凭据、Cookie、私钥、Authorization header 或原始环境变量写入 Incident。
 
-人工批准只有同时满足以下条件才有效：评论 author_type=member；author_id 精确等于 human_approver_id；评论包含当前版本的 APPROVE PLAN vN、DECISION: ... 或 APPROVE REQUIREMENT vN。最终批准还必须发布在顶层 Requirement，且该 Requirement 为 in_review、Plan/Implementation/集成验证均 done、当前 final approval gate 已打开。Squad roster role 只用于发现审批人和生成有效 mention，不是审批凭证。
+人工批准只有同时满足以下条件才有效：评论 author_type=member；author_id 精确等于 human_approver_id；评论包含当前版本的 APPROVE PLAN vN、DECISION: ... 或 APPROVE REQUIREMENT vN。Plan Review 结论与 APPROVE PLAN 以平台评论历史为权威；不得用 Plan 阶段重复的 review_comment_id、approval_comment_id、approval_author_id 或 design_digest 代替评论历史。最终批准还必须发布在顶层 Requirement，且该 Requirement 为 in_review、Plan/Implementation/集成验证均 done、当前 final approval gate 已打开。Squad roster role 只用于发现审批人和生成有效 mention，不是审批凭证。
 
-接受有效人工批准后记录 approval_author_type、approval_author_id、approval_comment_id 和 approval_revision。最终批准还必须从当前已通过集成 Review 的证据写入 approved_requirement_head_sha 和 approved_delivery_policy_digest；不得让人工手工猜测或输入 SHA。门禁打开前、子 Issue、无效或过期评论不得写入这些字段。
+接受有效人工 Plan 批准后不复制 Plan 阶段的 approval_* metadata；后续阶段每次从平台评论历史核验当前 revision 的独立 Review 与 `APPROVE PLAN vN`。接受最终 Requirement 批准时仍必须记录 approval_author_type、approval_author_id、approval_comment_id 和 approval_revision，并从当前已通过集成 Review 的证据写入 approved_requirement_head_sha 和 approved_delivery_policy_digest；不得让人工手工猜测或输入 SHA。门禁打开前、子 Issue、无效或过期评论不得写入这些最终批准字段。
 
 平台通用 Stage 评论只表示屏障事件，评论中的状态命令是非权威建议。任何 Agent 必须先按 workflow_object_type 映射状态：Plan 和 Implementation 在自身工作闭合后为 done；顶层 Requirement 只在等待最终批准时为 in_review，交付收敛后为 done。不得让通用 Stage 文案覆盖该语义，也不得把 done 的 Requirement 自动回退。
 

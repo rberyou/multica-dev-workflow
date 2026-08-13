@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from jsonschema import Draft202012Validator
 
@@ -18,6 +19,10 @@ SCHEMA_PATH = (
     ROOT
     / "skills/multica-delivery-policy/references/project-delivery.schema.json"
 )
+PLAN_SCHEMA_PATH = (
+    ROOT
+    / "skills/multica-delivery-policy/references/plan-policy.schema.json"
+)
 SPEC = importlib.util.spec_from_file_location("delivery_policy", POLICY_PATH)
 delivery_policy = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader
@@ -29,7 +34,7 @@ TARGET_BASE_SHA = "2" * 40
 DEFAULT_BASE_SHA = "3" * 40
 MERGED_SHA = "4" * 40
 TREE_SHA = "5" * 40
-POLICY_DIGEST = "6" * 64
+POLICY_DIGEST = "v3.sha256:" + "6" * 64
 
 
 def final_gate_snapshot(
@@ -230,6 +235,10 @@ def refresh_snapshot_record(snapshot: dict) -> None:
     )
 
 
+def legacy_v2_policy_snapshot(repo: Path, **selections) -> dict:
+    return delivery_policy.resolve_legacy_policy_snapshot(repo, **selections)
+
+
 class DeliveryPolicyTests(unittest.TestCase):
     def test_schema_accepts_documented_project_policy(self):
         schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
@@ -261,6 +270,78 @@ class DeliveryPolicyTests(unittest.TestCase):
             "must be true when required",
         ):
             delivery_policy.normalize_policy(invalid)
+
+    def test_compact_plan_schema_allows_only_the_three_frozen_fields(self):
+        schema = json.loads(PLAN_SCHEMA_PATH.read_text(encoding="utf-8"))
+        contract = {
+            "plan_revision": 2,
+            "policy_digest": "v3.sha256:" + "a" * 64,
+            "target_branch": "release/v2",
+        }
+        Draft202012Validator(schema).validate(contract)
+        for forbidden in (
+            "design_digest",
+            "review_comment_id",
+            "approval_comment_id",
+            "approval_author_id",
+            "resolver_provenance",
+            "policy_digest_schema_version",
+            "snapshot_record_digest",
+            "project_policy",
+            "capabilities",
+            "effective",
+            "selection_source",
+        ):
+            invalid = dict(contract)
+            invalid[forbidden] = {}
+            with self.subTest(forbidden=forbidden):
+                self.assertTrue(
+                    list(Draft202012Validator(schema).iter_errors(invalid))
+                )
+
+    def test_plan_revision_rules_invalidate_material_or_policy_contract_changes(self):
+        approved = {
+            "plan_revision": 2,
+            "policy_digest": "v3.sha256:" + "a" * 64,
+            "target_branch": "main",
+        }
+        unchanged = delivery_policy.plan_contract_requires_revision(
+            approved, dict(approved)
+        )
+        self.assertTrue(unchanged["valid"])
+        self.assertFalse(unchanged["requires_new_revision"])
+
+        for label, update, design_changed in (
+            ("design", {}, True),
+            ("policy", {"policy_digest": "v3.sha256:" + "b" * 64}, False),
+            ("target", {"target_branch": "release/v2"}, False),
+        ):
+            proposed = dict(approved)
+            proposed.update(update)
+            stale = delivery_policy.plan_contract_requires_revision(
+                approved, proposed, design_changed=design_changed
+            )
+            proposed["plan_revision"] = 3
+            current = delivery_policy.plan_contract_requires_revision(
+                approved, proposed, design_changed=design_changed
+            )
+            with self.subTest(label=label):
+                self.assertFalse(stale["valid"])
+                self.assertTrue(stale["requires_plan_review"])
+                self.assertTrue(stale["requires_plan_approval"])
+                self.assertTrue(current["valid"])
+
+    def test_resolver_only_change_with_same_digest_keeps_plan_revision(self):
+        contract = {
+            "plan_revision": 2,
+            "policy_digest": "v3.sha256:" + "a" * 64,
+            "target_branch": "main",
+        }
+        result = delivery_policy.plan_contract_requires_revision(
+            contract, dict(contract), design_changed=False
+        )
+        self.assertTrue(result["valid"])
+        self.assertFalse(result["requires_new_revision"])
 
     def test_unconfigured_github_repository_uses_new_defaults(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -395,7 +476,7 @@ class DeliveryPolicyTests(unittest.TestCase):
     def test_plan_snapshot_detects_policy_change(self):
         with tempfile.TemporaryDirectory() as temp:
             repo = create_repo(Path(temp), "https://github.com/example/project.git")
-            snapshot = delivery_policy.resolve_policy(repo)
+            snapshot = legacy_v2_policy_snapshot(repo)
             self.assertTrue(delivery_policy.verify_snapshot(repo, snapshot)["valid"])
             policy = {
                 "schema_version": 1,
@@ -413,7 +494,7 @@ class DeliveryPolicyTests(unittest.TestCase):
     def test_plan_snapshot_rejects_tampered_content(self):
         with tempfile.TemporaryDirectory() as temp:
             repo = create_repo(Path(temp), "https://github.com/example/project.git")
-            snapshot = delivery_policy.resolve_policy(repo)
+            snapshot = legacy_v2_policy_snapshot(repo)
             snapshot["effective"]["task_pr"] = True
             with self.assertRaisesRegex(
                 delivery_policy.DeliveryPolicyError,
@@ -424,7 +505,7 @@ class DeliveryPolicyTests(unittest.TestCase):
     def test_plan_snapshot_detects_remote_push_target_change(self):
         with tempfile.TemporaryDirectory() as temp:
             repo = create_repo(Path(temp), "https://github.com/example/project.git")
-            snapshot = delivery_policy.resolve_policy(repo)
+            snapshot = legacy_v2_policy_snapshot(repo)
             run_git(
                 repo,
                 "remote",
@@ -435,23 +516,164 @@ class DeliveryPolicyTests(unittest.TestCase):
             )
             self.assertFalse(delivery_policy.verify_snapshot(repo, snapshot)["valid"])
 
-    def test_versioned_policy_digest_is_stable_for_same_resolver_and_state(self):
+    def test_compact_policy_digest_is_stable_for_same_state(self):
         with tempfile.TemporaryDirectory() as temp:
             repo = create_repo(Path(temp), "https://github.com/example/project.git")
             first = delivery_policy.resolve_policy(repo)
             second = delivery_policy.resolve_policy(repo)
-            verified = delivery_policy.verify_snapshot(repo, first)
-        self.assertEqual(first["schema_version"], 2)
-        self.assertEqual(first["policy_digest_schema_version"], 2)
+            verified = delivery_policy.verify_approved_digest(
+                repo, first["policy_digest"]
+            )
+        self.assertTrue(first["policy_digest"].startswith("v3.sha256:"))
         self.assertEqual(first["policy_digest"], second["policy_digest"])
-        self.assertEqual(
-            first["resolver_provenance"], second["resolver_provenance"]
-        )
-        self.assertEqual(
-            first["snapshot_record_digest"], second["snapshot_record_digest"]
-        )
+        self.assertNotIn("resolver_provenance", first)
+        self.assertNotIn("policy_digest_schema_version", first)
+        self.assertNotIn("snapshot_record_digest", first)
         self.assertTrue(verified["valid"])
         self.assertEqual(verified["verification_outcome"], "exact_match")
+
+    def test_compact_digest_ignores_nonbinding_fields_and_derives_execution(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = create_repo(Path(temp), "https://github.com/example/project.git")
+            policy = {
+                "schema_version": 1,
+                "workflow_id": "development-delivery",
+                "remote": {"allow_direct_default_push": True},
+            }
+            (repo / "multica.delivery.json").write_text(
+                json.dumps(policy), encoding="utf-8"
+            )
+            resolved = delivery_policy.resolve_policy(
+                repo,
+                workspace_mode="isolated",
+                task_pr=True,
+                requirement_pr=False,
+            )
+            annotated = copy.deepcopy(resolved)
+            annotated["selection_source"] = {"workspace_mode": "changed"}
+            annotated["resolver_provenance"] = {"implementation": "changed"}
+            annotated["diagnostics"] = {"message": "changed"}
+            annotated["policy_source"] = "changed"
+            annotated["policy_file"] = "changed.json"
+            annotated["effective"]["parallel_tasks"] = False
+            annotated["effective"]["workspace_lease_scope"] = "changed"
+            verified = delivery_policy.verify_approved_digest(
+                repo, resolved["policy_digest"]
+            )
+            projection = delivery_policy.compact_policy_projection(resolved)
+        self.assertEqual(
+            delivery_policy.compact_policy_digest(resolved),
+            delivery_policy.compact_policy_digest(annotated),
+        )
+        self.assertNotIn(
+            "allow_direct_default_push", projection["project_policy"]["remote"]
+        )
+        self.assertTrue(
+            projection["project_policy"]["remote"]["allow_direct_target_push"]
+        )
+        self.assertNotIn("direct_default_push", projection["selected_remote"])
+        self.assertTrue(verified["valid"])
+        self.assertEqual(verified["workspace_mode"], "isolated")
+        self.assertTrue(verified["task_pr_enabled"])
+        self.assertFalse(verified["requirement_pr_enabled"])
+        self.assertTrue(verified["parallel_tasks"])
+        self.assertEqual(verified["workspace_lease_scope"], "task")
+
+    def test_verify_approved_recovers_non_default_selection_uniquely(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = create_repo(Path(temp), "https://github.com/example/project.git")
+            policy = {
+                "schema_version": 1,
+                "workflow_id": "development-delivery",
+                "remote": {"allow_direct_default_push": True},
+            }
+            (repo / "multica.delivery.json").write_text(
+                json.dumps(policy), encoding="utf-8"
+            )
+            approved = delivery_policy.resolve_policy(
+                repo,
+                workspace_mode="branch_only",
+                task_pr=True,
+                requirement_pr=False,
+            )
+            verified = delivery_policy.verify_approved_digest(
+                repo, approved["policy_digest"]
+            )
+        self.assertTrue(verified["valid"])
+        self.assertEqual(verified["workspace_mode"], "branch_only")
+        self.assertTrue(verified["task_pr_enabled"])
+        self.assertFalse(verified["requirement_pr_enabled"])
+        self.assertFalse(verified["parallel_tasks"])
+        self.assertEqual(verified["workspace_lease_scope"], "repository")
+
+    def test_verify_approved_detects_drift_and_rejects_legacy_or_future_digest(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = create_repo(Path(temp), "https://github.com/example/project.git")
+            approved = delivery_policy.resolve_policy(repo)
+            run_git(
+                repo,
+                "remote",
+                "set-url",
+                "--push",
+                "origin",
+                "git@github.com:example/other.git",
+            )
+            drifted = delivery_policy.verify_approved_digest(
+                repo, approved["policy_digest"]
+            )
+            self.assertFalse(drifted["valid"])
+            self.assertTrue(drifted["requires_plan_revision"])
+            with self.assertRaisesRegex(
+                delivery_policy.DeliveryPolicyError,
+                "legacy policy digests require verify --snapshot",
+            ):
+                delivery_policy.verify_approved_digest(repo, "a" * 64)
+            with self.assertRaisesRegex(
+                delivery_policy.DeliveryPolicyError,
+                "unsupported schema",
+            ):
+                delivery_policy.verify_approved_digest(
+                    repo, "v4.sha256:" + "a" * 64
+                )
+
+    def test_verify_approved_rejects_an_ambiguous_digest_match(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = create_repo(Path(temp), "https://github.com/example/project.git")
+            collided = "v3.sha256:" + "a" * 64
+            with mock.patch.object(
+                delivery_policy, "compact_policy_digest", return_value=collided
+            ):
+                with self.assertRaisesRegex(
+                    delivery_policy.DeliveryPolicyError,
+                    "matches multiple effective selections",
+                ):
+                    delivery_policy.verify_approved_digest(repo, collided)
+
+    def test_verify_approved_cli_reports_non_default_selection(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = create_repo(Path(temp), "https://github.com/example/project.git")
+            approved = delivery_policy.resolve_policy(
+                repo, workspace_mode="isolated", task_pr=True
+            )
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(POLICY_PATH),
+                    "verify-approved",
+                    "--repo",
+                    str(repo),
+                    "--policy-digest",
+                    approved["policy_digest"],
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+        self.assertEqual(completed.returncode, 0)
+        result = json.loads(completed.stdout)
+        self.assertEqual(result["workspace_mode"], "isolated")
+        self.assertTrue(result["task_pr_enabled"])
 
     def test_direct_target_alias_upgrade_requires_audited_digest_supersession(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -465,7 +687,7 @@ class DeliveryPolicyTests(unittest.TestCase):
             (repo / "multica.delivery.json").write_text(
                 json.dumps(policy), encoding="utf-8"
             )
-            current = delivery_policy.resolve_policy(repo)
+            current = legacy_v2_policy_snapshot(repo)
             frozen = legacy_policy_snapshot(current)
             legacy_current_digest = delivery_policy.legacy_policy_digest(current)
 
@@ -506,7 +728,7 @@ class DeliveryPolicyTests(unittest.TestCase):
     def test_digest_schema_rollback_uses_the_same_explicit_pinning_contract(self):
         with tempfile.TemporaryDirectory() as temp:
             repo = create_repo(Path(temp), "https://github.com/example/project.git")
-            current = delivery_policy.resolve_policy(repo)
+            current = legacy_v2_policy_snapshot(repo)
             rolled_back = legacy_policy_snapshot(current)
         proposed = delivery_policy.verify_resolved_snapshots(current, rolled_back)
         self.assertFalse(proposed["valid"])
@@ -534,7 +756,7 @@ class DeliveryPolicyTests(unittest.TestCase):
             (repo / "multica.delivery.json").write_text(
                 json.dumps(policy), encoding="utf-8"
             )
-            current = delivery_policy.resolve_policy(repo)
+            current = legacy_v2_policy_snapshot(repo)
             frozen = legacy_policy_snapshot(current)
             frozen["capabilities"]["direct_target_push"] = frozen[
                 "capabilities"
@@ -553,7 +775,7 @@ class DeliveryPolicyTests(unittest.TestCase):
     def test_nonsemantic_resolver_fields_do_not_drift_policy_digest(self):
         with tempfile.TemporaryDirectory() as temp:
             repo = create_repo(Path(temp), "https://github.com/example/project.git")
-            frozen = delivery_policy.resolve_policy(repo)
+            frozen = legacy_v2_policy_snapshot(repo)
         annotated = copy.deepcopy(frozen)
         annotated["capabilities"]["resolver_annotation"] = {
             "diagnostic": "new output field"
@@ -568,8 +790,8 @@ class DeliveryPolicyTests(unittest.TestCase):
     def test_real_selection_and_project_policy_changes_require_new_plan(self):
         with tempfile.TemporaryDirectory() as temp:
             repo = create_repo(Path(temp), "https://github.com/example/project.git")
-            frozen = delivery_policy.resolve_policy(repo)
-            changed_selection = delivery_policy.resolve_policy(
+            frozen = legacy_v2_policy_snapshot(repo)
+            changed_selection = legacy_v2_policy_snapshot(
                 repo, workspace_mode="isolated"
             )
             selection_result = delivery_policy.verify_resolved_snapshots(
@@ -595,7 +817,7 @@ class DeliveryPolicyTests(unittest.TestCase):
     def test_remote_change_cannot_use_digest_recovery(self):
         with tempfile.TemporaryDirectory() as temp:
             repo = create_repo(Path(temp), "https://github.com/example/project.git")
-            frozen = delivery_policy.resolve_policy(repo)
+            frozen = legacy_v2_policy_snapshot(repo)
             run_git(
                 repo,
                 "remote",
@@ -613,7 +835,7 @@ class DeliveryPolicyTests(unittest.TestCase):
     def test_recovery_record_is_bound_to_the_frozen_snapshot(self):
         with tempfile.TemporaryDirectory() as temp:
             repo = create_repo(Path(temp), "https://github.com/example/project.git")
-            current = delivery_policy.resolve_policy(repo)
+            current = legacy_v2_policy_snapshot(repo)
             frozen = legacy_policy_snapshot(current)
             proposed = delivery_policy.verify_snapshot(repo, frozen)
             record = delivery_policy.decode_metadata_record(
@@ -632,7 +854,7 @@ class DeliveryPolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             repo = create_repo(root, "https://github.com/example/project.git")
-            current = delivery_policy.resolve_policy(repo)
+            current = legacy_v2_policy_snapshot(repo)
             frozen = legacy_policy_snapshot(current)
             snapshot_file = root / "snapshot.json"
             recovery_file = root / "recovery.json"
@@ -751,7 +973,6 @@ class DeliveryPolicyTests(unittest.TestCase):
             approved["metadata_updates"]["approved_delivery_policy_digest"],
             POLICY_DIGEST,
         )
-
         snapshot = apply_transition(snapshot, approved)
         snapshot["actor_role"] = "leader"
         repeated_open = delivery_policy.final_gate_transition(snapshot, "open")
@@ -768,6 +989,13 @@ class DeliveryPolicyTests(unittest.TestCase):
         rejected = delivery_policy.final_gate_transition(invalid, "approve")
         self.assertFalse(rejected["allowed"])
         self.assertEqual(rejected["metadata_updates"], {})
+
+    def test_final_gate_retains_legacy_policy_digest_compatibility(self):
+        snapshot = final_gate_snapshot()
+        snapshot["root"]["delivery_policy_digest"] = "6" * 64
+        snapshot["delivery"]["delivery_policy_digest"] = "6" * 64
+        opened = delivery_policy.final_gate_transition(snapshot, "open")
+        self.assertTrue(opened["allowed"])
 
     def test_delivery_modes_and_non_default_target_branch_converge(self):
         for mode in delivery_policy.DELIVERY_MODES:
