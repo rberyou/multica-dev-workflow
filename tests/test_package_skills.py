@@ -42,8 +42,6 @@ class PackageSkillsTests(unittest.TestCase):
                         self.assertIn("references/project-delivery.schema.json", names)
                         self.assertIn("references/plan-policy.schema.json", names)
                         self.assertIn("references/plan-policy.example.json", names)
-                        self.assertIn("references/lease-transition.schema.json", names)
-                        self.assertIn("references/lease-transition.example.json", names)
                         self.assertIn("references/lease-transition-contract.md", names)
                         self.assertIn("references/resolver-contract.md", names)
                         self.assertIn("references/evidence-contract.md", names)

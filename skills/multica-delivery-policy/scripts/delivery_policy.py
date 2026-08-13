@@ -25,9 +25,26 @@ WORKSPACE_MODES = ("branch_only", "lightweight", "isolated")
 PR_CONSTRAINTS = ("optional", "required", "forbidden")
 PROVIDERS = ("auto", "github", "none")
 FINAL_ACTIONS = ("open", "approve", "delivery", "handoff", "converge")
-LEASE_TRANSITION_ACTIONS = ("acquire-preflight", "normalize-legacy-terminal")
-LEGACY_LEASE_ROLES = ("developer", "reviewer", "integrator")
+LEASE_TRANSITION_ACTIONS = ("acquire-preflight",)
 LEASE_STATES = ("held", "released")
+LEGACY_TERMINAL_LEASE_STATES = (
+    "developer",
+    "reviewer",
+    "integrator",
+    "held_by_integrator",
+    "released",
+)
+LEASE_TUPLE_FIELDS = (
+    "workspace_lease_state",
+    "workspace_lease_owner_issue_id",
+    "workspace_lease_owner_agent_id",
+)
+LEASE_INVENTORY_SELECTION_RULE = "protocol-v4-terminal-authority-mirror-v1"
+CANONICAL_RELEASED_LEASE = {
+    "workspace_lease_state": "released",
+    "workspace_lease_owner_issue_id": "",
+    "workspace_lease_owner_agent_id": "",
+}
 DELIVERY_MODES = ("requirement_pr", "direct_push", "local_only")
 HANDOFF_OUTCOMES = ("queued", "coalesced", "deferred")
 METADATA_RECORD_PREFIX = "v1."
@@ -36,18 +53,6 @@ REMOTE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 FULL_SHA_RE = re.compile(r"^[0-9a-fA-F]{40,64}$")
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 COMPACT_POLICY_DIGEST_RE = re.compile(r"^v3\.sha256:[0-9a-f]{64}$")
-LEASE_TUPLE_FIELDS = (
-    "workspace_lease_state",
-    "workspace_lease_owner_issue_id",
-    "workspace_lease_owner_agent_id",
-)
-LEASE_TRANSITION_RECORD_KEY = "workspace_lease_transition_record"
-LEASE_INVENTORY_SELECTION_RULE = "protocol-v4-terminal-authority-mirror-v1"
-CANONICAL_RELEASED_LEASE = {
-    "workspace_lease_state": "released",
-    "workspace_lease_owner_issue_id": "",
-    "workspace_lease_owner_agent_id": "",
-}
 
 DEFAULT_POLICY: dict[str, Any] = {
     "schema_version": 1,
@@ -2072,79 +2077,20 @@ def _lease_endpoint_projection(value: dict[str, Any]) -> dict[str, Any]:
     return {
         "issue_id": value.get("issue_id"),
         "endpoint_role": value.get("endpoint_role"),
+        "workflow_object_type": value.get("workflow_object_type"),
+        "workflow_stage": value.get("workflow_stage"),
+        "final_integration_validation": value.get("final_integration_validation"),
         "status": value.get("status"),
         "root_requirement_id": value.get("root_requirement_id"),
         "workflow_instance_id": value.get("workflow_instance_id"),
         "workspace_lease_scope": value.get("workspace_lease_scope"),
         **_lease_tuple(value),
-        LEASE_TRANSITION_RECORD_KEY: value.get(LEASE_TRANSITION_RECORD_KEY),
-        "metadata_total_bytes": value.get("metadata_total_bytes"),
-        "metadata_byte_limit": value.get("metadata_byte_limit"),
-        "metadata_scalar_byte_limit": value.get("metadata_scalar_byte_limit"),
     }
 
 
 def _add_blocker(reasons: list[str], condition: bool, code: str) -> None:
     if not condition and code not in reasons:
         reasons.append(code)
-
-
-def _decode_lease_transition(value: Any) -> dict[str, Any] | None:
-    if value is None:
-        return None
-    try:
-        record = decode_metadata_record(value, LEASE_TRANSITION_RECORD_KEY)
-    except DeliveryPolicyError:
-        return {"invalid": True}
-    if (
-        record.get("record_type") != "workspace_lease_transition"
-        or record.get("action") != "normalize_legacy_terminal"
-        or record.get("stage") not in {"prepared", "complete"}
-    ):
-        return {"invalid": True}
-    return record
-
-
-def _legacy_family(
-    before: dict[str, Any], holder: dict[str, Any]
-) -> tuple[str | None, list[str]]:
-    state = before.get("workspace_lease_state")
-    owner_issue = before.get("workspace_lease_owner_issue_id")
-    owner_agent = before.get("workspace_lease_owner_agent_id")
-    if state == "held":
-        return None, ["held_lease_not_terminal"]
-    if state not in {*LEGACY_LEASE_ROLES, "released"}:
-        return None, ["unknown_lease_state"]
-    reasons: list[str] = []
-    if not isinstance(owner_issue, str) or not owner_issue:
-        reasons.append("legacy_owner_missing")
-    if not isinstance(owner_agent, str) or not owner_agent:
-        reasons.append("legacy_owner_missing")
-    if reasons:
-        return None, sorted(set(reasons))
-    consistent = (
-        holder.get("issue_id") == owner_issue
-        and holder.get("agent_id") == owner_agent
-        and holder.get("agent_role") in LEGACY_LEASE_ROLES
-    )
-    if state in LEGACY_LEASE_ROLES:
-        consistent = consistent and holder.get("agent_role") == state
-        family = "role_state"
-    else:
-        family = "released_with_owner"
-    if not consistent:
-        reasons.append("legacy_owner_inconsistent")
-    if holder.get("status") != "done" or holder.get("active") is not False:
-        reasons.append("active_legacy_lease")
-    return family, sorted(set(reasons))
-
-
-def _group_safety_projection(group: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "root": group.get("root"),
-        "git": group.get("git"),
-        "historical_holder": group.get("historical_holder"),
-    }
 
 
 def _group_sort_key(group: dict[str, Any]) -> tuple[str, str, str]:
@@ -2233,7 +2179,8 @@ def _plan_and_terminal_reasons(group: dict[str, Any]) -> list[str]:
     )
     _add_blocker(
         reasons,
-        git_state.get("clean") is True
+        git_state.get("exists") is True
+        and git_state.get("clean") is True
         and git_state.get("unfinished_operations") == []
         and git_state.get("branch") == git_state.get("expected_branch")
         and _is_sha(git_state.get("head_sha"))
@@ -2246,173 +2193,75 @@ def _plan_and_terminal_reasons(group: dict[str, Any]) -> list[str]:
     return reasons
 
 
-def _record_bytes(value: str) -> int:
-    return len(value.encode("utf-8"))
+def _classify_terminal_lease_group(
+    authority: dict[str, Any],
+    mirror: dict[str, Any],
+    holder: dict[str, Any],
+) -> tuple[str, tuple[str, str] | None, list[str]]:
+    endpoints = (authority, mirror)
+    tuples = [_lease_tuple(endpoint) for endpoint in endpoints]
+    if all(value == CANONICAL_RELEASED_LEASE for value in tuples):
+        return "canonical", None, []
 
-
-def _projected_metadata_bytes(endpoint: dict[str, Any], record: str) -> int | None:
-    current = endpoint.get("metadata_total_bytes")
-    limit = endpoint.get("metadata_byte_limit")
-    if not isinstance(current, int) or isinstance(current, bool) or current < 0:
-        return None
-    if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
-        return None
-    old = endpoint.get(LEASE_TRANSITION_RECORD_KEY)
-    old_bytes = 0
-    if isinstance(old, str):
-        old_bytes = _record_bytes(canonical_json({LEASE_TRANSITION_RECORD_KEY: old})) - 2
-    new_bytes = _record_bytes(canonical_json({LEASE_TRANSITION_RECORD_KEY: record})) - 2
-    separator_delta = 1 if old is None and current > 2 else 0
-    return current - old_bytes + new_bytes + separator_delta
-
-
-def _group_before_and_stage(
-    group: dict[str, Any], reasons: list[str]
-) -> dict[str, Any]:
-    authority = group.get("authority") if isinstance(group.get("authority"), dict) else {}
-    mirror = group.get("mirror") if isinstance(group.get("mirror"), dict) else {}
-    holder = (
-        group.get("historical_holder")
-        if isinstance(group.get("historical_holder"), dict)
-        else {}
-    )
-    authority_record = _decode_lease_transition(authority.get(LEASE_TRANSITION_RECORD_KEY))
-    mirror_record = _decode_lease_transition(mirror.get(LEASE_TRANSITION_RECORD_KEY))
-    if (authority_record and authority_record.get("invalid")) or (
-        mirror_record and mirror_record.get("invalid")
-    ):
-        reasons.append("transition_checkpoint_conflict")
-    source_record = authority_record or mirror_record
-    before: dict[str, Any] | None = None
-    family: str | None = None
-    if source_record and not source_record.get("invalid"):
-        candidate = source_record.get("before")
-        if isinstance(candidate, dict) and set(candidate) == set(LEASE_TUPLE_FIELDS):
-            before = candidate
-            family = source_record.get("legacy_family")
-        else:
-            reasons.append("transition_checkpoint_conflict")
-    elif _lease_tuple(authority) == _lease_tuple(mirror):
-        candidate = _lease_tuple(authority)
-        if candidate != CANONICAL_RELEASED_LEASE:
-            before = candidate
-    else:
-        reasons.append("legacy_tuple_mismatch")
-    if before is not None:
-        classified, family_reasons = _legacy_family(before, holder)
-        reasons.extend(family_reasons)
-        if family is None:
-            family = classified
-        elif family != classified:
-            reasons.append("transition_checkpoint_conflict")
-    auth_tuple = _lease_tuple(authority)
-    mirror_tuple = _lease_tuple(mirror)
-    auth_raw = authority.get(LEASE_TRANSITION_RECORD_KEY)
-    mirror_raw = mirror.get(LEASE_TRANSITION_RECORD_KEY)
-    return {
-        "before": before,
-        "legacy_family": family,
-        "authority_record": authority_record,
-        "mirror_record": mirror_record,
-        "source_record": source_record,
-        "auth_tuple": auth_tuple,
-        "mirror_tuple": mirror_tuple,
-        "auth_raw": auth_raw,
-        "mirror_raw": mirror_raw,
-    }
-
-
-def _migration_set_projection(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    result: list[dict[str, Any]] = []
-    for item in groups:
-        before = item["state"]["before"]
-        if before is None:
+    reasons: list[str] = []
+    owner_pairs: list[tuple[str, str]] = []
+    legacy_states: list[str] = []
+    for value in tuples:
+        if value == CANONICAL_RELEASED_LEASE:
             continue
-        group = item["group"]
-        root = group["root"]
-        result.append(
-            {
-                "root_requirement_id": root.get("issue_id"),
-                "workflow_instance_id": root.get("workflow_instance_id"),
-                "workspace_mode": root.get("workspace_mode"),
-                "authority_issue_id": group["authority"].get("issue_id"),
-                "mirror_issue_id": group["mirror"].get("issue_id"),
-                "legacy_family": item["state"]["legacy_family"],
-                "before_digest": digest(before),
-                "safety_digest": digest(_group_safety_projection(group)),
-            }
+        state = value.get("workspace_lease_state")
+        owner_issue = value.get("workspace_lease_owner_issue_id")
+        owner_agent = value.get("workspace_lease_owner_agent_id")
+        if state == "held":
+            reasons.append("held_lease_not_terminal")
+            continue
+        if state not in LEGACY_TERMINAL_LEASE_STATES:
+            reasons.append("unknown_lease_state")
+            continue
+        if not isinstance(owner_issue, str) or not owner_issue:
+            reasons.append("legacy_owner_missing")
+        if not isinstance(owner_agent, str) or not owner_agent:
+            reasons.append("legacy_owner_missing")
+        if isinstance(owner_issue, str) and owner_issue and isinstance(owner_agent, str) and owner_agent:
+            owner_pairs.append((owner_issue, owner_agent))
+        legacy_states.append(str(state))
+    if owner_pairs and len(set(owner_pairs)) != 1:
+        reasons.append("legacy_owner_inconsistent")
+    owner_pair = owner_pairs[0] if owner_pairs and len(set(owner_pairs)) == 1 else None
+    if owner_pair is not None:
+        _add_blocker(
+            reasons,
+            holder.get("issue_id") == owner_pair[0]
+            and holder.get("agent_id") == owner_pair[1],
+            "legacy_owner_inconsistent",
         )
-    return sorted(result, key=lambda value: (str(value["root_requirement_id"]), str(value["authority_issue_id"])))
-
-
-def _restore_group_baseline(
-    inventory: list[dict[str, Any]],
-    group: dict[str, Any],
-    before: dict[str, Any],
-    baseline_metadata_bytes: dict[str, Any] | None = None,
-) -> str:
-    restored = json.loads(canonical_json(inventory))
-    target_ids = {group["authority"].get("issue_id"), group["mirror"].get("issue_id")}
-    for entry in restored:
-        if entry.get("issue_id") in target_ids:
-            entry.update(before)
-            entry[LEASE_TRANSITION_RECORD_KEY] = None
-            if baseline_metadata_bytes is not None:
-                role = (
-                    "authority"
-                    if entry.get("issue_id") == group["authority"].get("issue_id")
-                    else "mirror"
-                )
-                entry["metadata_total_bytes"] = baseline_metadata_bytes.get(role)
-    return digest(restored)
-
-
-def _lease_result(
-    *,
-    valid: bool,
-    action: str,
-    outcome: str,
-    reasons: list[str],
-    snapshot_read_id: Any,
-    inventory_digest: str | None,
-    group_summaries: list[dict[str, Any]],
-    resume_stage: str,
-    selected_group: dict[str, Any] | None = None,
-    transition_record: str | None = None,
-    ordered_writes: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    result = {
-        "valid": valid,
-        "action": action,
-        "outcome": outcome,
-        "blocker_reasons": sorted(set(reasons)),
-        "snapshot_read_id": snapshot_read_id,
-        "inventory_selection_rule": LEASE_INVENTORY_SELECTION_RULE,
-        "inventory_digest": inventory_digest,
-        "groups": group_summaries,
-        "selected_group": selected_group,
-        "after": dict(CANONICAL_RELEASED_LEASE),
-        "after_digest": digest(CANONICAL_RELEASED_LEASE),
-        "resume_stage": resume_stage,
-        "transition_record": transition_record,
-        "transition_record_bytes": _record_bytes(transition_record) if transition_record else 0,
-        "ordered_writes": ordered_writes or [],
-        "status_writes": [],
-        "acquisition_allowed": outcome == "acquisition_allowed",
-    }
-    if outcome == "recovery_required":
-        result["recovery"] = {
-            "command": (
-                "delivery_policy.py lease-transition --action "
-                "normalize-legacy-terminal --snapshot <fresh-full-inventory.json>"
-            ),
-            "requires_complete_inventory": True,
-            "pending_group_count": sum(
-                item["state"] not in {"canonical", "complete"}
-                for item in group_summaries
-            ),
-        }
-    return result
+    _add_blocker(
+        reasons,
+        holder.get("status") == "done" and holder.get("active") is False,
+        "active_legacy_lease",
+    )
+    holder_role = holder.get("agent_role")
+    _add_blocker(
+        reasons,
+        holder_role in {"developer", "reviewer", "integrator"},
+        "legacy_owner_inconsistent",
+    )
+    if "held_by_integrator" in legacy_states:
+        _add_blocker(
+            reasons,
+            holder_role == "integrator",
+            "legacy_owner_inconsistent",
+        )
+    for state in legacy_states:
+        if state in {"developer", "reviewer", "integrator"}:
+            _add_blocker(
+                reasons,
+                holder_role == state,
+                "legacy_owner_inconsistent",
+            )
+    if reasons:
+        return "blocked", owner_pair, sorted(set(reasons))
+    return "retired_terminal_compatible", owner_pair, []
 
 
 def lease_transition(snapshot: Any, action: str) -> dict[str, Any]:
@@ -2420,12 +2269,18 @@ def lease_transition(snapshot: Any, action: str) -> dict[str, Any]:
         raise DeliveryPolicyError(f"unsupported lease transition action: {action}")
     data = _require_object(snapshot, "lease transition snapshot")
     reasons: list[str] = []
-    _add_blocker(reasons, data.get("schema_version") == 2, "unsupported_snapshot_schema")
+    _add_blocker(reasons, data.get("schema_version") == 1, "unsupported_snapshot_schema")
     snapshot_read_id = data.get("snapshot_read_id")
     _add_blocker(
         reasons,
         isinstance(snapshot_read_id, str) and bool(snapshot_read_id),
         "snapshot_read_id_missing",
+    )
+    workflow_instance_id = data.get("workflow_instance_id")
+    _add_blocker(
+        reasons,
+        isinstance(workflow_instance_id, str) and bool(workflow_instance_id),
+        "workflow_instance_mismatch",
     )
     _add_blocker(
         reasons,
@@ -2435,6 +2290,7 @@ def lease_transition(snapshot: Any, action: str) -> dict[str, Any]:
     _add_blocker(
         reasons, data.get("inventory_complete") is True, "incomplete_lease_inventory"
     )
+
     root_ids = data.get("requirement_root_ids")
     if not isinstance(root_ids, list) or not root_ids or any(
         not isinstance(item, str) or not item for item in root_ids
@@ -2449,7 +2305,34 @@ def lease_transition(snapshot: Any, action: str) -> dict[str, Any]:
         or sorted(discovered_root_ids) != sorted(root_ids)
     ):
         reasons.append("incomplete_lease_inventory")
-    groups_raw = data.get("migration_groups")
+    discovered_roots = data.get("discovered_requirement_inventory")
+    derived_root_ids: list[str] = []
+    if not isinstance(discovered_roots, list):
+        reasons.append("incomplete_lease_inventory")
+    else:
+        for item in discovered_roots:
+            if not isinstance(item, dict):
+                reasons.append("incomplete_lease_inventory")
+                continue
+            issue_id = item.get("issue_id")
+            if (
+                item.get("workflow_object_type") != "requirement"
+                or item.get("status") != "done"
+                or not isinstance(issue_id, str)
+                or not issue_id
+                or item.get("workflow_instance_id") != workflow_instance_id
+            ):
+                reasons.append("incomplete_lease_inventory")
+                continue
+            derived_root_ids.append(issue_id)
+        if (
+            len(set(derived_root_ids)) != len(derived_root_ids)
+            or sorted(derived_root_ids) != sorted(root_ids)
+            or sorted(derived_root_ids) != sorted(discovered_root_ids or [])
+        ):
+            reasons.append("incomplete_lease_inventory")
+
+    groups_raw = data.get("terminal_groups")
     if not isinstance(groups_raw, list) or not groups_raw:
         reasons.append("incomplete_lease_inventory")
         groups_raw = []
@@ -2458,6 +2341,7 @@ def lease_transition(snapshot: Any, action: str) -> dict[str, Any]:
     )
     if len(groups) != len(groups_raw):
         reasons.append("incomplete_lease_inventory")
+
     inventory, inventory_reasons = _inventory_projection(data.get("endpoint_inventory"))
     reasons.extend(inventory_reasons)
     inventory_digest = digest(inventory) if inventory else None
@@ -2471,32 +2355,49 @@ def lease_transition(snapshot: Any, action: str) -> dict[str, Any]:
             reasons.append("incomplete_lease_inventory")
             continue
         endpoint_role = item.get("endpoint_role")
-        if endpoint_role in {
-            "implementation_authority",
-            "final_integration_validation_mirror",
-        }:
+        derived_role: str | None = None
+        if (
+            item.get("workflow_object_type") == "implementation"
+            and item.get("workflow_stage") == "implementation"
+        ):
+            derived_role = "implementation_authority"
+        elif (
+            item.get("workflow_object_type") == "integration_validation"
+            and item.get("workflow_stage") == "integration_validation"
+            and item.get("final_integration_validation") is True
+        ):
+            derived_role = "final_integration_validation_mirror"
+        if derived_role is not None and endpoint_role == derived_role:
             discovered_selected.append(_lease_endpoint_projection(item))
-        elif endpoint_role not in {None, ""}:
+        elif endpoint_role not in {None, ""} or derived_role is not None:
             reasons.append("unknown_lease_authority_role")
     discovered_selected.sort(key=lambda item: str(item.get("issue_id")))
     if discovered_selected != inventory:
         reasons.append("incomplete_lease_inventory")
+
     current_claims = data.get("current_claims")
+    _add_blocker(
+        reasons,
+        data.get("current_claims_complete") is True,
+        "incomplete_lease_inventory",
+    )
     if not isinstance(current_claims, list):
         reasons.append("incomplete_lease_inventory")
         current_claims = []
     elif current_claims:
         reasons.append("competing_lease_claim")
-    expected_group_roots = [
+
+    group_root_ids = [
         str(group.get("root", {}).get("issue_id", "")) for group in groups
     ]
-    if sorted(root_ids) != sorted(expected_group_roots):
+    if sorted(root_ids) != sorted(group_root_ids):
         reasons.append("incomplete_lease_inventory")
 
     inventory_by_root: dict[str, list[dict[str, Any]]] = {}
     for endpoint in inventory:
         inventory_by_root.setdefault(str(endpoint.get("root_requirement_id")), []).append(endpoint)
-    evaluated: list[dict[str, Any]] = []
+
+    summaries: list[dict[str, Any]] = []
     for group in groups:
         group_reasons = _plan_and_terminal_reasons(group)
         root = group.get("root") if isinstance(group.get("root"), dict) else {}
@@ -2506,21 +2407,34 @@ def lease_transition(snapshot: Any, action: str) -> dict[str, Any]:
         root_id = root.get("issue_id")
         workflow_instance = root.get("workflow_instance_id")
         workspace_mode = root.get("workspace_mode")
-        _add_blocker(group_reasons, workspace_mode in WORKSPACE_MODES, "workspace_mode_invalid")
-        if workspace_mode == "isolated":
-            group_reasons.append("isolated_mode_not_eligible")
-        expected_scope = workspace_lease_scope(workspace_mode) if workspace_mode in WORKSPACE_MODES else None
+        _add_blocker(
+            group_reasons,
+            workspace_mode in {"branch_only", "lightweight"},
+            "workspace_mode_not_eligible",
+        )
+        expected_scope = (
+            workspace_lease_scope(workspace_mode)
+            if workspace_mode in WORKSPACE_MODES
+            else None
+        )
         _add_blocker(group_reasons, authority.get("status") == "done", "authority_not_done")
         _add_blocker(group_reasons, mirror.get("status") == "done", "mirror_not_done")
         _add_blocker(
             group_reasons,
             authority.get("endpoint_role") == "implementation_authority"
-            and mirror.get("endpoint_role") == "final_integration_validation_mirror",
+            and authority.get("workflow_object_type") == "implementation"
+            and authority.get("workflow_stage") == "implementation"
+            and mirror.get("endpoint_role") == "final_integration_validation_mirror"
+            and mirror.get("workflow_object_type") == "integration_validation"
+            and mirror.get("workflow_stage") == "integration_validation"
+            and mirror.get("final_integration_validation") is True,
             "incomplete_lease_inventory",
         )
         _add_blocker(
             group_reasons,
-            isinstance(root_id, str)
+            root.get("workflow_object_type") == "requirement"
+            and root.get("workflow_instance_id") == workflow_instance_id
+            and isinstance(root_id, str)
             and bool(root_id)
             and authority.get("root_requirement_id") == root_id
             and mirror.get("root_requirement_id") == root_id,
@@ -2530,6 +2444,7 @@ def lease_transition(snapshot: Any, action: str) -> dict[str, Any]:
             group_reasons,
             isinstance(workflow_instance, str)
             and bool(workflow_instance)
+            and workflow_instance == workflow_instance_id
             and authority.get("workflow_instance_id") == workflow_instance
             and mirror.get("workflow_instance_id") == workflow_instance,
             "workflow_instance_mismatch",
@@ -2541,361 +2456,70 @@ def lease_transition(snapshot: Any, action: str) -> dict[str, Any]:
             and mirror.get("workspace_lease_scope") == expected_scope,
             "lease_scope_mismatch",
         )
-        domain_endpoints = inventory_by_root.get(str(root_id), [])
         expected_inventory = sorted(
             [_lease_endpoint_projection(authority), _lease_endpoint_projection(mirror)],
             key=lambda item: str(item.get("issue_id")),
         )
         _add_blocker(
             group_reasons,
-            domain_endpoints == expected_inventory
-            and [item.get("endpoint_role") for item in domain_endpoints]
-            == [
-                item.get("endpoint_role")
-                for item in expected_inventory
-            ],
+            inventory_by_root.get(str(root_id), []) == expected_inventory,
             "incomplete_lease_inventory",
         )
-        for endpoint in (authority, mirror):
-            _add_blocker(
-                group_reasons,
-                isinstance(endpoint.get("metadata_total_bytes"), int)
-                and not isinstance(endpoint.get("metadata_total_bytes"), bool)
-                and endpoint.get("metadata_total_bytes") >= 0
-                and isinstance(endpoint.get("metadata_byte_limit"), int)
-                and not isinstance(endpoint.get("metadata_byte_limit"), bool)
-                and endpoint.get("metadata_byte_limit") > 0
-                and endpoint.get("metadata_total_bytes") <= endpoint.get("metadata_byte_limit")
-                and isinstance(endpoint.get("metadata_scalar_byte_limit"), int)
-                and not isinstance(endpoint.get("metadata_scalar_byte_limit"), bool)
-                and endpoint.get("metadata_scalar_byte_limit") > 0,
-                "metadata_byte_capacity_unknown",
-            )
-        state = _group_before_and_stage(group, group_reasons)
-        if state["before"] is not None or state["source_record"] is not None:
+        group_state, owner_pair, tuple_reasons = _classify_terminal_lease_group(
+            authority, mirror, holder
+        )
+        group_reasons.extend(tuple_reasons)
+        if group_state != "canonical":
             _add_blocker(
                 group_reasons,
                 holder.get("root_requirement_id") == root_id,
-                "legacy_owner_inconsistent",
+                "root_identity_mismatch",
             )
             _add_blocker(
                 group_reasons,
                 holder.get("workflow_instance_id") == workflow_instance,
                 "workflow_instance_mismatch",
             )
-        evaluated.append(
-            {"group": group, "state": state, "reasons": sorted(set(group_reasons))}
-        )
-
-    migration_projection = _migration_set_projection(evaluated)
-    migration_set_digest = digest(migration_projection)
-    for item in evaluated:
-        group = item["group"]
-        state = item["state"]
-        before = state["before"]
-        authority = group["authority"]
-        mirror = group["mirror"]
-        source_record = state["source_record"]
-        prepared_record = None
-        complete_record = None
-        baseline_digest = None
-        if before is not None and state["legacy_family"] is not None and inventory:
-            baseline_digest = (
-                source_record.get("prepared_inventory_digest")
-                if source_record and not source_record.get("invalid")
-                else _restore_group_baseline(inventory, group, before)
-            )
-            baseline_metadata_bytes = (
-                source_record.get("baseline_metadata_bytes")
-                if source_record and not source_record.get("invalid")
-                else {
-                    "authority": authority.get("metadata_total_bytes"),
-                    "mirror": mirror.get("metadata_total_bytes"),
+        if group_reasons:
+            group_state = "blocked"
+        summary = {
+            "root_requirement_id": root_id,
+            "authority_issue_id": authority.get("issue_id"),
+            "mirror_issue_id": mirror.get("issue_id"),
+            "state": group_state,
+            "lease_tuple_digest": digest(
+                {
+                    "authority": _lease_tuple(authority),
+                    "mirror": _lease_tuple(mirror),
                 }
-            )
-            payload = {
-                "schema_version": 1,
-                "record_type": "workspace_lease_transition",
-                "action": "normalize_legacy_terminal",
-                "stage": "prepared",
-                "root_requirement_id": group["root"].get("issue_id"),
-                "workflow_instance_id": group["root"].get("workflow_instance_id"),
-                "authority_issue_id": authority.get("issue_id"),
-                "mirror_issue_id": mirror.get("issue_id"),
-                "legacy_family": state["legacy_family"],
-                "before": before,
-                "before_digest": digest(before),
-                "after_digest": digest(CANONICAL_RELEASED_LEASE),
-                "prepared_inventory_digest": baseline_digest,
-                "baseline_metadata_bytes": baseline_metadata_bytes,
-                "migration_set_digest": migration_set_digest,
-                "safety_digest": digest(_group_safety_projection(group)),
-            }
-            prepared_record = encode_metadata_record(payload)
-            payload["stage"] = "complete"
-            complete_record = encode_metadata_record(payload)
-        auth_raw = state["auth_raw"]
-        mirror_raw = state["mirror_raw"]
-        auth_tuple = state["auth_tuple"]
-        mirror_tuple = state["mirror_tuple"]
-        stage = None
-        completed_writes = 0
-        if before is None and auth_tuple == mirror_tuple == CANONICAL_RELEASED_LEASE:
-            if auth_raw is None and mirror_raw is None:
-                stage = "canonical"
-            elif (
-                state["authority_record"]
-                and state["mirror_record"]
-                and state["authority_record"] == state["mirror_record"]
-                and state["authority_record"].get("stage") == "complete"
-            ):
-                stage = "complete"
-                completed_writes = 6
-                record_before = state["authority_record"].get("before")
-                if isinstance(record_before, dict):
-                    state["before"] = record_before
-                    state["legacy_family"] = state["authority_record"].get("legacy_family")
-        elif prepared_record and complete_record:
-            if auth_raw is None and mirror_raw is None and auth_tuple == mirror_tuple == before:
-                stage = "prepare_authority_checkpoint"
-            elif auth_raw == prepared_record and mirror_raw is None and auth_tuple == mirror_tuple == before:
-                stage, completed_writes = "prepare_mirror_checkpoint", 1
-            elif auth_raw == mirror_raw == prepared_record and auth_tuple == mirror_tuple == before:
-                stage, completed_writes = "normalize_mirror", 2
-            elif auth_raw == mirror_raw == prepared_record and auth_tuple == before and mirror_tuple == CANONICAL_RELEASED_LEASE:
-                stage, completed_writes = "normalize_authority", 3
-            elif auth_raw == mirror_raw == prepared_record and auth_tuple == mirror_tuple == CANONICAL_RELEASED_LEASE:
-                stage, completed_writes = "complete_authority_checkpoint", 4
-            elif auth_raw == complete_record and mirror_raw == prepared_record and auth_tuple == mirror_tuple == CANONICAL_RELEASED_LEASE:
-                stage, completed_writes = "complete_mirror_checkpoint", 5
-            elif auth_raw == mirror_raw == complete_record and auth_tuple == mirror_tuple == CANONICAL_RELEASED_LEASE:
-                stage, completed_writes = "complete", 6
-        if stage is None:
-            item["reasons"].append("transition_checkpoint_conflict")
-        if source_record and not source_record.get("invalid") and state["before"] is not None:
-            expected = {
-                "root_requirement_id": group["root"].get("issue_id"),
-                "workflow_instance_id": group["root"].get("workflow_instance_id"),
-                "authority_issue_id": authority.get("issue_id"),
-                "mirror_issue_id": mirror.get("issue_id"),
-                "before_digest": digest(state["before"]),
-                "after_digest": digest(CANONICAL_RELEASED_LEASE),
-                "migration_set_digest": migration_set_digest,
-                "safety_digest": digest(_group_safety_projection(group)),
-            }
-            if any(source_record.get(key) != value for key, value in expected.items()):
-                item["reasons"].append("concurrent_inventory_change")
-            baseline_bytes = source_record.get("baseline_metadata_bytes")
-            if not isinstance(baseline_bytes, dict):
-                item["reasons"].append("transition_checkpoint_conflict")
-            else:
-                expected_bytes = {
-                    "authority": baseline_bytes.get("authority"),
-                    "mirror": baseline_bytes.get("mirror"),
-                }
-                prepared_sizes = {
-                    "authority": _projected_metadata_bytes(
-                        {**authority, "metadata_total_bytes": baseline_bytes.get("authority"), LEASE_TRANSITION_RECORD_KEY: None},
-                        prepared_record,
-                    ),
-                    "mirror": _projected_metadata_bytes(
-                        {**mirror, "metadata_total_bytes": baseline_bytes.get("mirror"), LEASE_TRANSITION_RECORD_KEY: None},
-                        prepared_record,
-                    ),
-                }
-                complete_sizes = {
-                    "authority": _projected_metadata_bytes(
-                        {**authority, "metadata_total_bytes": baseline_bytes.get("authority"), LEASE_TRANSITION_RECORD_KEY: None},
-                        complete_record,
-                    ),
-                    "mirror": _projected_metadata_bytes(
-                        {**mirror, "metadata_total_bytes": baseline_bytes.get("mirror"), LEASE_TRANSITION_RECORD_KEY: None},
-                        complete_record,
-                    ),
-                }
-                if stage in {"prepare_mirror_checkpoint", "normalize_mirror", "normalize_authority", "complete_authority_checkpoint"}:
-                    expected_bytes["authority"] = prepared_sizes["authority"]
-                if stage in {"normalize_mirror", "normalize_authority", "complete_authority_checkpoint", "complete_mirror_checkpoint"}:
-                    expected_bytes["mirror"] = prepared_sizes["mirror"]
-                if stage in {"complete_mirror_checkpoint", "complete"}:
-                    expected_bytes["authority"] = complete_sizes["authority"]
-                if stage == "complete":
-                    expected_bytes["mirror"] = complete_sizes["mirror"]
-                if (
-                    authority.get("metadata_total_bytes") != expected_bytes["authority"]
-                    or mirror.get("metadata_total_bytes") != expected_bytes["mirror"]
-                ):
-                    item["reasons"].append("concurrent_inventory_change")
-                if stage != "complete" and (
-                    _restore_group_baseline(
-                        inventory, group, state["before"], baseline_bytes
-                    )
-                    != source_record.get("prepared_inventory_digest")
-                ):
-                    item["reasons"].append("concurrent_inventory_change")
-            if state["authority_record"] and state["mirror_record"]:
-                left = dict(state["authority_record"])
-                right = dict(state["mirror_record"])
-                left.pop("stage", None)
-                right.pop("stage", None)
-                if left != right:
-                    item["reasons"].append("transition_checkpoint_conflict")
-        item.update(
-            {
-                "stage": stage,
-                "completed_writes": completed_writes,
-                "prepared_record": prepared_record,
-                "complete_record": complete_record,
-            }
-        )
-
-    all_reasons = sorted(set(reasons + [reason for item in evaluated for reason in item["reasons"]]))
-    summaries = [
-        {
-            "root_requirement_id": item["group"].get("root", {}).get("issue_id"),
-            "authority_issue_id": item["group"].get("authority", {}).get("issue_id"),
-            "mirror_issue_id": item["group"].get("mirror", {}).get("issue_id"),
-            "legacy_family": item["state"].get("legacy_family"),
-            "before": item["state"].get("before"),
-            "before_digest": digest(item["state"]["before"]) if item["state"].get("before") is not None else None,
-            "state": item.get("stage") or "blocked",
-            "blocker_reasons": sorted(set(item["reasons"])),
+            ),
+            "blocker_reasons": sorted(set(group_reasons)),
         }
-        for item in evaluated
-    ]
-    if all_reasons:
-        return _lease_result(
-            valid=False,
-            action=action,
-            outcome="blocked",
-            reasons=all_reasons,
-            snapshot_read_id=snapshot_read_id,
-            inventory_digest=inventory_digest,
-            group_summaries=summaries,
-            resume_stage="blocked",
-        )
-    pending = [item for item in evaluated if item["stage"] not in {"canonical", "complete"}]
-    if action == "acquire-preflight":
-        if pending:
-            return _lease_result(
-                valid=False,
-                action=action,
-                outcome="recovery_required",
-                reasons=["legacy_terminal_normalization_required"],
-                snapshot_read_id=snapshot_read_id,
-                inventory_digest=inventory_digest,
-                group_summaries=summaries,
-                resume_stage=pending[0]["stage"],
-                selected_group=summaries[evaluated.index(pending[0])],
-            )
-        return _lease_result(
-            valid=True,
-            action=action,
-            outcome="acquisition_allowed",
-            reasons=[],
-            snapshot_read_id=snapshot_read_id,
-            inventory_digest=inventory_digest,
-            group_summaries=summaries,
-            resume_stage="complete",
-        )
-    if not pending:
-        return _lease_result(
-            valid=True,
-            action=action,
-            outcome="normalization_complete",
-            reasons=[],
-            snapshot_read_id=snapshot_read_id,
-            inventory_digest=inventory_digest,
-            group_summaries=summaries,
-            resume_stage="complete",
-        )
-    selected = pending[0]
-    group = selected["group"]
-    stage = selected["stage"]
-    if stage == "prepare_authority_checkpoint":
-        endpoint_name, endpoint = "authority", group["authority"]
-        updates = {LEASE_TRANSITION_RECORD_KEY: selected["prepared_record"]}
-    elif stage == "prepare_mirror_checkpoint":
-        endpoint_name, endpoint = "mirror", group["mirror"]
-        updates = {LEASE_TRANSITION_RECORD_KEY: selected["prepared_record"]}
-    elif stage == "normalize_mirror":
-        endpoint_name, endpoint = "mirror", group["mirror"]
-        updates = dict(CANONICAL_RELEASED_LEASE)
-    elif stage == "normalize_authority":
-        endpoint_name, endpoint = "authority", group["authority"]
-        updates = dict(CANONICAL_RELEASED_LEASE)
-    elif stage == "complete_authority_checkpoint":
-        endpoint_name, endpoint = "authority", group["authority"]
-        updates = {LEASE_TRANSITION_RECORD_KEY: selected["complete_record"]}
-    else:
-        endpoint_name, endpoint = "mirror", group["mirror"]
-        updates = {LEASE_TRANSITION_RECORD_KEY: selected["complete_record"]}
-    record = updates.get(LEASE_TRANSITION_RECORD_KEY)
-    projected_bytes = None
-    if isinstance(record, str):
-        projected_bytes = _projected_metadata_bytes(endpoint, record)
-        scalar_limit = endpoint.get("metadata_scalar_byte_limit")
-        if (
-            not isinstance(scalar_limit, int)
-            or isinstance(scalar_limit, bool)
-            or scalar_limit <= 0
-            or _record_bytes(record) > scalar_limit
-        ):
-            return _lease_result(
-                valid=False,
-                action=action,
-                outcome="blocked",
-                reasons=["metadata_scalar_capacity_exceeded"],
-                snapshot_read_id=snapshot_read_id,
-                inventory_digest=inventory_digest,
-                group_summaries=summaries,
-                resume_stage="blocked",
-                selected_group=summaries[evaluated.index(selected)],
-                transition_record=record,
-            )
-        if projected_bytes is None or projected_bytes > endpoint.get("metadata_byte_limit", 0):
-            return _lease_result(
-                valid=False,
-                action=action,
-                outcome="blocked",
-                reasons=["metadata_byte_capacity_exceeded"],
-                snapshot_read_id=snapshot_read_id,
-                inventory_digest=inventory_digest,
-                group_summaries=summaries,
-                resume_stage="blocked",
-                selected_group=summaries[evaluated.index(selected)],
-                transition_record=record,
-            )
-    write = {
-        "sequence": selected["completed_writes"] + 1,
-        "group_root_requirement_id": group["root"].get("issue_id"),
-        "endpoint": endpoint_name,
-        "issue_id": endpoint.get("issue_id"),
-        "expected_snapshot_read_id": snapshot_read_id,
-        "expected_inventory_digest": inventory_digest,
-        "expected_endpoint_digest": digest(_lease_endpoint_projection(endpoint)),
-        "metadata_updates": updates,
-        "projected_metadata_total_bytes": projected_bytes,
-        "metadata_byte_limit": endpoint.get("metadata_byte_limit"),
-        "metadata_scalar_byte_limit": endpoint.get("metadata_scalar_byte_limit"),
-        "status_write": None,
-        "requires_fresh_full_reread_after_write": True,
-        "platform_cas_assumed": False,
-    }
-    transition_record = record or selected["prepared_record"]
-    return _lease_result(
-        valid=True,
-        action=action,
-        outcome="write_required",
-        reasons=[],
-        snapshot_read_id=snapshot_read_id,
-        inventory_digest=inventory_digest,
-        group_summaries=summaries,
-        resume_stage=stage,
-        selected_group=summaries[evaluated.index(selected)],
-        transition_record=transition_record,
-        ordered_writes=[write],
+        if owner_pair is not None:
+            summary["historical_holder"] = {
+                "issue_id": owner_pair[0],
+                "agent_id": owner_pair[1],
+                "role": holder.get("agent_role"),
+            }
+        summaries.append(summary)
+
+    all_reasons = sorted(
+        set(reasons + [reason for item in summaries for reason in item["blocker_reasons"]])
     )
+    result = {
+        "valid": not all_reasons,
+        "action": action,
+        "outcome": "acquisition_allowed" if not all_reasons else "blocked",
+        "blocker_reasons": all_reasons,
+        "snapshot_read_id": snapshot_read_id,
+        "inventory_selection_rule": LEASE_INVENTORY_SELECTION_RULE,
+        "inventory_digest": inventory_digest,
+        "current_claims_digest": digest(current_claims),
+        "groups": summaries,
+        "acquisition_allowed": not all_reasons,
+        "read_only": True,
+    }
+    return result
 
 
 def print_json(value: Any) -> None:
@@ -2954,7 +2578,7 @@ def parser() -> argparse.ArgumentParser:
 
     lease = subparsers.add_parser(
         "lease-transition",
-        help="validate acquisition or explicitly normalize a legacy terminal lease",
+        help="read-only preflight for non-isolated workspace lease acquisition",
     )
     lease.add_argument("--action", required=True, choices=LEASE_TRANSITION_ACTIONS)
     lease.add_argument("--snapshot", required=True)

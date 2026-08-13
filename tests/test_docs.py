@@ -217,12 +217,13 @@ class DocumentationTests(unittest.TestCase):
         self.assertIn("v3.sha256:", resolver + instructions)
         self.assertIn("verify-approved", skill + resolver + instructions)
         self.assertIn("lease-transition", skill + lease + instructions)
-        self.assertIn("normalization_required", lease + instructions)
+        self.assertIn("retired_terminal_compatible", lease + instructions)
         self.assertIn("implementation_authority", lease)
         self.assertIn("final_integration_validation_mirror", lease)
-        self.assertIn("metadata byte", (skill + lease).lower())
-        self.assertIn("platform_cas_assumed=false", lease)
+        self.assertIn("read-only", skill + lease)
         self.assertIn("held|released", policy + instructions)
+        self.assertNotIn("workspace_lease_transition_record", skill + lease + policy)
+        self.assertNotIn("normalize-legacy-terminal", skill + lease + policy)
         self.assertIn("schema-v1/v2", resolver + instructions)
         self.assertIn("完整 snapshot", resolver + instructions)
         self.assertIn("平台评论历史", resolver + instructions)
@@ -245,6 +246,21 @@ class DocumentationTests(unittest.TestCase):
         self.assertIn("requirement_pr", final)
         self.assertIn("only managed Agent that writes", final)
         self.assertIn("非权威建议", instructions)
+
+        incident_root = ROOT / "skills/multica-workflow-incidents"
+        incident_skill = (incident_root / "SKILL.md").read_text(encoding="utf-8")
+        incident_contract = (
+            incident_root / "references/incident-contract.md"
+        ).read_text(encoding="utf-8")
+        incident_runbook = (ROOT / "docs/incident-runbook.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "independent_remediation",
+            incident_skill + incident_contract + incident_runbook,
+        )
+        self.assertIn("cancelled", incident_contract)
+        self.assertIn("does not traverse or automatically change descendants", incident_contract)
 
     def test_requirement_intake_targets_only_open_root_final_gate(self):
         skill_root = ROOT / "skills/multica-requirement-intake"

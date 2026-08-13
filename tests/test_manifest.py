@@ -87,8 +87,6 @@ class ManifestTests(unittest.TestCase):
         self.assertIn("multica-delivery-policy/scripts/delivery_policy.py", workflow)
         self.assertIn("references/plan-policy.schema.json", workflow)
         self.assertIn("references/plan-policy.example.json", workflow)
-        self.assertIn("references/lease-transition.schema.json", workflow)
-        self.assertIn("references/lease-transition.example.json", workflow)
         self.assertNotIn("generate_audit_contract.py", workflow)
         self.assertNotIn("release-control-evidence", workflow)
 
@@ -198,6 +196,8 @@ class ManifestTests(unittest.TestCase):
                     "deployment_record",
                     "--deployment-verification-reference",
                     "deploy-17",
+                    "--closure-mode",
+                    "independent_remediation",
                 ]
             )
             workflow_cli.command_incidents(close, root)
@@ -211,6 +211,8 @@ class ManifestTests(unittest.TestCase):
                 "deployment_record",
                 "--deployment-verification-reference",
                 "deploy-17",
+                "--closure-mode",
+                "independent_remediation",
             ]:
                 self.assertIn(expected, command)
 

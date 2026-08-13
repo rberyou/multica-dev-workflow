@@ -25,6 +25,8 @@ LEADER_AGENT_KEY = "agent.leader"
 DEVELOPMENT_SQUAD_KEY = "squad.development-delivery"
 EXTERNAL_FIX_OBJECT_TYPE = "incident_fix_requirement"
 EXTERNAL_FIX_MODE = "external"
+STANDARD_CLOSURE_MODE = "standard"
+INDEPENDENT_REMEDIATION_CLOSURE_MODE = "independent_remediation"
 ACTIVE_STATUSES = {"backlog", "todo", "in_progress", "in_review", "blocked"}
 SEVERITIES = {"low", "medium", "high", "urgent"}
 SEVERITY_RANK = {"low": 0, "medium": 1, "high": 2, "urgent": 3}
@@ -54,6 +56,9 @@ DEVELOPMENT_TREE_METADATA_KEYS = {
 }
 REFERENCE_TYPE_RE = re.compile(r"[a-z][a-z0-9._-]{1,63}")
 REFERENCE_VALUE_RE = re.compile(r"\S{1,2000}")
+MUTABLE_REFERENCE_RE = re.compile(
+    r"(?i)(?:^|[/:._-])(latest|current|head|main|master|tip)(?:$|[/:._-])"
+)
 SECRET_KEY_RE = re.compile(
     r"token|secret|password|cookie|authorization|private[_-]?key|api[_-]?key|custom_env",
     re.I,
@@ -1284,6 +1289,8 @@ def require_identity_reference(
         raise IncidentError(f"{name} must not contain secrets or exceed 2000 characters")
     if not REFERENCE_VALUE_RE.fullmatch(clean):
         raise IncidentError(f"{name} must be a single immutable reference token")
+    if MUTABLE_REFERENCE_RE.search(clean):
+        raise IncidentError(f"{name} must not use a mutable alias")
     if reference_type == "git_commit" and not re.fullmatch(r"[0-9a-fA-F]{40}", clean):
         raise IncidentError(f"{name} with type git_commit requires a full 40-character commit")
     return clean
@@ -1292,7 +1299,13 @@ def require_identity_reference(
 def close_incident(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
     incident, metadata = require_incident(cli, args.incident)
     incident_id = issue_ref(incident) or args.incident
+    requested_closure_mode = getattr(args, "closure_mode", STANDARD_CLOSURE_MODE)
     if metadata.get("incident_status") == "closed":
+        recorded_closure_mode = str(
+            metadata.get("incident_closure_mode") or STANDARD_CLOSURE_MODE
+        )
+        if requested_closure_mode != recorded_closure_mode:
+            raise IncidentError("closed Incident uses a different closure mode")
         return {"incident_id": incident_id, "closed": True, "result": "already_closed"}
     if not metadata.get("fix_requirement_id"):
         raise IncidentError("Incident must link a fix Requirement before verification")
@@ -1303,6 +1316,12 @@ def close_incident(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
     if not isinstance(fix_requirement, dict):
         raise IncidentError("fix Requirement is unreadable")
     fix_metadata = metadata_map(cli, fix_requirement_id)
+    closure_mode = requested_closure_mode
+    if closure_mode not in {
+        STANDARD_CLOSURE_MODE,
+        INDEPENDENT_REMEDIATION_CLOSURE_MODE,
+    }:
+        raise IncidentError("unsupported Incident closure mode")
     if fix_metadata.get("workflow_object_type") == EXTERNAL_FIX_OBJECT_TYPE:
         validate_external_fix_requirement(
             cli, fix_requirement, incident_id, require_reverse_binding=True
@@ -1311,6 +1330,10 @@ def close_incident(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
         waiting_on = "external_fix_owner"
         if str(metadata.get("fix_execution_mode") or "") not in {"", EXTERNAL_FIX_MODE}:
             raise IncidentError("Incident and fix Requirement execution modes conflict")
+        if closure_mode != STANDARD_CLOSURE_MODE:
+            raise IncidentError(
+                "independent remediation closure applies only to a legacy ordinary Requirement"
+            )
     else:
         validate_legacy_fix_requirement(
             cli, fix_requirement, incident_id, require_reverse_binding=True
@@ -1322,7 +1345,25 @@ def close_incident(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
             "legacy_ordinary_development",
         }:
             raise IncidentError("Incident and fix Requirement execution modes conflict")
-    if str(fix_requirement.get("status") or "") != "done":
+    fix_status = str(fix_requirement.get("status") or "")
+    independent_remediation = (
+        mode == "legacy_ordinary_development"
+        and closure_mode == INDEPENDENT_REMEDIATION_CLOSURE_MODE
+    )
+    if independent_remediation:
+        if args.result != "passed":
+            raise IncidentError(
+                "independent remediation closure requires a passed verification result"
+            )
+        if metadata.get("incident_status") != "in_fix":
+            raise IncidentError(
+                "independent remediation closure requires an Incident in in_fix"
+            )
+        if fix_status != "cancelled":
+            raise IncidentError(
+                "independent remediation closure requires a cancelled legacy fix Requirement"
+            )
+    elif fix_status != "done":
         raise IncidentError("fix Requirement must be done before Incident verification")
     evidence = redacted_text(args.evidence, 2000)
     if not evidence.strip():
@@ -1344,7 +1385,7 @@ def close_incident(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
         return {"incident_id": incident_id, "closed": False, "result": "failed"}
 
     closure_values: dict[str, Any]
-    if mode == EXTERNAL_FIX_MODE:
+    if mode == EXTERNAL_FIX_MODE or independent_remediation:
         fix_reference_type = require_reference_type(
             "fix reference type", args.fix_reference_type
         )
@@ -1366,6 +1407,10 @@ def close_incident(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
             "deployment_verification_reference_type": verification_type,
             "deployment_verification_reference": verification_reference,
         }
+        if independent_remediation:
+            closure_values["incident_closure_mode"] = (
+                INDEPENDENT_REMEDIATION_CLOSURE_MODE
+            )
     else:
         if not args.source_commit or not re.fullmatch(
             r"[0-9a-fA-F]{40}", args.source_commit
@@ -1487,6 +1532,11 @@ def parser() -> argparse.ArgumentParser:
     close.add_argument("--fix-reference")
     close.add_argument("--deployment-verification-reference-type")
     close.add_argument("--deployment-verification-reference")
+    close.add_argument(
+        "--closure-mode",
+        choices=(STANDARD_CLOSURE_MODE, INDEPENDENT_REMEDIATION_CLOSURE_MODE),
+        default=STANDARD_CLOSURE_MODE,
+    )
     close.add_argument("--output", choices=["json"], default="json")
     return root
 

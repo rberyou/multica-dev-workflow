@@ -105,9 +105,10 @@ python scripts/workflow.py create-incident-fix-requirement --workspace <workspac
 python scripts/workflow.py link-incident-fix --workspace <workspace> --incident <incident> --requirement <requirement>
 python scripts/workflow.py close-incident --workspace <workspace> --incident <incident> --result passed --evidence <text> --fix-reference-type <type> --fix-reference <immutable-reference> --deployment-verification-reference-type <type> --deployment-verification-reference <immutable-reference>
 python scripts/workflow.py close-incident --workspace <workspace> --incident <legacy-incident> --result passed --evidence <text> --source-commit <40-hex> --deployment-plan-digest <64-hex>
+python scripts/workflow.py close-incident --workspace <workspace> --incident <legacy-incident> --result passed --closure-mode independent_remediation --evidence <text> --fix-reference-type <type> --fix-reference <immutable-reference> --deployment-verification-reference-type <type> --deployment-verification-reference <immutable-reference>
 ```
 
-The create wrapper requires an explicitly resolved external Project and never defaults to the managed Incident Project or development Squad. `report-incident` remains independent and does not create a fix Requirement.
+The create wrapper requires an explicitly resolved external Project and never defaults to the managed Incident Project or development Squad. `report-incident` remains independent and does not create a fix Requirement. `independent_remediation` is a narrow closure only for an unchanged linked legacy ordinary Requirement whose status is `cancelled` while the Incident remains `in_fix`; it does not replace the fix or traverse descendants.
 
 Managed Agents use the attached Incident Skill's direct commands because product repositories do not contain this workflow repository's `scripts/workflow.py`.
 

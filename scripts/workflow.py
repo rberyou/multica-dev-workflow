@@ -410,6 +410,8 @@ def command_incidents(args: argparse.Namespace, root: Path) -> int:
             command.extend(["--source-commit", args.source_commit])
         if args.deployment_plan_digest:
             command.extend(["--deployment-plan-digest", args.deployment_plan_digest])
+        if args.closure_mode:
+            command.extend(["--closure-mode", args.closure_mode])
         for key, value in [
             ("--fix-reference-type", args.fix_reference_type),
             ("--fix-reference", args.fix_reference),
@@ -518,6 +520,11 @@ def parser() -> argparse.ArgumentParser:
     close.add_argument("--fix-reference")
     close.add_argument("--deployment-verification-reference-type")
     close.add_argument("--deployment-verification-reference")
+    close.add_argument(
+        "--closure-mode",
+        choices=["standard", "independent_remediation"],
+        default="standard",
+    )
     close.set_defaults(func=command_incidents)
     return root_parser
 

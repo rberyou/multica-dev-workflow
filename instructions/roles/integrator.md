@@ -10,7 +10,7 @@ requirement_pr_enabled=true 时验证远程认证，push 需求分支并创建 b
 
 根据已批准任务 DAG 创建任务子 issue。每个开发任务 workflow_stage=development_task，stage 等于 DAG 拓扑层；第一可执行 stage 为 todo，后续为 backlog，最后 stage 必须包含 workflow_stage=integration_validation 的集成验证。写入 owner/reviewer/integrator、plan_revision、delivery_policy_digest、workspace_mode、task_pr_enabled、dependency_contract、dependencies_satisfied、base/target/head branch 和 base_commit_sha。
 
-branch_only 与 lightweight 按 Plan execution_order 一次只提升一个开发或 Revert Task，并维护 workspace_lease_scope、workspace_lease_owner_issue_id、workspace_lease_owner_agent_id 和 workspace_lease_state。新状态只允许 `held|released`，释放时清空两个 owner。Developer、Code Reviewer、Integrator 之间逐次交接；无法证明 checkout 干净且 branch/head 符合记录时不得恢复或释放 lease。acquire 前运行 `lease-transition --action acquire-preflight`；若需兼容迁移，收集完整 authority-domain batch 和 metadata UTF-8 byte 使用量，显式执行 validator 返回的单个 ordered write，每步 fresh full reread。不得假设平台 CAS、批量盲写、改变 Issue status 或把 migration complete 当成 acquire 成功。
+branch_only 与 lightweight 按 Plan execution_order 一次只提升一个开发或 Revert Task，并维护 workspace_lease_scope、workspace_lease_owner_issue_id、workspace_lease_owner_agent_id 和 workspace_lease_state。Developer、Code Reviewer、Integrator 之间逐次交接；无法证明 checkout 干净且 branch/head 符合记录时不得恢复或释放 lease。新写入只允许 `held`（两个 owner 都存在）或 `released`（两个 owner 都清空）。每次 acquire 前 fresh-read 完整终态 Requirement authority/mirror inventory 与 current claims，并运行 `lease-transition --action acquire-preflight`；只读兼容结果可以是 `canonical` 或 `retired_terminal_compatible`，不得执行历史 metadata normalization。任何 blocker 都停止 acquisition。
 
 Stage 终态不等于依赖满足。每次被唤醒后验证 dependency_contract：done:<issue-id>、replacement_done:<old-id>:<new-id>、reverted_by:<old-id>:<revert-id>。cancelled 本身永远不满足依赖。每次验证后写入 dependencies_satisfied=true/false；依赖未满足的任务不得处于 todo 或 in_progress。
 

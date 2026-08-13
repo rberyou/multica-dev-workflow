@@ -262,6 +262,7 @@ def close_args(incident, result="passed", **overrides):
         "fix_reference": None,
         "deployment_verification_reference_type": None,
         "deployment_verification_reference": None,
+        "closure_mode": "standard",
     }
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -656,6 +657,191 @@ class IncidentTests(unittest.TestCase):
             incidents.close_incident(
                 self.cli, close_args(incident_id, deployment_plan_digest="short")
             )
+
+    def test_independent_remediation_closes_cancelled_legacy_fix_without_relinking(self):
+        self.cli.add_issue("TASK-BLOCKED", status="in_progress", parent_issue_id="REQ-1")
+        incidents.bind_workflow_issue(
+            self.cli, bind_args("TASK-BLOCKED", "development_task")
+        )
+        incident_id = incidents.report_incident(
+            self.cli,
+            report_args("TASK-BLOCKED", block_source=True),
+        )["incident_id"]
+        fix = self.bind_fix("REQ-CANCELLED-FIX")
+        incidents.link_fix(self.cli, link_args(incident_id, fix))
+        self.cli.issues[fix]["status"] = "cancelled"
+        result = incidents.close_incident(
+            self.cli,
+            close_args(
+                incident_id,
+                source_commit=None,
+                deployment_plan_digest=None,
+                closure_mode="independent_remediation",
+                fix_reference_type="git_commit",
+                fix_reference="c" * 40,
+                deployment_verification_reference_type="deployment_record",
+                deployment_verification_reference="workflow-deploy-2026.08.14-17",
+                evidence="fresh acquire preflight verified",
+            ),
+        )
+        self.assertTrue(result["closed"])
+        self.assertEqual(result["sources_restored"], 1)
+        self.assertEqual(self.cli.issues["TASK-BLOCKED"]["status"], "in_progress")
+        metadata = self.cli.metadata[incident_id]
+        self.assertEqual(metadata["fix_requirement_id"], fix)
+        self.assertEqual(metadata["incident_closure_mode"], "independent_remediation")
+        self.assertEqual(metadata["immutable_fix_reference_type"], "git_commit")
+        self.assertEqual(
+            metadata["deployment_verification_reference_type"],
+            "deployment_record",
+        )
+        self.assertNotIn("fixed_source_commit", metadata)
+        self.assertNotIn("deployment_plan_digest", metadata)
+        repeated = incidents.close_incident(
+            self.cli,
+            close_args(
+                incident_id,
+                closure_mode="independent_remediation",
+            ),
+        )
+        self.assertEqual(repeated["result"], "already_closed")
+        with self.assertRaisesRegex(incidents.IncidentError, "different closure mode"):
+            incidents.close_incident(self.cli, close_args(incident_id))
+
+    def test_independent_remediation_requires_explicit_mode_and_cancelled_legacy_fix(self):
+        incident_id = incidents.report_incident(
+            self.cli, report_args("REQ-1")
+        )["incident_id"]
+        fix = self.bind_fix("REQ-CANCELLED-FIX")
+        incidents.link_fix(self.cli, link_args(incident_id, fix))
+        self.cli.issues[fix]["status"] = "cancelled"
+        typed = {
+            "source_commit": None,
+            "deployment_plan_digest": None,
+            "fix_reference_type": "artifact_version",
+            "fix_reference": "workflow-runtime-2.0.0-dev.8",
+            "deployment_verification_reference_type": "deployment_record",
+            "deployment_verification_reference": "workflow-deploy-17",
+        }
+        with self.assertRaisesRegex(incidents.IncidentError, "must be done"):
+            incidents.close_incident(self.cli, close_args(incident_id, **typed))
+
+        self.cli.issues[fix]["status"] = "in_progress"
+        with self.assertRaisesRegex(incidents.IncidentError, "cancelled legacy"):
+            incidents.close_incident(
+                self.cli,
+                close_args(
+                    incident_id,
+                    closure_mode="independent_remediation",
+                    **typed,
+                ),
+            )
+        self.cli.issues[fix]["status"] = "done"
+        with self.assertRaisesRegex(incidents.IncidentError, "cancelled legacy"):
+            incidents.close_incident(
+                self.cli,
+                close_args(
+                    incident_id,
+                    closure_mode="independent_remediation",
+                    **typed,
+                ),
+            )
+
+    def test_independent_remediation_requires_in_fix_typed_immutable_evidence(self):
+        incident_id = incidents.report_incident(
+            self.cli, report_args("REQ-1")
+        )["incident_id"]
+        fix = self.bind_fix("REQ-CANCELLED-FIX")
+        incidents.link_fix(self.cli, link_args(incident_id, fix))
+        self.cli.issues[fix]["status"] = "cancelled"
+        base = {
+            "source_commit": None,
+            "deployment_plan_digest": None,
+            "closure_mode": "independent_remediation",
+            "fix_reference_type": "artifact_version",
+            "fix_reference": "workflow-runtime-2.0.0-dev.8",
+            "deployment_verification_reference_type": "deployment_record",
+            "deployment_verification_reference": "workflow-deploy-17",
+        }
+        self.cli.metadata[incident_id]["incident_status"] = "open"
+        with self.assertRaisesRegex(incidents.IncidentError, "Incident in in_fix"):
+            incidents.close_incident(self.cli, close_args(incident_id, **base))
+        self.cli.metadata[incident_id]["incident_status"] = "in_fix"
+
+        for key, expected in [
+            ("fix_reference_type", "fix reference type"),
+            ("fix_reference", "immutable fix reference"),
+            (
+                "deployment_verification_reference_type",
+                "deployment verification reference type",
+            ),
+            (
+                "deployment_verification_reference",
+                "deployment verification reference",
+            ),
+        ]:
+            with self.subTest(key=key):
+                values = dict(base)
+                values[key] = None
+                with self.assertRaisesRegex(incidents.IncidentError, expected):
+                    incidents.close_incident(
+                        self.cli, close_args(incident_id, **values)
+                    )
+        mutable = dict(base)
+        mutable["deployment_verification_reference"] = "deployment/current"
+        with self.assertRaisesRegex(incidents.IncidentError, "mutable alias"):
+            incidents.close_incident(self.cli, close_args(incident_id, **mutable))
+
+    def test_independent_remediation_does_not_apply_to_external_fix(self):
+        incident_id = incidents.report_incident(
+            self.cli, report_args("REQ-1")
+        )["incident_id"]
+        requirement_id, _ = self.create_external_fix(incident_id)
+        self.cli.issues[requirement_id]["status"] = "cancelled"
+        with self.assertRaisesRegex(incidents.IncidentError, "legacy ordinary"):
+            incidents.close_incident(
+                self.cli,
+                self.external_close_args(
+                    incident_id,
+                    closure_mode="independent_remediation",
+                ),
+            )
+
+    def test_independent_remediation_does_not_restore_unowned_sources_or_descendants(self):
+        self.cli.add_issue("TASK-A", status="in_progress", parent_issue_id="REQ-1")
+        self.cli.add_issue("TASK-B", status="in_review", parent_issue_id="TASK-A")
+        incidents.bind_workflow_issue(self.cli, bind_args("TASK-A", "development_task"))
+        incidents.bind_workflow_issue(self.cli, bind_args("TASK-B", "development_task"))
+        incident_id = incidents.report_incident(
+            self.cli, report_args("TASK-A", block_source=True)
+        )["incident_id"]
+        self.cli.metadata[incident_id]["blocked_source_issue_ids"] = json.dumps(
+            ["TASK-A", "TASK-B"]
+        )
+        self.cli.metadata["TASK-B"]["workflow_blocked_by_incident_id"] = "INC-OTHER"
+        fix = self.bind_fix("REQ-CANCELLED-FIX")
+        incidents.link_fix(self.cli, link_args(incident_id, fix))
+        self.cli.issues[fix]["status"] = "cancelled"
+        result = incidents.close_incident(
+            self.cli,
+            close_args(
+                incident_id,
+                source_commit=None,
+                deployment_plan_digest=None,
+                closure_mode="independent_remediation",
+                fix_reference_type="artifact_version",
+                fix_reference="workflow-runtime-2.0.0-dev.8",
+                deployment_verification_reference_type="deployment_record",
+                deployment_verification_reference="workflow-deploy-18",
+            ),
+        )
+        self.assertEqual(result["sources_restored"], 1)
+        self.assertEqual(self.cli.issues["TASK-A"]["status"], "in_progress")
+        self.assertEqual(self.cli.issues["TASK-B"]["status"], "in_review")
+        self.assertEqual(
+            self.cli.metadata["TASK-B"]["workflow_blocked_by_incident_id"],
+            "INC-OTHER",
+        )
 
     def test_report_after_closure_creates_recurrence(self):
         first = incidents.report_incident(self.cli, report_args("REQ-1"))

@@ -4,7 +4,7 @@
 
 task_pr_enabled=true 时读取 PR/CI，确认 reviewed_commit_sha 等于远端 pr_head_sha、PR base 等于需求分支。task_pr_enabled=false 时不得要求 PR 或远程 CI，直接从 Git 对 base_commit_sha...reviewed_commit_sha 进行同等独立审查。
 
-branch_only 与 lightweight 只能在 Developer 释放编辑权并由 Integrator 确认 fresh inventory 后把 `held` workspace lease 交给你后使用 checkout。先运行 `guard-workspace`；审查和测试完成后保持 checkout 干净，按记录 branch/head 把 lease 交给集成负责人。不得把 role 名写入 lease state 或保留 released owner。isolated 可使用独立任务 worktree，但仍不得修改被审查代码。
+branch_only 与 lightweight 只能在完整 authority-domain acquire preflight 通过、Developer 释放编辑权并把 canonical `held` workspace lease 交给你后使用 checkout。该 preflight 对安全退休的历史 tuple 只做 `retired_terminal_compatible` 判定，不写旧 metadata。先运行 `guard-workspace`；审查和测试完成后保持 checkout 干净，按记录 branch/head 把 lease 交给集成负责人。isolated 可使用独立任务 worktree，但仍不得修改被审查代码。
 
 检查实现正确性、范围控制、错误处理、测试质量和对其他任务的影响。
 

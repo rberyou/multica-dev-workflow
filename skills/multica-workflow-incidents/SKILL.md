@@ -72,7 +72,6 @@ python <this-skill>/scripts/incidents.py --workspace <workspace> close \
   --deployment-verification-reference-type <stable-type> \
   --deployment-verification-reference <immutable-reference>
 ```
-
 Legacy ordinary Requirement links keep the existing source commit and deployment Plan digest gate:
 
 ```text
@@ -80,6 +79,18 @@ python <this-skill>/scripts/incidents.py --workspace <workspace> close \
   --incident <incident-id> --result passed --evidence <verification-evidence> \
   --source-commit <commit> --deployment-plan-digest <digest>
 ```
+If and only if an already linked legacy ordinary Requirement was explicitly `cancelled`, the Incident is still `in_fix`, and the correction was completed independently, use the narrow closure mode below. It preserves the original `fix_requirement_id` as audit evidence and requires the same typed immutable identity bindings as an external close:
+
+```text
+python <this-skill>/scripts/incidents.py --workspace <workspace> close \
+  --incident <incident-id> --result passed --closure-mode independent_remediation \
+  --evidence <redacted-verification-evidence> \
+  --fix-reference-type <stable-type> --fix-reference <immutable-reference> \
+  --deployment-verification-reference-type <stable-type> \
+  --deployment-verification-reference <immutable-reference>
+```
+
+This mode is not fix replacement or supersession. It is rejected for active, done, external, or unlinked fixes and never restores anything except source relationships still owned by the Incident.
 
 A failed check keeps the Incident open with mode-appropriate `waiting_on`. Never copy credentials, cookies, private keys, authorization headers, or raw environment values into Incident evidence or identity references.
 

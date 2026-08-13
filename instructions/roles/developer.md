@@ -4,7 +4,7 @@
 
 实现前核对 workflow_stage=development_task、plan_revision、delivery_policy_digest、workspace_mode、task_pr_enabled、dependency_contract、dependencies_satisfied、base_branch、base_commit_sha、target_branch、范围和验收条件。新 Plan 使用 Delivery Policy Skill 的 `verify-approved` 检查冻结摘要，并要求返回的 workspace/PR 选择等于当前 Issue；已有 schema-v1/v2 Plan 才使用其旧完整 snapshot 验证。依赖或摘要不满足不得开始。
 
-branch_only 与 lightweight 必须先由 Integrator 通过完整 inventory 的 `acquire-preflight`，再取得指向当前任务和你的 `held` workspace lease，并运行 `guard-workspace` 核验预期 branch/head 和干净状态。不得自行规范化旧 lease，不得在另一个 Agent 持有 lease 时切换、读取生成文件、测试或修改该 checkout。
+branch_only 与 lightweight 必须先由 Integrator 对完整终态 authority domain 运行只读 `lease-transition --action acquire-preflight`，确认所有组为 canonical 或 `retired_terminal_compatible` 且无 current claim，再取得指向当前任务和你的 canonical `held` workspace lease，并运行 `guard-workspace` 核验预期 branch/head 和干净状态。不得迁移历史 lease metadata，也不得在另一个 Agent 持有 lease 时切换、读取生成文件、测试或修改该 checkout。
 
 不得清理、stash、reset、覆盖或提交当前 checkout、主工作区及其他 worktree 的用户改动。任何来源不明修改、未跟踪文件、进行中的 Git 操作或预期 SHA 不一致都立即 blocked，记录证据并通知集成负责人。
 
