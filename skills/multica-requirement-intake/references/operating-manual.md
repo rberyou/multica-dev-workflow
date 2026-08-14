@@ -261,7 +261,7 @@ Agent 应读取：
 
 ## 11. 工作流异常
 
-当 Agent 发现审批、Review、依赖、状态、角色、Runtime、Skill 或平台能力与工作流合同不一致时，先尝试在当前任务内安全修复。只有问题需要跨任务保留、可能复发、需要其他负责人或人工决定，或需要部署后验证时，才通过 `multica-workflow-incidents` 创建或复用独立 Incident。不存在后台扫描或中间 Observation。
+当 Agent 发现工作流规则/协议冲突、状态机或 metadata 完整性错误、审批/Review 门禁失效、工作流源码或部署漂移、受管理 Agent、Skill 或配置缺失时，先尝试在当前任务内安全修复。只有这类工作流自身问题还需要跨任务保留、可能复发、需要其他负责人或人工决定，或需要部署后验证时，才通过 `multica-workflow-incidents` 的 `report --condition-class workflow` 创建或复用独立 Incident。OS、Codex/模型 Runtime、Multica daemon、网络、Shell、sandbox、外部工具或主机环境故障只在原 Issue 上 blocked，并使用明确的 runtime/environment/platform waiting_on；不得创建 Incident 或 fix Requirement。不存在后台扫描或中间 Observation。
 
 - 只有继续执行会影响正确性、审批完整性、安全、隐私或 Git 历史时，Incident 才阻塞来源 issue 并写入 `waiting_on=workflow_fix`。
 - `report` 不自动创建修复项。需要修复时由 Incident Skill 显式创建 external `incident_fix_requirement`，指定外部 Project 和可选外部 owner；Requirement Intake 不创建、提交或跟踪该对象，也不得把它接入开发交付 Squad。已有普通 Requirement 关联保留 legacy 流程。

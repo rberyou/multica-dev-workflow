@@ -6,6 +6,7 @@ import io
 import json
 import sys
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -100,6 +101,7 @@ class FakeCLI:
         }
         self.created = 0
         self.metadata_set_failures = []
+        self.issue_update_failures = []
 
     def add_issue(
         self,
@@ -209,7 +211,12 @@ class FakeCLI:
             return issue
         if command[:2] == ("issue", "update"):
             issue = self.resolve(args[2])
-            issue["status"] = flag(args, "--status", issue["status"])
+            requested_status = flag(args, "--status", issue["status"])
+            failure = (issue["identifier"], requested_status)
+            if failure in self.issue_update_failures:
+                self.issue_update_failures.remove(failure)
+                raise incidents.IncidentError("simulated Issue status update failure")
+            issue["status"] = requested_status
             issue["priority"] = flag(args, "--priority", issue.get("priority"))
             return issue
         if command[:3] == ("issue", "comment", "add"):
@@ -231,6 +238,7 @@ def bind_args(issue, object_type="requirement", root_requirement_id=None):
 def report_args(source, **overrides):
     values = {
         "source_issue": source,
+        "condition_class": "workflow",
         "rule_id": "WF-TEST-001",
         "severity": "medium",
         "summary": "Workflow gate failed",
@@ -278,6 +286,17 @@ def create_fix_args(incident, **overrides):
     return argparse.Namespace(**values)
 
 
+def retract_args(incident, **overrides):
+    values = {
+        "incident": incident,
+        "reason": "misclassified_non_workflow_runtime_condition",
+        "evidence": "classified from the source failure and smoke-test record",
+        "actor_id": "member-admin",
+    }
+    values.update(overrides)
+    return argparse.Namespace(**values)
+
+
 class IncidentTests(unittest.TestCase):
     def setUp(self):
         self.cli = FakeCLI()
@@ -299,6 +318,25 @@ class IncidentTests(unittest.TestCase):
                         "create-fix-requirement",
                         "--incident",
                         "INC-1",
+                    ]
+                )
+
+    def test_report_parser_requires_an_explicit_condition_class(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                incidents.parser().parse_args(
+                    [
+                        "--workspace",
+                        "workspace-test",
+                        "report",
+                        "--source-issue",
+                        "REQ-1",
+                        "--summary",
+                        "summary",
+                        "--expected",
+                        "expected",
+                        "--actual",
+                        "actual",
                     ]
                 )
 
@@ -366,6 +404,430 @@ class IncidentTests(unittest.TestCase):
         self.assertEqual(metadata["fix_requirement_id"], fix)
         evidence = json.loads(metadata["incident_evidence_log"])
         self.assertEqual(len(evidence), 1)
+        self.assertEqual(metadata["incident_condition_class"], "workflow")
+
+    def test_report_rejects_non_workflow_conditions_before_any_write(self):
+        for condition_class in ["runtime", "environment", "platform"]:
+            with self.subTest(condition_class=condition_class):
+                metadata_before = json.loads(json.dumps(self.cli.metadata))
+                issues_before = json.loads(json.dumps(self.cli.issues))
+                comments_before = json.loads(json.dumps(self.cli.comments))
+                with self.assertRaisesRegex(
+                    incidents.IncidentError, "not workflow Incidents"
+                ):
+                    incidents.report_incident(
+                        self.cli,
+                        report_args("REQ-1", condition_class=condition_class),
+                    )
+                self.assertEqual(self.cli.metadata, metadata_before)
+                self.assertEqual(self.cli.issues, issues_before)
+                self.assertEqual(self.cli.comments, comments_before)
+                self.assertEqual(self.cli.created, 0)
+
+    def test_report_rejects_a_missing_condition_class_fail_closed(self):
+        args = report_args("REQ-1")
+        delattr(args, "condition_class")
+        with self.assertRaisesRegex(
+            incidents.IncidentError, "condition_class=workflow is required"
+        ):
+            incidents.report_incident(self.cli, args)
+        self.assertEqual(self.cli.created, 0)
+
+    def test_report_main_rejects_non_workflow_before_building_cli(self):
+        argv = [
+            "incidents.py",
+            "--workspace",
+            "workspace-test",
+            "report",
+            "--source-issue",
+            "REQ-1",
+            "--condition-class",
+            "runtime",
+            "--summary",
+            "summary",
+            "--expected",
+            "expected",
+            "--actual",
+            "actual",
+        ]
+        with mock.patch.object(sys, "argv", argv), mock.patch.object(
+            incidents, "build_cli"
+        ) as build_cli, contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(incidents.main(), 2)
+        build_cli.assert_not_called()
+
+    def test_administrative_retraction_preserves_source_block_and_owned_relations(self):
+        self.cli.add_issue("TASK-A", status="todo", parent_issue_id="REQ-1")
+        self.cli.add_issue("TASK-B", status="in_progress", parent_issue_id="REQ-1")
+        incidents.bind_workflow_issue(
+            self.cli, bind_args("TASK-A", "development_task")
+        )
+        incidents.bind_workflow_issue(
+            self.cli, bind_args("TASK-B", "development_task")
+        )
+        result = incidents.report_incident(
+            self.cli,
+            report_args("TASK-A", dedupe_key="same-runtime", block_source=True),
+        )
+        incident_id = result["incident_id"]
+        incidents.report_incident(
+            self.cli,
+            report_args("TASK-B", dedupe_key="same-runtime", block_source=True),
+        )
+        self.cli.metadata["TASK-B"].update(
+            {
+                "workflow_blocked_by_incident_id": "INC-OTHER",
+                "workflow_incident_id": "INC-OTHER",
+                "waiting_on": "workflow_fix",
+                "blocked_reason": "owned by another Incident",
+            }
+        )
+
+        retracted = incidents.retract_incident(
+            self.cli,
+            retract_args(
+                incident_id,
+                evidence="Authorization: Bearer must-not-persist",
+            ),
+        )
+
+        self.assertEqual(retracted["sources_reclassified"], 1)
+        self.assertEqual(retracted["source_links_cleared"], 1)
+        self.assertEqual(self.cli.issues["TASK-A"]["status"], "blocked")
+        self.assertEqual(self.cli.metadata["TASK-A"]["waiting_on"], "runtime")
+        self.assertEqual(
+            self.cli.metadata["TASK-A"]["workflow_blocked_by_incident_id"], ""
+        )
+        self.assertEqual(self.cli.metadata["TASK-A"]["workflow_incident_id"], "")
+        self.assertEqual(
+            self.cli.metadata["TASK-B"]["workflow_blocked_by_incident_id"],
+            "INC-OTHER",
+        )
+        self.assertEqual(self.cli.metadata["TASK-B"]["workflow_incident_id"], "INC-OTHER")
+        metadata = self.cli.metadata[incident_id]
+        self.assertEqual(self.cli.issues[incident_id]["status"], "cancelled")
+        self.assertEqual(metadata["incident_status"], "closed")
+        self.assertEqual(metadata["incident_result"], "not_applicable")
+        self.assertEqual(metadata["incident_closure_mode"], "administrative_retraction")
+        self.assertEqual(
+            metadata["incident_retraction_reason"],
+            "misclassified_non_workflow_runtime_condition",
+        )
+        self.assertEqual(metadata["incident_condition_class"], "runtime")
+        self.assertEqual(json.loads(metadata["blocked_source_issue_ids"]), [])
+        self.assertEqual(metadata["waiting_on"], "")
+        self.assertNotIn("must-not-persist", metadata["incident_retraction_evidence"])
+        self.assertNotIn("fix_requirement_id", metadata)
+
+    def test_administrative_retraction_rejects_an_incident_with_a_fix(self):
+        incident_id = incidents.report_incident(
+            self.cli, report_args("REQ-1")
+        )["incident_id"]
+        incidents.link_fix(self.cli, link_args(incident_id, self.bind_fix()))
+        with self.assertRaisesRegex(incidents.IncidentError, "with a fix Requirement"):
+            incidents.retract_incident(self.cli, retract_args(incident_id))
+
+    def test_non_workflow_incident_cannot_create_or_link_a_fix(self):
+        incident_id = incidents.report_incident(
+            self.cli, report_args("REQ-1")
+        )["incident_id"]
+        self.cli.metadata[incident_id]["incident_condition_class"] = "runtime"
+        created_before = self.cli.created
+        with self.assertRaisesRegex(incidents.IncidentError, "classified as workflow"):
+            incidents.create_fix_requirement(
+                self.cli, create_fix_args(incident_id)
+            )
+        self.assertEqual(self.cli.created, created_before)
+
+        fix = self.bind_fix()
+        with self.assertRaisesRegex(incidents.IncidentError, "classified as workflow"):
+            incidents.link_fix(self.cli, link_args(incident_id, fix))
+        self.assertNotIn("fix_requirement_id", self.cli.metadata[incident_id])
+
+    def test_unclassified_legacy_incident_cannot_create_or_link_a_new_fix(self):
+        incident_id = incidents.report_incident(
+            self.cli, report_args("REQ-1")
+        )["incident_id"]
+        self.cli.metadata[incident_id].pop("incident_condition_class")
+        with self.assertRaisesRegex(incidents.IncidentError, "classified as workflow"):
+            incidents.create_fix_requirement(
+                self.cli, create_fix_args(incident_id)
+            )
+        with self.assertRaisesRegex(incidents.IncidentError, "classified as workflow"):
+            incidents.link_fix(
+                self.cli, link_args(incident_id, self.bind_fix("REQ-LEGACY-FIX"))
+            )
+        self.assertNotIn("fix_requirement_id", self.cli.metadata[incident_id])
+
+    def test_incident_source_cannot_be_linked_as_its_legacy_fix(self):
+        incident_id = incidents.report_incident(
+            self.cli, report_args("REQ-1")
+        )["incident_id"]
+        with self.assertRaisesRegex(incidents.IncidentError, "cannot also be its fix"):
+            incidents.link_fix(self.cli, link_args(incident_id, "REQ-1"))
+        self.assertNotIn("fix_requirement_id", self.cli.metadata[incident_id])
+        self.assertEqual(
+            self.cli.metadata["REQ-1"]["workflow_incident_id"], incident_id
+        )
+
+    def test_administrative_retraction_is_idempotent_and_not_active_dedupe(self):
+        first = incidents.report_incident(self.cli, report_args("REQ-1"))
+        incident_id = first["incident_id"]
+        incidents.retract_incident(self.cli, retract_args(incident_id))
+        comments = len(self.cli.comments[incident_id])
+        repeated = incidents.retract_incident(
+            self.cli, retract_args(incident_id, evidence=None)
+        )
+        self.assertEqual(repeated["action"], "already_retracted")
+        self.assertEqual(len(self.cli.comments[incident_id]), comments)
+
+        recurrence = incidents.report_incident(self.cli, report_args("REQ-1"))
+        self.assertNotEqual(recurrence["incident_id"], incident_id)
+        self.assertEqual(
+            self.cli.metadata[recurrence["incident_id"]]["recurrence_of"],
+            incident_id,
+        )
+
+    def test_administrative_retraction_recovers_partial_source_and_incident_writes(self):
+        self.cli.add_issue("TASK-PARTIAL", status="todo", parent_issue_id="REQ-1")
+        incidents.bind_workflow_issue(
+            self.cli, bind_args("TASK-PARTIAL", "development_task")
+        )
+        incident_id = incidents.report_incident(
+            self.cli,
+            report_args("TASK-PARTIAL", block_source=True),
+        )["incident_id"]
+        self.cli.metadata_set_failures.append(
+            ("TASK-PARTIAL", "workflow_blocked_by_incident_id")
+        )
+        with self.assertRaisesRegex(incidents.IncidentError, "metadata write failure"):
+            incidents.retract_incident(self.cli, retract_args(incident_id))
+        self.assertEqual(
+            self.cli.metadata["TASK-PARTIAL"]["workflow_blocked_by_incident_id"],
+            incident_id,
+        )
+        self.assertEqual(self.cli.metadata["TASK-PARTIAL"]["waiting_on"], "runtime")
+
+        self.cli.metadata_set_failures.append((incident_id, "incident_status"))
+        with self.assertRaisesRegex(incidents.IncidentError, "metadata write failure"):
+            incidents.retract_incident(self.cli, retract_args(incident_id))
+        self.assertEqual(
+            self.cli.metadata[incident_id]["incident_closure_mode"],
+            "administrative_retraction",
+        )
+        self.assertNotEqual(
+            self.cli.metadata[incident_id].get("incident_status"), "closed"
+        )
+
+        result = incidents.retract_incident(self.cli, retract_args(incident_id))
+        self.assertEqual(result["action"], "retracted")
+        self.assertEqual(self.cli.issues[incident_id]["status"], "cancelled")
+        self.assertEqual(self.cli.metadata[incident_id]["incident_status"], "closed")
+        self.assertEqual(
+            self.cli.metadata["TASK-PARTIAL"]["workflow_blocked_by_incident_id"],
+            "",
+        )
+
+    def test_administrative_retraction_rejects_partial_external_and_legacy_fixes(self):
+        external_incident = incidents.report_incident(
+            self.cli, report_args("REQ-1", rule_id="WF-PARTIAL-EXTERNAL")
+        )["incident_id"]
+        self.cli.metadata_set_failures.append(
+            (external_incident, "fix_requirement_id")
+        )
+        with self.assertRaisesRegex(incidents.IncidentError, "metadata write failure"):
+            incidents.create_fix_requirement(
+                self.cli, create_fix_args(external_incident)
+            )
+        with self.assertRaisesRegex(incidents.IncidentError, "partially bound fix"):
+            incidents.retract_incident(
+                self.cli, retract_args(external_incident)
+            )
+
+        legacy_incident = incidents.report_incident(
+            self.cli, report_args("REQ-1", rule_id="WF-PARTIAL-LEGACY")
+        )["incident_id"]
+        legacy_fix = self.bind_fix("REQ-PARTIAL-LEGACY")
+        self.cli.metadata_set_failures.append((legacy_incident, "fix_requirement_id"))
+        with self.assertRaisesRegex(incidents.IncidentError, "metadata write failure"):
+            incidents.link_fix(
+                self.cli, link_args(legacy_incident, legacy_fix)
+            )
+        with self.assertRaisesRegex(incidents.IncidentError, "partially bound fix"):
+            incidents.retract_incident(
+                self.cli, retract_args(legacy_incident)
+            )
+
+    def test_incomplete_retraction_cannot_be_reopened_by_dedupe(self):
+        incident_id = incidents.report_incident(
+            self.cli, report_args("REQ-1")
+        )["incident_id"]
+        self.cli.issue_update_failures.append((incident_id, "cancelled"))
+        with self.assertRaisesRegex(
+            incidents.IncidentError, "Issue status update failure"
+        ):
+            incidents.retract_incident(self.cli, retract_args(incident_id))
+        self.assertEqual(self.cli.issues[incident_id]["status"], "todo")
+        self.assertEqual(self.cli.metadata[incident_id]["incident_status"], "closed")
+
+        with self.assertRaisesRegex(incidents.IncidentError, "incomplete closure"):
+            incidents.report_incident(self.cli, report_args("REQ-1"))
+        self.assertEqual(self.cli.metadata[incident_id]["incident_status"], "closed")
+        self.assertEqual(
+            self.cli.metadata[incident_id]["incident_closure_mode"],
+            "administrative_retraction",
+        )
+
+        incidents.retract_incident(self.cli, retract_args(incident_id))
+        recurrence = incidents.report_incident(self.cli, report_args("REQ-1"))
+        self.assertNotEqual(recurrence["incident_id"], incident_id)
+
+    def test_standard_close_recovers_metadata_and_issue_status_partial_writes(self):
+        metadata_incident = incidents.report_incident(
+            self.cli, report_args("REQ-1", rule_id="WF-CLOSE-METADATA")
+        )["incident_id"]
+        incidents.link_fix(
+            self.cli,
+            link_args(metadata_incident, self.bind_fix("REQ-CLOSE-METADATA")),
+        )
+        self.cli.metadata_set_failures.append((metadata_incident, "incident_status"))
+        with self.assertRaisesRegex(incidents.IncidentError, "metadata write failure"):
+            incidents.close_incident(
+                self.cli, close_args(metadata_incident)
+            )
+        self.assertNotEqual(
+            self.cli.metadata[metadata_incident].get("incident_status"), "closed"
+        )
+        with self.assertRaisesRegex(incidents.IncidentError, "incomplete closure"):
+            incidents.report_incident(
+                self.cli,
+                report_args("REQ-1", rule_id="WF-CLOSE-METADATA"),
+            )
+        result = incidents.close_incident(
+            self.cli, close_args(metadata_incident)
+        )
+        self.assertEqual(result["result"], "passed")
+        self.assertEqual(self.cli.issues[metadata_incident]["status"], "done")
+
+        status_incident = incidents.report_incident(
+            self.cli, report_args("REQ-1", rule_id="WF-CLOSE-STATUS")
+        )["incident_id"]
+        incidents.link_fix(
+            self.cli,
+            link_args(status_incident, self.bind_fix("REQ-CLOSE-STATUS")),
+        )
+        self.cli.issue_update_failures.append((status_incident, "done"))
+        with self.assertRaisesRegex(
+            incidents.IncidentError, "Issue status update failure"
+        ):
+            incidents.close_incident(self.cli, close_args(status_incident))
+        self.assertEqual(
+            self.cli.metadata[status_incident]["incident_status"], "closed"
+        )
+        self.assertEqual(self.cli.issues[status_incident]["status"], "in_progress")
+        converged = incidents.close_incident(
+            self.cli, close_args(status_incident)
+        )
+        self.assertEqual(converged["result"], "converged_closed")
+        self.assertEqual(self.cli.issues[status_incident]["status"], "done")
+
+        self.cli.add_issue("TASK-CLOSE-SOURCE", status="todo", parent_issue_id="REQ-1")
+        incidents.bind_workflow_issue(
+            self.cli, bind_args("TASK-CLOSE-SOURCE", "development_task")
+        )
+        source_incident = incidents.report_incident(
+            self.cli,
+            report_args(
+                "TASK-CLOSE-SOURCE",
+                rule_id="WF-CLOSE-SOURCE",
+                block_source=True,
+            ),
+        )["incident_id"]
+        incidents.link_fix(
+            self.cli,
+            link_args(source_incident, self.bind_fix("REQ-CLOSE-SOURCE")),
+        )
+        self.cli.metadata_set_failures.append(
+            ("TASK-CLOSE-SOURCE", "workflow_blocked_by_incident_id")
+        )
+        with self.assertRaisesRegex(incidents.IncidentError, "metadata write failure"):
+            incidents.close_incident(self.cli, close_args(source_incident))
+        self.assertEqual(
+            self.cli.metadata["TASK-CLOSE-SOURCE"][
+                "workflow_blocked_by_incident_id"
+            ],
+            source_incident,
+        )
+        incidents.close_incident(self.cli, close_args(source_incident))
+        self.assertEqual(
+            self.cli.metadata["TASK-CLOSE-SOURCE"][
+                "workflow_blocked_by_incident_id"
+            ],
+            "",
+        )
+
+    def test_existing_t136_shape_is_recognized_without_reblocking_source(self):
+        self.cli.add_issue("T-135", status="blocked")
+        self.cli.metadata["T-135"].update(
+            {
+                "waiting_on": "runtime",
+                "blocked_reason": "runtime unavailable",
+            }
+        )
+        source_before = json.loads(json.dumps(self.cli.metadata["T-135"]))
+        self.cli.add_issue(
+            "T-136", status="cancelled", project_id="project-incidents"
+        )
+        self.cli.metadata["T-136"].update(
+            {
+                "managed_by": incidents.MANAGED_BY,
+                "workflow_object_type": "incident",
+                "workflow_id": incidents.WORKFLOW_ID,
+                "protocol_revision": incidents.PROTOCOL_REVISION,
+                "incident_status": "closed",
+                "incident_result": "not_applicable",
+                "incident_closure_mode": "administrative_retraction",
+                "incident_retraction_reason": (
+                    "misclassified_non_workflow_runtime_condition"
+                ),
+                "blocked_source_issue_ids": "[]",
+                "source_issue_id": "T-135",
+                "waiting_on": "",
+            }
+        )
+
+        result = incidents.retract_incident(
+            self.cli, retract_args("T-136", evidence=None)
+        )
+
+        self.assertEqual(result["action"], "already_retracted")
+        self.assertEqual(self.cli.metadata["T-135"], source_before)
+        self.assertNotIn("workflow_incident_id", self.cli.metadata["T-135"])
+
+    def test_existing_retraction_requires_an_explicit_empty_blocked_source_list(self):
+        self.cli.add_issue(
+            "INC-RETRACTED", status="cancelled", project_id="project-incidents"
+        )
+        self.cli.metadata["INC-RETRACTED"].update(
+            {
+                "managed_by": incidents.MANAGED_BY,
+                "workflow_object_type": "incident",
+                "workflow_id": incidents.WORKFLOW_ID,
+                "protocol_revision": incidents.PROTOCOL_REVISION,
+                "incident_status": "closed",
+                "incident_result": "not_applicable",
+                "incident_closure_mode": "administrative_retraction",
+                "incident_retraction_reason": (
+                    "misclassified_non_workflow_runtime_condition"
+                ),
+                "blocked_source_issue_ids": "not-json",
+                "waiting_on": "",
+            }
+        )
+        with self.assertRaisesRegex(incidents.IncidentError, "evidence must be non-empty"):
+            incidents.retract_incident(
+                self.cli, retract_args("INC-RETRACTED", evidence=None)
+            )
 
     def test_create_external_fix_is_unassigned_backlog_and_not_protocol_requirement(self):
         incident_id = incidents.report_incident(

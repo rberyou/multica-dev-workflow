@@ -37,14 +37,16 @@ Requirement delivery targets the Plan-defined branch, which may be non-default. 
 
 ## Event-Driven Incident Boundary
 
-The active Agent already observes the commands, state transitions, Review results, and failures involved in its task. It should repair local mistakes immediately. Durable recording is only useful when the issue outlives that execution context.
+The active Agent already observes the commands, state transitions, Review results, and failures involved in its task. It should repair local mistakes immediately. Durability is necessary but not sufficient for an Incident: the cause must be owned by the workflow itself.
+
+Workflow-owned conditions are rule/protocol conflicts, state-machine or metadata-integrity failures, approval/Review gate failures, workflow source/deployment drift, and missing managed Agents, Skills, or configuration. OS, Codex/model Runtime, Multica daemon, network, Shell, sandbox, external-tool, and host-environment failures never create a workflow Incident or external fix Requirement. They stay fail-closed on the original Issue with a precise Runtime/environment/platform waiting class, concise redacted evidence, and in-place recovery after repair and smoke testing; task identity and lease remain unchanged.
 
 The Incident Skill therefore combines:
 
 - written instructions for judgment and escalation;
 - a deterministic Python command for binding, redaction, deduplication, state changes, source blocking/restoration, and evidence persistence.
 
-The Python command is called by an ordinary Agent or human host at the moment an ordinary development Issue is created, a durable workflow problem is found, an external fix record is explicitly created or linked, a legacy ordinary fix is linked, or a deployed fix is checked. It is never called by a timer. `report` itself does not manufacture a fix record.
+The Python command is called by an ordinary Agent or human host at the moment an ordinary development Issue is created, a durable workflow problem is found, a no-fix misclassification is administratively retracted, an external fix record is explicitly created or linked, a legacy ordinary fix is linked, or a deployed fix is checked. It is never called by a timer. `report` requires an explicit workflow condition class, rejects non-workflow classes before any write, and never manufactures a fix record.
 
 ## Fix Flow
 
@@ -53,7 +55,7 @@ discovery -> Incident(open) -> external incident_fix_requirement(backlog)
           -> external owner/process -> deployed and verified -> Incident(closed)
 ```
 
-The external fix record is a verifiable Requirement-shaped Issue, but it has no development-tree root or protocol metadata and does not trigger Leader, Planner, Integrator, implementation, Code Review, integration validation, or final Requirement approval. It must use an explicitly selected external Project and must not be assigned to the managed development Squad. Existing Incidents already linked to ordinary protocol-v4 Requirements retain their legacy Review Loop and close gate. A narrow explicit independent-remediation close exists only when such a legacy fix was cancelled: the link remains immutable, the Incident must still be `in_fix`, and typed immutable fix/deployment evidence replaces neither the record nor its history. Closure restores only directly owned blocked sources and never traverses descendants. There is still no Observation inbox, maintenance decision object, maintenance case, maintenance-only role, scheduler, or secure runtime.
+The external fix record is a verifiable Requirement-shaped Issue, but it has no development-tree root or protocol metadata and does not trigger Leader, Planner, Integrator, implementation, Code Review, integration validation, or final Requirement approval. It must use an explicitly selected external Project and must not be assigned to the managed development Squad. Existing Incidents already linked to ordinary protocol-v4 Requirements retain their legacy Review Loop and close gate. A narrow explicit independent-remediation close exists only when such a legacy fix was cancelled: the link remains immutable, the Incident must still be `in_fix`, and typed immutable fix/deployment evidence replaces neither the record nor its history. A separate administrative retraction exists only for a no-fix record misclassified from a Runtime/environment/platform condition: it cancels and closes the audit record as `not_applicable`, clears only its owned source relationships, and leaves the original Issue blocked on the real condition without creating fix/deployment references. Closure and retraction never traverse descendants. There is still no Observation inbox, maintenance decision object, maintenance case, maintenance-only role, scheduler, or secure runtime.
 
 ## Deployment and Release
 

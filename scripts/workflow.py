@@ -318,6 +318,16 @@ def command_install_skills(args: argparse.Namespace, root: Path) -> int:
 
 
 def command_incidents(args: argparse.Namespace, root: Path) -> int:
+    if (
+        args.command == "report-incident"
+        and str(getattr(args, "condition_class", "") or "") != "workflow"
+    ):
+        condition_class = str(getattr(args, "condition_class", "") or "")
+        raise WorkflowError(
+            f"{condition_class or 'missing'} conditions are not workflow Incidents; "
+            "keep the source Issue blocked with waiting_on="
+            f"{condition_class or 'runtime|environment|platform'}"
+        )
     cli, workspace, _, _ = context(args, root)
     command = [
         sys.executable,
@@ -349,6 +359,8 @@ def command_incidents(args: argparse.Namespace, root: Path) -> int:
                 "report",
                 "--source-issue",
                 args.source_issue,
+                "--condition-class",
+                args.condition_class,
                 "--rule-id",
                 args.rule_id,
                 "--severity",
@@ -394,6 +406,20 @@ def command_incidents(args: argparse.Namespace, root: Path) -> int:
                 args.requirement,
             ]
         )
+    elif args.command == "retract-incident":
+        command.extend(
+            [
+                "retract",
+                "--incident",
+                args.incident,
+                "--reason",
+                args.reason,
+            ]
+        )
+        if args.evidence:
+            command.extend(["--evidence", args.evidence])
+        if args.actor_id:
+            command.extend(["--actor-id", args.actor_id])
     else:
         command.extend(
             [
@@ -483,6 +509,11 @@ def parser() -> argparse.ArgumentParser:
     report = subparsers.add_parser("report-incident")
     add_context_args(report)
     report.add_argument("--source-issue", required=True)
+    report.add_argument(
+        "--condition-class",
+        choices=["workflow", "runtime", "environment", "platform"],
+        required=True,
+    )
     report.add_argument("--rule-id", default="WF-SELF-REPORT-001")
     report.add_argument("--severity", choices=["low", "medium", "high", "urgent"], default="medium")
     report.add_argument("--summary", required=True)
@@ -508,6 +539,22 @@ def parser() -> argparse.ArgumentParser:
     link.add_argument("--incident", required=True)
     link.add_argument("--requirement", required=True)
     link.set_defaults(func=command_incidents)
+
+    retract = subparsers.add_parser("retract-incident")
+    add_context_args(retract)
+    retract.add_argument("--incident", required=True)
+    retract.add_argument(
+        "--reason",
+        choices=[
+            "misclassified_non_workflow_runtime_condition",
+            "misclassified_non_workflow_environment_condition",
+            "misclassified_non_workflow_platform_condition",
+        ],
+        required=True,
+    )
+    retract.add_argument("--evidence")
+    retract.add_argument("--actor-id")
+    retract.set_defaults(func=command_incidents)
 
     close = subparsers.add_parser("close-incident")
     add_context_args(close)

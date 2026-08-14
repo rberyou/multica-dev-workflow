@@ -546,7 +546,7 @@ def validate_repository(root: Path, deployment_profile: str) -> tuple[dict[str, 
     if not isinstance(incidents, dict):
         errors.append("incidents is required for schema_version 3")
     else:
-        for field in ["project", "skill", "fix_execution_mode", "reporter_agents"]:
+        for field in ["project", "skill", "scope", "fix_execution_mode", "reporter_agents"]:
             if field not in incidents:
                 errors.append(f"incidents.{field} is required")
         if incidents.get("project") not in project_key_set:
@@ -555,6 +555,8 @@ def validate_repository(root: Path, deployment_profile: str) -> tuple[dict[str, 
             errors.append("incidents.skill must reference a managed skill")
         if incidents.get("fix_execution_mode") != "external":
             errors.append("incidents.fix_execution_mode must be external")
+        if incidents.get("scope") != "workflow_only":
+            errors.append("incidents.scope must be workflow_only")
         unknown_reporters = set(incidents.get("reporter_agents") or []) - set(agent_keys)
         if unknown_reporters:
             errors.append(f"incidents.reporter_agents reference unknown agents: {sorted(unknown_reporters)}")

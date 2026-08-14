@@ -18,7 +18,9 @@ branch_only 和 lightweight 在 acquire 前必须运行 Delivery Policy 的 `lea
 
 进入本地或 PR Review 前记录 base_commit_sha 和 reviewed_commit_sha。Task PR 启用时还记录 pr_head_sha、PR 和 CI；未启用时直接审查两个不可变 SHA 的 Git diff。任务合并后记录 merge_method 和 merged_commit_sha。集成验证同时记录仓库 default_branch/default_base_sha、Plan 指定的 target_branch/target_base_sha 和需求 reviewed_commit_sha；target_branch 可以不是默认分支。用户仍只需在顶层 Requirement 评论 `APPROVE REQUIREMENT vN`。
 
-发现工作流规则冲突、门禁失效、平台能力与指令假设不一致、必需角色、Runtime、Skill 或 metadata 缺失、重复或孤立 issue、错误状态流转时，先判断能否在当前任务内立即、安全、完整地修复。只有问题需要跨任务保留、可能复发、需要其他负责人或人工决定、阻塞正确性，或需要部署后验证时，才使用 Incident Skill 的直接命令 `report` 创建或复用持久 Incident。普通代码缺陷、需求澄清和当前任务内已经修复的问题不创建 Incident。
+只有工作流自身问题才允许创建 Incident：工作流规则或协议冲突、状态机或 metadata 完整性错误、审批或 Review 门禁失效、工作流源码或部署漂移、受管理 Agent、Skill 或工作流配置缺失。先判断能否在当前任务内立即、安全、完整地修复；只有工作流问题还需要跨任务保留、可能复发、需要其他负责人或人工决定、阻塞正确性，或需要部署后验证时，才使用 Incident Skill 的直接命令 `report --condition-class workflow` 创建或复用持久 Incident。普通代码缺陷、需求澄清和当前任务内已经修复的问题不创建 Incident。
+
+OS、Codex 或其他模型 Runtime、Multica daemon、网络、Shell、sandbox、外部工具和主机环境故障不是工作流 Incident，不得执行 `report`，也不得创建 external `incident_fix_requirement`。只在原 source Issue 上 fail-closed：status=blocked，waiting_on 使用 runtime、environment 或 platform 等明确分类，记录精简脱敏证据；修复并完成烟测后原位恢复，不替换任务、不迁移 lease。已误分类且没有 fix Requirement 的记录，才可用 `retract` 行政撤回；它必须保留审计、只清除该 Incident 仍拥有的关系，并让原 Issue 继续等待真实的非工作流条件。
 
 只有继续执行会危及正确性、审批完整性、安全、隐私或 Git 历史时，才使用 `--block-source`。`report` 默认只创建或复用 Incident。需要跨任务修复时，用 `create-fix-requirement --project <external-project>` 显式创建 external `incident_fix_requirement`；它不分配给本开发 Squad，也不进入普通 Plan/实现/审查/最终批准树。`link-fix` 仅用于恢复这种 external 关联或兼容已有普通 Requirement。修复部署并验证后，用直接命令 `close` 记录模式化证据。不存在 Maintenance Case 或专用维护角色。不得把凭据、Cookie、私钥、Authorization header 或原始环境变量写入 Incident。
 

@@ -7,7 +7,8 @@ Protocol v4 deliberately keeps the system small:
 - seven ordinary development Agents, including independent Plan and Code Reviewers;
 - no Observer, maintenance-specific Agent, scheduled scan, or background maintenance loop;
 - no secure execution environment; Git branch/worktree isolation is a configurable delivery policy rather than a security boundary;
-- event-driven workflow Incidents created only when a discovered problem must survive the current task;
+- event-driven Incidents created only for durable problems owned by the workflow itself;
+- Runtime, daemon, OS, network, Shell, sandbox, external-tool, and host-environment failures remain fail-closed on their original Issue without an Incident or fix Requirement;
 - Incident fixes tracked by external `incident_fix_requirement` records and executed outside this development Squad, with legacy ordinary Requirement links still supported;
 - workspace deployment from either a reviewed clean Git checkout or a verified formal Release Bundle;
 - approved workspace deployment also publishes every `local`-target Skill as a machine-global physical copy under `~/.agents/skills`;
@@ -83,12 +84,13 @@ Use `--deployment-profile codex-only --rebind-runtimes` only for an intentional 
 Every development Agent receives `multica-workflow-incidents`. It is invoked at these event points:
 
 1. immediately after a managed workflow Issue is created, to bind protocol metadata;
-2. when an Agent or the host discovers a workflow defect that cannot be safely resolved inside the current task and needs durable tracking;
+2. when an Agent or the host classifies a workflow-owned defect that cannot be safely resolved inside the current task and reports it with `condition_class=workflow`;
 3. when an external Project and optional external owner are known, to explicitly and idempotently create an `incident_fix_requirement` outside the development Squad;
 4. when recovering or linking either the external record or a previously existing legacy ordinary Requirement;
-5. after the fix is deployed and verified, to record failed verification or close the Incident with mode-specific immutable evidence.
+5. when a no-fix Incident was misclassified from a Runtime, environment, or platform condition, to retract it administratively while keeping the source blocked in place;
+6. after the fix is deployed and verified, to record failed verification or close the Incident with mode-specific immutable evidence.
 
-`report` never creates a fix record automatically. New external fix records remain in `backlog`, have no development-tree root metadata, and do not enter Plan, implementation, Code Review, integration, or final Requirement approval.
+`report` rejects missing or non-workflow condition classes before any Multica write and never creates a fix record automatically. New external fix records remain in `backlog`, have no development-tree root metadata, and do not enter Plan, implementation, Code Review, integration, or final Requirement approval. Non-workflow failures use `status=blocked`, a precise `waiting_on=runtime|environment|platform`, and concise redacted source evidence; after repair and smoke testing, the same Issue resumes without task replacement or lease migration.
 
 There is no polling or low-frequency fallback scan. See [docs/incident-runbook.md](docs/incident-runbook.md).
 

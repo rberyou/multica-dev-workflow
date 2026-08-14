@@ -61,7 +61,16 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(set(skill["attach_to"]), reporters)
         self.assertIn("workspace", skill["targets"])
         self.assertEqual(project["lead"], "leader")
+        self.assertEqual(incidents["scope"], "workflow_only")
         self.assertEqual(incidents["fix_execution_mode"], "external")
+
+    def test_manifest_schema_rejects_a_non_workflow_incident_scope(self):
+        changed = json.loads(json.dumps(self.manifest))
+        changed["incidents"]["scope"] = "platform_and_workflow"
+        errors = list(Draft202012Validator(self.schema).iter_errors(changed))
+        self.assertTrue(
+            any(list(error.path) == ["incidents", "scope"] for error in errors)
+        )
 
     def test_delivery_policy_skill_is_attached_to_every_squad_agent(self):
         squad_agents = {item["agent"] for item in self.manifest["squad"]["agent_members"]}
@@ -110,6 +119,7 @@ class ManifestTests(unittest.TestCase):
                 "report-incident",
                 "create-incident-fix-requirement",
                 "link-incident-fix",
+                "retract-incident",
                 "close-incident",
             },
         )
@@ -215,6 +225,84 @@ class ManifestTests(unittest.TestCase):
                 "independent_remediation",
             ]:
                 self.assertIn(expected, command)
+
+    def test_incident_wrappers_forward_scope_and_administrative_retraction(self):
+        root = ROOT
+        context_value = (
+            argparse.Namespace(binary="multica", profile=None),
+            {"id": "workspace-test"},
+            self.manifest,
+            {},
+        )
+        with mock.patch.object(
+            workflow_cli, "context", return_value=context_value
+        ), mock.patch.object(workflow_cli, "run_process") as run_process:
+            run_process.return_value = argparse.Namespace(
+                returncode=0, stdout="", stderr=""
+            )
+            report = workflow_cli.parser().parse_args(
+                [
+                    "report-incident",
+                    "--source-issue",
+                    "REQ-1",
+                    "--condition-class",
+                    "workflow",
+                    "--summary",
+                    "summary",
+                    "--expected",
+                    "expected",
+                    "--actual",
+                    "actual",
+                ]
+            )
+            workflow_cli.command_incidents(report, root)
+            command = run_process.call_args.args[0]
+            self.assertIn("--condition-class", command)
+            self.assertIn("workflow", command)
+
+            retract = workflow_cli.parser().parse_args(
+                [
+                    "retract-incident",
+                    "--incident",
+                    "INC-1",
+                    "--reason",
+                    "misclassified_non_workflow_runtime_condition",
+                    "--evidence",
+                    "source remains blocked on Runtime",
+                ]
+            )
+            workflow_cli.command_incidents(retract, root)
+            command = run_process.call_args.args[0]
+            for expected in [
+                "retract",
+                "misclassified_non_workflow_runtime_condition",
+                "source remains blocked on Runtime",
+            ]:
+                self.assertIn(expected, command)
+
+    def test_host_wrapper_rejects_non_workflow_before_context_resolution(self):
+        args = workflow_cli.parser().parse_args(
+            [
+                "report-incident",
+                "--source-issue",
+                "REQ-1",
+                "--condition-class",
+                "runtime",
+                "--summary",
+                "summary",
+                "--expected",
+                "expected",
+                "--actual",
+                "actual",
+            ]
+        )
+        with mock.patch.object(workflow_cli, "context") as context, mock.patch.object(
+            workflow_cli, "run_process"
+        ) as run_process:
+            with self.assertRaisesRegex(workflow_cli.WorkflowError, "not workflow Incidents"):
+                workflow_cli.command_incidents(args, ROOT)
+        context.assert_not_called()
+        run_process.assert_not_called()
 
     def test_default_runtime_map_path_is_scoped_by_workflow_and_workspace(self):
         args = argparse.Namespace(runtime_map=None)

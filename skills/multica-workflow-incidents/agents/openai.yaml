@@ -1,4 +1,4 @@
 interface:
   display_name: "Multica Workflow Incidents"
-  short_description: "Bind workflow Issues and manage external Incident fixes"
-  default_prompt: "Use $multica-workflow-incidents to bind protocol v4 workflow Issues, report a durable Incident, or create, link, and verify its external fix Requirement."
+  short_description: "Bind Issues and manage workflow-only Incidents safely"
+  default_prompt: "Use $multica-workflow-incidents to bind protocol-v4 Issues, report only workflow-owned defects, retract misclassified Runtime or environment records, and manage verified external fixes."

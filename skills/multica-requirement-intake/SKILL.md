@@ -4,7 +4,7 @@ description: Clarify, confirm, create, submit, and continuously follow top-level
 metadata:
   managed_by: multica-dev-workflow
   workflow_id: development-delivery
-  version: 2.0.0-dev.7
+  version: 2.0.0-dev.8
 ---
 
 # Multica Requirement Intake

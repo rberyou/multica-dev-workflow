@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 2.0.0-dev.8
+
+- Restrict workflow Incidents and external Incident fix Requirements to workflow-owned rule, state, metadata, gate, source/deployment, and managed-configuration defects.
+- Keep Runtime, daemon, OS, network, Shell, sandbox, external-tool, and host-environment failures fail-closed on their original Issue without task replacement or lease migration.
+- Add explicit workflow condition classification that rejects non-workflow Incident reports before any Multica read or write.
+- Add idempotent administrative retraction for no-fix misclassifications, preserving audit while clearing only owned relationships and leaving the source blocked on its real condition.
+
 ## 2.0.0-dev.7
 
 - Simplify new Plan policy freezes to `plan_revision`, compact `v3.sha256:` policy digest, and `target_branch` while keeping legacy schema-v1/v2 snapshot verification.

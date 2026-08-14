@@ -77,10 +77,11 @@
     "incidents": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["project", "skill", "fix_execution_mode", "reporter_agents"],
+      "required": ["project", "skill", "scope", "fix_execution_mode", "reporter_agents"],
       "properties": {
         "project": {"$ref": "#/$defs/key"},
         "skill": {"$ref": "#/$defs/key"},
+        "scope": {"const": "workflow_only"},
         "fix_execution_mode": {"const": "external"},
         "reporter_agents": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/key"}}
       }

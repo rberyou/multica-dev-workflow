@@ -100,15 +100,16 @@ Repository wrappers are event-driven human-host commands; nothing invokes them o
 
 ```text
 python scripts/workflow.py bind-workflow-issue --workspace <workspace> --issue <issue> --object-type <type> --created-by-role <role>
-python scripts/workflow.py report-incident --workspace <workspace> --source-issue <issue> --rule-id <stable-rule-id> --severity <low|medium|high|urgent> --summary <text> --expected <text> --actual <text> --evidence <redacted-evidence>
+python scripts/workflow.py report-incident --workspace <workspace> --source-issue <issue> --condition-class workflow --rule-id <stable-rule-id> --severity <low|medium|high|urgent> --summary <text> --expected <text> --actual <text> --evidence <redacted-evidence>
 python scripts/workflow.py create-incident-fix-requirement --workspace <workspace> --incident <incident> --project <external-project> [--assignee-id <external-owner>]
 python scripts/workflow.py link-incident-fix --workspace <workspace> --incident <incident> --requirement <requirement>
+python scripts/workflow.py retract-incident --workspace <workspace> --incident <incident> --reason misclassified_non_workflow_runtime_condition --evidence <redacted-classification-evidence>
 python scripts/workflow.py close-incident --workspace <workspace> --incident <incident> --result passed --evidence <text> --fix-reference-type <type> --fix-reference <immutable-reference> --deployment-verification-reference-type <type> --deployment-verification-reference <immutable-reference>
 python scripts/workflow.py close-incident --workspace <workspace> --incident <legacy-incident> --result passed --evidence <text> --source-commit <40-hex> --deployment-plan-digest <64-hex>
 python scripts/workflow.py close-incident --workspace <workspace> --incident <legacy-incident> --result passed --closure-mode independent_remediation --evidence <text> --fix-reference-type <type> --fix-reference <immutable-reference> --deployment-verification-reference-type <type> --deployment-verification-reference <immutable-reference>
 ```
 
-The create wrapper requires an explicitly resolved external Project and never defaults to the managed Incident Project or development Squad. `report-incident` remains independent and does not create a fix Requirement. `independent_remediation` is a narrow closure only for an unchanged linked legacy ordinary Requirement whose status is `cancelled` while the Incident remains `in_fix`; it does not replace the fix or traverse descendants.
+The create wrapper requires an explicitly resolved external Project and never defaults to the managed Incident Project or development Squad. `report-incident` requires the explicit `workflow` class, rejects Runtime/environment/platform classes before any write, and remains independent from fix creation. `retract-incident` is limited to a no-fix misclassification, preserves the cancelled audit record, and clears only relationships still owned by it while leaving the original source blocked on its non-workflow condition. `independent_remediation` remains a narrow closure only for an unchanged linked legacy ordinary Requirement whose status is `cancelled` while the Incident remains `in_fix`; it does not replace the fix or traverse descendants.
 
 Managed Agents use the attached Incident Skill's direct commands because product repositories do not contain this workflow repository's `scripts/workflow.py`.
 

@@ -25,8 +25,16 @@ LEADER_AGENT_KEY = "agent.leader"
 DEVELOPMENT_SQUAD_KEY = "squad.development-delivery"
 EXTERNAL_FIX_OBJECT_TYPE = "incident_fix_requirement"
 EXTERNAL_FIX_MODE = "external"
+WORKFLOW_CONDITION_CLASS = "workflow"
+NON_WORKFLOW_CONDITION_CLASSES = {"runtime", "environment", "platform"}
 STANDARD_CLOSURE_MODE = "standard"
 INDEPENDENT_REMEDIATION_CLOSURE_MODE = "independent_remediation"
+ADMINISTRATIVE_RETRACTION_CLOSURE_MODE = "administrative_retraction"
+RETRACTION_REASON_WAITING_ON = {
+    "misclassified_non_workflow_runtime_condition": "runtime",
+    "misclassified_non_workflow_environment_condition": "environment",
+    "misclassified_non_workflow_platform_condition": "platform",
+}
 ACTIVE_STATUSES = {"backlog", "todo", "in_progress", "in_review", "blocked"}
 SEVERITIES = {"low", "medium", "high", "urgent"}
 SEVERITY_RANK = {"low": 0, "medium": 1, "high": 2, "urgent": 3}
@@ -692,7 +700,22 @@ def parse_evidence_log(value: Any) -> list[dict[str, Any]]:
     return []
 
 
+def require_workflow_condition_class(args: argparse.Namespace) -> None:
+    condition_class = str(getattr(args, "condition_class", "") or "")
+    if condition_class == WORKFLOW_CONDITION_CLASS:
+        return
+    if condition_class in NON_WORKFLOW_CONDITION_CLASSES:
+        raise IncidentError(
+            f"{condition_class} conditions are not workflow Incidents; "
+            f"keep the source Issue blocked with waiting_on={condition_class}"
+        )
+    raise IncidentError(
+        "condition_class=workflow is required to report a workflow Incident"
+    )
+
+
 def report_incident(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
+    require_workflow_condition_class(args)
     source = cli.json(["issue", "get", args.source_issue, "--output", "json"])
     if not isinstance(source, dict):
         raise IncidentError(f"source Issue is unreadable: {args.source_issue}")
@@ -720,6 +743,20 @@ def report_incident(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
     project, leader = resolve_control_plane(cli)
     existing = find_incidents(cli, str(project["id"]), dedupe_key)
     active = [item for item in existing if str(item.get("status") or "") in ACTIVE_STATUSES]
+    for item in active:
+        item_id = issue_ref(item)
+        item_metadata = metadata_map(cli, item_id) if item_id else {}
+        if (
+            item_metadata.get("incident_status") == "closed"
+            or item_metadata.get("incident_closure_mode")
+            == ADMINISTRATIVE_RETRACTION_CLOSURE_MODE
+            or item_metadata.get("incident_result") == "not_applicable"
+            or item_metadata.get("last_verification_result") == "passed"
+        ):
+            raise IncidentError(
+                "an active Incident has incomplete closure or retraction state; "
+                "finish that transition before reporting again"
+            )
     if len(active) > 1:
         raise IncidentError("multiple active Incidents share the same dedupe key")
     blocked_by = (
@@ -838,6 +875,7 @@ def report_incident(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
         "protocol_revision": PROTOCOL_REVISION,
         "incident_dedupe_key": dedupe_key,
         "incident_rule_id": args.rule_id,
+        "incident_condition_class": WORKFLOW_CONDITION_CLASS,
         "incident_status": current_status,
         "incident_severity": effective_severity,
         "source_issue_id": str(metadata.get("source_issue_id") or source_id),
@@ -930,6 +968,18 @@ def parse_json_list(value: Any) -> list[Any]:
             return []
         return parsed if isinstance(parsed, list) else []
     return []
+
+
+def is_explicit_empty_json_list(value: Any) -> bool:
+    if isinstance(value, list):
+        return not value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return False
+        return isinstance(parsed, list) and not parsed
+    return False
 
 
 def require_non_conflicting_metadata(
@@ -1145,6 +1195,13 @@ def create_fix_requirement(cli: CLI, args: argparse.Namespace) -> dict[str, Any]
     incident_id = issue_ref(incident) or args.incident
     if incident_metadata.get("incident_status") == "closed":
         raise IncidentError("a closed Incident cannot create a fix Requirement")
+    condition_class = str(incident_metadata.get("incident_condition_class") or "")
+    if condition_class != WORKFLOW_CONDITION_CLASS:
+        raise IncidentError(
+            "Incident must be explicitly classified as workflow before creating a fix; "
+            "re-report a legitimate legacy Incident or administratively retract a "
+            "non-workflow record"
+        )
     project = require_safe_external_target(cli, args.project, args.assignee_id)
     project_id = str(project.get("id") or "")
     existing_fix = str(incident_metadata.get("fix_requirement_id") or "")
@@ -1225,10 +1282,40 @@ def link_fix(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
     incident_id = issue_ref(incident) or args.incident
     if incident_metadata.get("incident_status") == "closed":
         raise IncidentError("a closed Incident cannot be linked to a new fix")
+    condition_class = str(incident_metadata.get("incident_condition_class") or "")
+    if condition_class != WORKFLOW_CONDITION_CLASS:
+        raise IncidentError(
+            "Incident must be explicitly classified as workflow before linking a fix; "
+            "re-report a legitimate legacy Incident or administratively retract a "
+            "non-workflow record"
+        )
     requirement = cli.json(["issue", "get", args.requirement, "--output", "json"])
     if not isinstance(requirement, dict):
         raise IncidentError(f"Requirement is unreadable: {args.requirement}")
     requirement_id = issue_ref(requirement) or args.requirement
+    incident_sources = {
+        str(incident_metadata.get("source_issue_id") or ""),
+        str(incident_metadata.get("source_requirement_id") or ""),
+        *(
+            str(item)
+            for item in parse_json_list(
+                incident_metadata.get("affected_source_issue_ids")
+            )
+            if item
+        ),
+        *(
+            str(item)
+            for item in parse_json_list(
+                incident_metadata.get("blocked_source_issue_ids")
+            )
+            if item
+        ),
+    }
+    incident_sources.discard("")
+    if requirement_id in incident_sources:
+        raise IncidentError(
+            "an Incident source or affected Issue cannot also be its fix Requirement"
+        )
     requirement_metadata = metadata_map(cli, requirement_id)
     requirement_marker = parse_marker(str(requirement.get("description") or ""))
     if (
@@ -1296,6 +1383,216 @@ def require_identity_reference(
     return clean
 
 
+def complete_administrative_retraction(
+    incident: dict[str, Any], metadata: dict[str, Any], reason: str
+) -> bool:
+    waiting_on = RETRACTION_REASON_WAITING_ON[reason]
+    condition_class = str(metadata.get("incident_condition_class") or "")
+    return bool(
+        str(incident.get("status") or "") == "cancelled"
+        and metadata.get("incident_status") == "closed"
+        and metadata.get("incident_result") == "not_applicable"
+        and metadata.get("incident_closure_mode")
+        == ADMINISTRATIVE_RETRACTION_CLOSURE_MODE
+        and metadata.get("incident_retraction_reason") == reason
+        and not str(metadata.get("fix_requirement_id") or "")
+        and is_explicit_empty_json_list(metadata.get("blocked_source_issue_ids"))
+        and str(metadata.get("waiting_on") or "") == ""
+        and condition_class in {"", waiting_on}
+    )
+
+
+def reverse_fix_candidates(
+    cli: CLI, incident_id: str, source_ids: list[str]
+) -> list[str]:
+    result = []
+    for item in list_issues(
+        cli, None, [f"workflow_incident_id={incident_id}"]
+    ):
+        candidate_id = issue_ref(item)
+        if not candidate_id or candidate_id in source_ids:
+            continue
+        candidate_metadata = metadata_map(cli, candidate_id)
+        if candidate_metadata.get("workflow_object_type") in {
+            EXTERNAL_FIX_OBJECT_TYPE,
+            "requirement",
+        }:
+            result.append(candidate_id)
+    return result
+
+
+def retract_incident(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
+    incident, metadata = require_incident(cli, args.incident)
+    incident_id = issue_ref(incident) or args.incident
+    reason = str(getattr(args, "reason", "") or "")
+    if reason not in RETRACTION_REASON_WAITING_ON:
+        raise IncidentError("unsupported administrative retraction reason")
+    if str(metadata.get("fix_requirement_id") or ""):
+        raise IncidentError(
+            "an Incident with a fix Requirement cannot be administratively retracted"
+        )
+    existing_mode = str(metadata.get("incident_closure_mode") or "")
+    if existing_mode not in {"", ADMINISTRATIVE_RETRACTION_CLOSURE_MODE}:
+        raise IncidentError("Incident already uses a different closure mode")
+    existing_result = str(metadata.get("incident_result") or "")
+    if existing_result not in {"", "not_applicable"}:
+        raise IncidentError("Incident already has a conflicting result")
+    existing_reason = str(metadata.get("incident_retraction_reason") or "")
+    if existing_reason not in {"", reason}:
+        raise IncidentError("Incident already has a different retraction reason")
+    source_ids = []
+    for value in [
+        *parse_json_list(metadata.get("blocked_source_issue_ids")),
+        metadata.get("source_issue_id"),
+        *parse_json_list(metadata.get("affected_source_issue_ids")),
+    ]:
+        source_id = str(value or "")
+        if source_id and source_id not in source_ids:
+            source_ids.append(source_id)
+
+    external_candidates = find_external_fix_candidates(cli, incident_id)
+    reverse_candidates = reverse_fix_candidates(cli, incident_id, source_ids)
+    if external_candidates or reverse_candidates:
+        candidate_ids = sorted(
+            {
+                *(issue_ref(item) for item in external_candidates if issue_ref(item)),
+                *reverse_candidates,
+            }
+        )
+        raise IncidentError(
+            "Incident has a created or partially bound fix Requirement: "
+            + ", ".join(candidate_ids)
+        )
+
+    if complete_administrative_retraction(incident, metadata, reason):
+        return {
+            "action": "already_retracted",
+            "incident_id": incident_id,
+            "closed": True,
+            "result": "not_applicable",
+        }
+    if metadata.get("incident_status") == "closed" and not existing_mode:
+        raise IncidentError("a normally closed Incident cannot be retracted")
+
+    evidence = redacted_text(getattr(args, "evidence", "") or "", 2000)
+    if not evidence.strip():
+        raise IncidentError("administrative retraction evidence must be non-empty")
+
+    observed_sources = []
+    for source_id in source_ids:
+        source = cli.json(["issue", "get", source_id, "--output", "json"])
+        if not isinstance(source, dict):
+            raise IncidentError(f"source Issue is unreadable: {source_id}")
+        source_metadata = metadata_map(cli, source_id)
+        owns_block = (
+            str(source_metadata.get("workflow_blocked_by_incident_id") or "")
+            == incident_id
+        )
+        if owns_block and str(source.get("status") or "") != "blocked":
+            raise IncidentError(
+                f"Incident-owned source block has a conflicting status: {source_id}"
+            )
+        observed_sources.append((source_id, source_metadata, owns_block))
+
+    waiting_on = RETRACTION_REASON_WAITING_ON[reason]
+    sources_reclassified = 0
+    source_links_cleared = 0
+    for source_id, source_metadata, owns_block in observed_sources:
+        updates = {}
+        if owns_block:
+            updates.update(
+                {
+                    "waiting_on": waiting_on,
+                    "blocked_reason": (
+                        f"non-workflow {waiting_on} condition; "
+                        "repair and smoke-test this Issue in place"
+                    ),
+                    "workflow_blocked_previous_status": "",
+                    "workflow_blocked_by_incident_id": "",
+                }
+            )
+            sources_reclassified += 1
+        if str(source_metadata.get("workflow_incident_id") or "") == incident_id:
+            updates.update(
+                {
+                    "workflow_incident_last_evidence_at": "",
+                    "workflow_incident_id": "",
+                }
+            )
+            source_links_cleared += 1
+        if updates:
+            set_metadata_map(cli, source_id, updates)
+
+    first_retraction = not str(metadata.get("incident_retracted_at") or "")
+    values = {
+        "incident_closure_mode": ADMINISTRATIVE_RETRACTION_CLOSURE_MODE,
+        "incident_retraction_reason": reason,
+        "incident_result": "not_applicable",
+        "incident_condition_class": waiting_on,
+        "incident_retraction_evidence": str(
+            metadata.get("incident_retraction_evidence") or evidence
+        ),
+        "incident_retracted_at": str(metadata.get("incident_retracted_at") or utc_now()),
+        "incident_retracted_by": str(
+            metadata.get("incident_retracted_by")
+            or getattr(args, "actor_id", None)
+            or os.environ.get("MULTICA_AGENT_ID", "human_host")
+        ),
+        "blocked_source_issue_ids": "[]",
+        "waiting_on": "",
+        "incident_status": "closed",
+    }
+    set_metadata_map(cli, incident_id, values)
+    cli.json(["issue", "update", incident_id, "--status", "cancelled", "--output", "json"])
+    if first_retraction:
+        add_comment(
+            cli,
+            incident_id,
+            "Administrative retraction: this record was a misclassified "
+            f"non-workflow {waiting_on} condition.\n\n{evidence}",
+        )
+    return {
+        "action": "retracted",
+        "incident_id": incident_id,
+        "closed": True,
+        "result": "not_applicable",
+        "sources_reclassified": sources_reclassified,
+        "source_links_cleared": source_links_cleared,
+    }
+
+
+def complete_verified_closure(
+    metadata: dict[str, Any], closure_mode: str
+) -> bool:
+    if (
+        metadata.get("last_verification_result") != "passed"
+        or not str(metadata.get("last_verification_evidence") or "").strip()
+        or not str(metadata.get("verified_at") or "")
+        or not str(metadata.get("verified_by") or "")
+    ):
+        return False
+    typed_reference_mode = (
+        closure_mode == INDEPENDENT_REMEDIATION_CLOSURE_MODE
+        or metadata.get("fix_execution_mode") == EXTERNAL_FIX_MODE
+    )
+    if typed_reference_mode:
+        return all(
+            str(metadata.get(key) or "")
+            for key in [
+                "immutable_fix_reference_type",
+                "immutable_fix_reference",
+                "deployment_verification_reference_type",
+                "deployment_verification_reference",
+            ]
+        )
+    return bool(
+        re.fullmatch(r"[0-9a-fA-F]{40}", str(metadata.get("fixed_source_commit") or ""))
+        and re.fullmatch(
+            r"[0-9a-fA-F]{64}", str(metadata.get("deployment_plan_digest") or "")
+        )
+    )
+
+
 def close_incident(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
     incident, metadata = require_incident(cli, args.incident)
     incident_id = issue_ref(incident) or args.incident
@@ -1306,7 +1603,29 @@ def close_incident(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
         )
         if requested_closure_mode != recorded_closure_mode:
             raise IncidentError("closed Incident uses a different closure mode")
-        return {"incident_id": incident_id, "closed": True, "result": "already_closed"}
+        if complete_verified_closure(metadata, recorded_closure_mode):
+            converged = str(incident.get("status") or "") != "done"
+            if converged:
+                cli.json(
+                    [
+                        "issue",
+                        "update",
+                        incident_id,
+                        "--status",
+                        "done",
+                        "--output",
+                        "json",
+                    ]
+                )
+            return {
+                "incident_id": incident_id,
+                "closed": True,
+                "result": "converged_closed" if converged else "already_closed",
+            }
+        if args.result != "passed":
+            raise IncidentError(
+                "an incomplete closed Incident must be retried with passed verification"
+            )
     if not metadata.get("fix_requirement_id"):
         raise IncidentError("Incident must link a fix Requirement before verification")
     fix_requirement_id = str(metadata["fix_requirement_id"])
@@ -1445,15 +1764,14 @@ def close_incident(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
                 cli,
                 source_id,
                 {
-                    "workflow_blocked_by_incident_id": "",
-                    "workflow_blocked_previous_status": "",
                     "waiting_on": "",
                     "blocked_reason": "",
+                    "workflow_blocked_previous_status": "",
+                    "workflow_blocked_by_incident_id": "",
                 },
             )
             restored_count += 1
     values = {
-        "incident_status": "closed",
         "waiting_on": "",
         "last_verification_result": "passed",
         "last_verification_evidence": evidence,
@@ -1463,6 +1781,7 @@ def close_incident(cli: CLI, args: argparse.Namespace) -> dict[str, Any]:
     }
     if mode == EXTERNAL_FIX_MODE:
         values["fix_execution_mode"] = mode
+    values["incident_status"] = "closed"
     set_metadata_map(cli, incident_id, values)
     cli.json(["issue", "update", incident_id, "--status", "done", "--output", "json"])
     add_comment(cli, incident_id, f"Verification passed.\n\n{evidence}")
@@ -1498,6 +1817,11 @@ def parser() -> argparse.ArgumentParser:
 
     report = sub.add_parser("report")
     report.add_argument("--source-issue", required=True)
+    report.add_argument(
+        "--condition-class",
+        choices=[WORKFLOW_CONDITION_CLASS, *sorted(NON_WORKFLOW_CONDITION_CLASSES)],
+        required=True,
+    )
     report.add_argument("--rule-id", default="WF-SELF-REPORT-001")
     report.add_argument("--severity", choices=sorted(SEVERITIES), default="medium")
     report.add_argument("--summary", required=True)
@@ -1522,6 +1846,15 @@ def parser() -> argparse.ArgumentParser:
     link.add_argument("--requirement", required=True)
     link.add_argument("--output", choices=["json"], default="json")
 
+    retract = sub.add_parser("retract")
+    retract.add_argument("--incident", required=True)
+    retract.add_argument(
+        "--reason", choices=sorted(RETRACTION_REASON_WAITING_ON), required=True
+    )
+    retract.add_argument("--evidence")
+    retract.add_argument("--actor-id")
+    retract.add_argument("--output", choices=["json"], default="json")
+
     close = sub.add_parser("close")
     close.add_argument("--incident", required=True)
     close.add_argument("--result", choices=["passed", "failed"], required=True)
@@ -1544,6 +1877,8 @@ def parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = parser().parse_args()
     try:
+        if args.command == "report":
+            require_workflow_condition_class(args)
         cli = build_cli(args)
         if args.command == "bind-workflow-issue":
             result = bind_workflow_issue(cli, args)
@@ -1553,6 +1888,8 @@ def main() -> int:
             result = create_fix_requirement(cli, args)
         elif args.command == "link-fix":
             result = link_fix(cli, args)
+        elif args.command == "retract":
+            result = retract_incident(cli, args)
         else:
             result = close_incident(cli, args)
         print(json.dumps(result, ensure_ascii=False, indent=2))

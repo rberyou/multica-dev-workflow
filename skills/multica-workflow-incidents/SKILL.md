@@ -1,19 +1,19 @@
 ---
 name: multica-workflow-incidents
-description: Bind development workflow Issues to protocol v4, persist workflow Incidents, and create, link, or verify external Incident fix Requirements. Use when a managed development Agent creates a workflow Issue, finds a durable workflow rule conflict or platform mismatch, needs an explicit external incident fix record, or closes either an external or legacy fix after deployment verification.
+description: Bind protocol-v4 development Issues, persist workflow-only Incidents, administratively retract misclassified non-workflow records, and create, link, or verify external Incident fix Requirements. Use when a managed Issue needs protocol metadata, a durable workflow rule or integrity defect is found, an Incident was incorrectly created for a Runtime or environment failure, or an external or legacy fix must be managed.
 metadata:
   managed_by: multica-dev-workflow
   workflow_id: development-delivery
-  version: 2.0.0-dev.7
+  version: 2.0.0-dev.8
 ---
 
 # Multica Workflow Incidents
 
-This Skill is an event-driven workflow support capability. It is not an Observer role and does not run scheduled scans.
+Use this event-driven capability only during real work. Do not create an Observer, scheduled scan, or background patrol.
 
 ## Bind Workflow Issues
 
-Immediately after creating a managed development Issue, bind its protocol metadata:
+Immediately after creating an ordinary managed development Issue, bind its protocol metadata:
 
 ```text
 python <this-skill>/scripts/incidents.py --workspace <workspace> bind-workflow-issue \
@@ -22,78 +22,60 @@ python <this-skill>/scripts/incidents.py --workspace <workspace> bind-workflow-i
   --created-by-role <role>
 ```
 
-The command derives the root Requirement from the parent chain and rejects conflicting existing metadata.
+The command derives the root Requirement and rejects conflicting metadata. Do not bind Incidents or external `incident_fix_requirement` records.
 
-## Report an Incident
+## Classify Before Reporting
 
-Persist an Incident only when the problem must survive the current task: it cannot be resolved immediately, affects correctness or approval integrity, may recur, needs another task or human decision, or requires later deployment verification.
+Report only a defect owned by this workflow: rule or protocol conflict, state-machine or metadata-integrity error, approval or Review gate failure, workflow source/deployment drift, or a missing managed Agent, Skill, or configuration.
+
+Do not report OS, Codex/model Runtime, Multica daemon, network, Shell, sandbox, external-tool, or host-environment failures. Keep the original Issue fail-closed with `status=blocked`, a precise `waiting_on=runtime|environment|platform`, and concise redacted evidence. Repair and smoke-test it in place; do not replace the task or migrate its lease.
+
+## Report a Workflow Incident
+
+Persist a workflow Incident only when it must outlive the current task:
 
 ```text
 python <this-skill>/scripts/incidents.py --workspace <workspace> report \
-  --source-issue <issue-id> \
-  --rule-id <stable-rule-id> \
-  --severity <low|medium|high|urgent> \
-  --summary <summary> \
-  --expected <expected-behavior> \
-  --actual <actual-behavior> \
+  --source-issue <issue-id> --condition-class workflow \
+  --rule-id <stable-rule-id> --severity <low|medium|high|urgent> \
+  --summary <summary> --expected <expected> --actual <actual> \
   --evidence <redacted-evidence>
 ```
 
-Use `--block-source` only when continuing risks correctness, approval integrity, privacy, security, or Git history. The script creates or reuses a deduplicated Incident in the managed workflow Incidents project and assigns it to the development leader.
+The explicit condition class is mandatory and non-workflow classes fail before any write. Use `--block-source` only when continuing risks correctness, approval integrity, privacy, security, or Git history. `report` creates or reuses only the Incident; it never creates a fix Requirement.
 
-## Create or Link the Fix
+## Create or Link a Fix
 
-`report` creates or reuses only an Incident. When a durable fix is needed, create one external fix Requirement in an explicitly selected external Project:
+Create one fix record only in an explicitly selected external Project:
 
 ```text
 python <this-skill>/scripts/incidents.py --workspace <workspace> create-fix-requirement \
-  --incident <incident-id> --project <external-project-id-or-ref> \
-  [--assignee-id <external-owner-id>]
-```
-
-The Project is mandatory. The command rejects the managed Incident Project, other managed workflow Projects, and any assignee in the managed development Squad. Without `--assignee-id`, the new `backlog` object remains unassigned. It is an external `incident_fix_requirement`, not a protocol-v4 development-tree Requirement, and it does not enter Plan, implementation, Review, integration, or final approval.
-
-Use `link-fix` to recover or explicitly associate an external object, or to retain a previously existing ordinary protocol-v4 Requirement link:
-
-```text
+  --incident <incident-id> --project <external-project> [--assignee-id <external-owner>]
 python <this-skill>/scripts/incidents.py --workspace <workspace> link-fix \
   --incident <incident-id> --requirement <requirement-id>
 ```
 
-## Close
+The external record stays outside the managed development Squad and protocol-v4 development tree. `link-fix` also preserves compatibility with an already linked ordinary Requirement.
 
-After the external fix Requirement is `done`, close with redacted evidence, a typed immutable fix reference, and a typed deployment verification reference:
+## Retract a Misclassified Record
 
-```text
-python <this-skill>/scripts/incidents.py --workspace <workspace> close \
-  --incident <incident-id> --result passed --evidence <verification-evidence> \
-  --fix-reference-type <git_commit|artifact_version|other-stable-type> \
-  --fix-reference <immutable-reference> \
-  --deployment-verification-reference-type <stable-type> \
-  --deployment-verification-reference <immutable-reference>
-```
-Legacy ordinary Requirement links keep the existing source commit and deployment Plan digest gate:
+If no fix Requirement exists and the Incident actually describes a non-workflow condition, retract it administratively:
 
 ```text
-python <this-skill>/scripts/incidents.py --workspace <workspace> close \
-  --incident <incident-id> --result passed --evidence <verification-evidence> \
-  --source-commit <commit> --deployment-plan-digest <digest>
-```
-If and only if an already linked legacy ordinary Requirement was explicitly `cancelled`, the Incident is still `in_fix`, and the correction was completed independently, use the narrow closure mode below. It preserves the original `fix_requirement_id` as audit evidence and requires the same typed immutable identity bindings as an external close:
-
-```text
-python <this-skill>/scripts/incidents.py --workspace <workspace> close \
-  --incident <incident-id> --result passed --closure-mode independent_remediation \
-  --evidence <redacted-verification-evidence> \
-  --fix-reference-type <stable-type> --fix-reference <immutable-reference> \
-  --deployment-verification-reference-type <stable-type> \
-  --deployment-verification-reference <immutable-reference>
+python <this-skill>/scripts/incidents.py --workspace <workspace> retract \
+  --incident <incident-id> \
+  --reason <misclassified_non_workflow_runtime_condition|misclassified_non_workflow_environment_condition|misclassified_non_workflow_platform_condition> \
+  --evidence <redacted-classification-evidence>
 ```
 
-This mode is not fix replacement or supersession. It is rejected for active, done, external, or unlinked fixes and never restores anything except source relationships still owned by the Incident.
+Retraction is idempotent, preserves the Incident audit, cancels and closes it as `not_applicable`, clears only source relations still owned by that Incident, and leaves an affected source blocked on the mapped non-workflow condition. It never invents fix or deployment references.
 
-A failed check keeps the Incident open with mode-appropriate `waiting_on`. Never copy credentials, cookies, private keys, authorization headers, or raw environment values into Incident evidence or identity references.
+## Close a Verified Fix
 
-When operating from the workflow repository, the equivalent host wrappers are `workflow.py bind-workflow-issue`, `report-incident`, `create-incident-fix-requirement`, `link-incident-fix`, and `close-incident`. Managed Agents should use this Skill's direct script commands shown above because product repositories do not contain `scripts/workflow.py`.
+Close an external fix only after it is `done`, deployed, and verified, using non-empty redacted evidence plus typed immutable fix and deployment-verification references. Standard legacy ordinary fixes retain the full source-commit and deployment-Plan-digest gate. Use `--closure-mode independent_remediation` only for the documented cancelled legacy-fix exception.
 
-Read [incident-contract.md](references/incident-contract.md) when validating exact metadata, deduplication, blocking, or closure behavior.
+Never persist credentials, cookies, private keys, authorization headers, raw environment values, or mutable identity references.
+
+Repository host wrappers are `workflow.py bind-workflow-issue`, `report-incident`, `create-incident-fix-requirement`, `link-incident-fix`, `retract-incident`, and `close-incident`. Managed Agents use this Skill's direct commands because product repositories do not contain the workflow repository.
+
+Read [incident-contract.md](references/incident-contract.md) when validating metadata, deduplication, blocking, retraction, or closure behavior.

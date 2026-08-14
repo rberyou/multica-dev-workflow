@@ -176,6 +176,9 @@ class DocumentationTests(unittest.TestCase):
             "fix_execution_mode=external",
             "create-fix-requirement",
             "create-incident-fix-requirement",
+            "condition_class=workflow",
+            "administrative_retraction",
+            "misclassified_non_workflow_runtime_condition",
             "legacy",
             "external_fix_owner",
         ]:
@@ -185,8 +188,17 @@ class DocumentationTests(unittest.TestCase):
             path.read_text(encoding="utf-8")
             for path in (ROOT / "instructions").rglob("*.md")
         )
+        propagated = instructions + "\n" + "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (ROOT / "skills").rglob("*.md")
+        )
         self.assertNotIn("Incident 修复必须创建普通 Requirement", instructions)
         self.assertNotIn("Incident 修复进入本小队时就是普通顶层 Requirement", instructions)
+        self.assertIn("report --condition-class workflow", instructions)
+        self.assertIn("waiting_on 使用 runtime、environment 或 platform", instructions)
+        self.assertIn("不创建 Incident 或 fix Requirement", instructions)
+        self.assertNotIn("平台能力与指令假设不一致", propagated)
+        self.assertNotIn("必需角色、Runtime、Skill", propagated)
 
     def test_delivery_policy_docs_match_protocol_contract(self):
         policy_root = ROOT / "skills/multica-delivery-policy"
